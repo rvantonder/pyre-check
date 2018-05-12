@@ -6,8 +6,10 @@
 open Core
 
 open Ast
+open Common
 open Common.Pyre
-open Common.PyreParser
+open External
+open PyreParser
 
 module Scheduler = ServiceScheduler
 module AstSharedMemory = ServiceAstSharedMemory

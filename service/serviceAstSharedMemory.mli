@@ -4,6 +4,7 @@
     LICENSE file in the root directory of this source tree. *)
 
 open Ast
+open Common
 
 
 val get_source: File.Handle.t -> Source.t option

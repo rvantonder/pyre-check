@@ -6,8 +6,10 @@
 open Core
 
 open Ast
+open Common
 open Configuration
 open Expression
+open External
 open Common.Pyre
 open Statement
 

@@ -7,7 +7,9 @@ open Core
 
 open Analysis
 open LanguageServerProtocolTypes
+open Common
 open Common.Pyre
+open External
 
 
 module Range = struct

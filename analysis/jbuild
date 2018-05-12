@@ -16,5 +16,4 @@
      sexplib
      pyre.ast
      pyre.pyreParser
-     pyre.external
-     pyre.annotated))))
+     pyre.external))))

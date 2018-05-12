@@ -6,7 +6,6 @@
    (modules (:standard \ main))
    (libraries (pyre.pyreParser
                pyre.analysis
-               pyre.annotated
                pyre.ast
                pyre.service
                pyre.language_server

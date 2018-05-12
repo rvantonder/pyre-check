@@ -4,7 +4,7 @@
     LICENSE file in the root directory of this source tree. *)
 
 
-module Annotation = AnalysisAnnotation
+(*module Annotation = AnalysisAnnotation*)
 module CallGraph = AnalysisCallGraph
 module Cfg = AnalysisCfg
 module Coverage = AnalysisCoverage
@@ -20,3 +20,5 @@ module Type = AnalysisType
 module TypeCheck = AnalysisTypeCheck
 module TypeOrder = AnalysisTypeOrder
 module Inference = AnalysisInference
+
+module Annotated = Annotated

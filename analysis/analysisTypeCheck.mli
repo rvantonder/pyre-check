@@ -4,7 +4,9 @@
     LICENSE file in the root directory of this source tree. *)
 
 open Ast
+open Common
 open Expression
+open External
 open Statement
 
 module Annotation = AnalysisAnnotation

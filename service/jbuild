@@ -16,4 +16,5 @@
      sexplib
      ppxlib
      pyre.ast
-     pyre.analysis))))
+     pyre.analysis
+     hack_parallel))))

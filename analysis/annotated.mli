@@ -8,7 +8,6 @@ open Statement
 
 module Annotation = AnalysisAnnotation
 module Resolution = AnalysisResolution
-module Type = AnalysisType
 
 module Assign = AnnotatedAssign
 module Callable = AnnotatedCallable
@@ -19,13 +18,14 @@ module Define = AnnotatedDefine
 module Access = AnnotatedAccess
 module Signature = AnnotatedSignature
 
+open AnalysisType
 
 val resolve
   :  resolution: Resolution.t
   -> Expression.t
-  -> Type.t
+  -> AnalysisType.t
 
 val resolve_literal
   :  resolution: Resolution.t
   -> Expression.t
-  -> Type.t
+  -> AnalysisType.t

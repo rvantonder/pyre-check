@@ -6,8 +6,10 @@
 open Core
 
 open Analysis
-open Environment
+open Common
 open Common.Pyre
+open Environment
+open External
 
 module Scheduler = ServiceScheduler
 module AstSharedMemory = ServiceAstSharedMemory

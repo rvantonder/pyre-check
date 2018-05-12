@@ -6,9 +6,11 @@
 open Core
 
 open Ast
+open Common
+open Common.Pyre
 open Configuration
 open Expression
-open Common.Pyre
+open External
 open Statement
 
 module Annotation = AnalysisAnnotation

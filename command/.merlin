@@ -1,5 +1,4 @@
 B ../_build/default/analysis/.analysis.objs
-B ../_build/default/annotated/.annotated.objs
 B ../_build/default/ast/.ast.objs
 B ../_build/default/command/.pyre_command.objs
 B ../_build/default/common/.common.objs
@@ -62,7 +61,6 @@ FLG -open Pyre_command -w -40
 FLG -ppx '/home/vagrant/pyre-check/_build/default/.ppx/ppx_compare+ppx_deriving.eq+ppx_deriving.show+ppx_hash+ppx_sexp_conv+ppx_deriving_yojson/ppx.exe --as-ppx --cookie '\''library-name="pyre_command"'\'''
 S .
 S ../analysis
-S ../annotated
 S ../ast
 S ../common
 S ../external

@@ -1,5 +1,4 @@
 B ../_build/default/analysis/.analysis.objs
-B ../_build/default/annotated/.annotated.objs
 B ../_build/default/ast/.ast.objs
 B ../_build/default/command/.pyre_command.objs
 B ../_build/default/common/.common.objs
@@ -64,7 +63,6 @@ B /home/vagrant/.opam/pyre/lib/yojson
 FLG -open Pyre -w -40 -w -40
 S .
 S ../analysis
-S ../annotated
 S ../ast
 S ../command
 S ../common

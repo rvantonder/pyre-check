@@ -6,6 +6,7 @@
 open Core
 
 open Ast
+open External
 
 module Annotation = AnalysisAnnotation
 module Type = AnalysisType

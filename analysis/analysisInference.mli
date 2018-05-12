@@ -4,6 +4,7 @@
     LICENSE file in the root directory of this source tree. *)
 
 open Ast
+open Common
 
 module Annotation = AnalysisAnnotation
 module Environment = AnalysisEnvironment

@@ -1,5 +1,4 @@
 B ../_build/default/analysis/.analysis.objs
-B ../_build/default/annotated/.annotated.objs
 B ../_build/default/ast/.ast.objs
 B ../_build/default/common/.common.objs
 B ../_build/default/external/.external.objs
@@ -59,7 +58,6 @@ B /home/vagrant/.opam/pyre/lib/yojson
 FLG -open Analysis__ -w -40
 FLG -ppx '/home/vagrant/pyre-check/_build/default/.ppx/ppx_compare+ppx_deriving.eq+ppx_deriving.show+ppx_hash+ppx_sexp_conv+ppx_deriving_yojson/ppx.exe --as-ppx --cookie '\''library-name="analysis"'\'''
 S .
-S ../annotated
 S ../ast
 S ../common
 S ../external
