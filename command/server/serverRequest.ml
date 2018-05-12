@@ -13,7 +13,7 @@ open ServerConfiguration
 open ServerProtocol
 open Request
 
-open Pyre
+open Common.Pyre
 
 module Rage = CommandRage
 module Scheduler = Service.Scheduler

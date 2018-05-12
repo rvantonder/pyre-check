@@ -5,7 +5,7 @@
 
 open Core
 
-open Pyre
+open Common.Pyre
 
 module Socket = CommandSocket
 

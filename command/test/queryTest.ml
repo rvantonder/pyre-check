@@ -7,7 +7,7 @@ open OUnit2
 
 open Analysis
 open ServerProtocol
-open Pyre
+open Common.Pyre
 
 let fake_root = Path.create_absolute "/tmp"
 

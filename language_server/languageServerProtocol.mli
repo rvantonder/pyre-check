@@ -7,7 +7,7 @@ open Core
 
 open Analysis
 
-open Pyre
+open Common.Pyre
 
 
 module InitializeRequest : module type of LanguageServerProtocolTypes.InitializeRequest

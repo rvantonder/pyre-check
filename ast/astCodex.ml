@@ -5,7 +5,7 @@
 
 open Core
 
-open Pyre
+open Common.Pyre
 open AstExpression
 
 module Expression = AstExpression

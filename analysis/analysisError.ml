@@ -7,7 +7,8 @@ open Core
 
 open Ast
 open Expression
-open Pyre
+open Common
+open Common.Pyre
 open Statement
 
 module Environment = AnalysisEnvironment

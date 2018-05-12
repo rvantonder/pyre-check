@@ -3,7 +3,7 @@
     This source code is licensed under the MIT license found in the
     LICENSE file in the root directory of this source tree. *)
 
-open Pyre
+open Common.Pyre
 
 
 let analyze ~scheduler:_ ~configuration:_ ~environment:_ ~call_graph:_ ~handles:_ =

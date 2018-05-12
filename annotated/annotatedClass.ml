@@ -7,8 +7,9 @@ open Core
 
 open Ast
 open Expression
-open Pyre
+open Common.Pyre
 open Statement
+open External
 
 module Callable = AnnotatedCallable
 module Annotation = AnalysisAnnotation

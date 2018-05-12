@@ -3,6 +3,7 @@
 (library
   ((name pyre)
    (public_name pyre)
+   (modules (:standard \ main))
    (libraries (pyre.pyreParser
                pyre.analysis
                pyre.annotated

@@ -8,7 +8,7 @@ open OUnit2
 
 open Analysis
 open Ast
-open Pyre
+open Common.Pyre
 open Test
 
 module Parallel = Hack_parallel.Std

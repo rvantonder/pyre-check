@@ -4,7 +4,7 @@
     LICENSE file in the root directory of this source tree. *)
 
 open Core
-open Pyre
+open Common.Pyre
 
 module Cfg = AnalysisCfg
 

@@ -9,7 +9,7 @@
   open Ast
   open Expression
   open Statement
-  open Pyre
+  open Common.Pyre
 
   let with_decorators decorators = function
     | { Node.location; value = Class value } ->

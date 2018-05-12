@@ -8,7 +8,7 @@ open Core
 open Ast
 open Expression
 open Statement
-open Pyre
+open Common.Pyre
 
 module Annotation = AnalysisAnnotation
 module Resolution = AnalysisResolution

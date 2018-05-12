@@ -10,7 +10,7 @@ open Test
 
 open Ast
 
-open Pyre
+open Common.Pyre
 
 
 let test_parse_stubs_modules_list _ =

@@ -6,7 +6,7 @@
 open Core
 
 open Ast
-open Pyre
+open Common.Pyre
 open ServerProtocol
 
 

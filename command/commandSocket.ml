@@ -5,7 +5,7 @@
 
 open Hack_parallel.Std
 
-open Pyre
+open Common.Pyre
 
 
 type t = Unix.file_descr

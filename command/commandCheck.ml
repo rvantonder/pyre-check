@@ -7,7 +7,7 @@ open Core
 
 open Analysis
 open Configuration
-open Pyre
+open Common.Pyre
 
 module Scheduler = Service.Scheduler
 

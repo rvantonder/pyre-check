@@ -6,6 +6,7 @@
 open Core
 
 open Ast
+open Common
 open Expression
 
 module Environment = AnalysisEnvironment

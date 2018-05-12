@@ -8,7 +8,7 @@ open Core
 open Ast
 open Configuration
 open Expression
-open Pyre
+open Common.Pyre
 open Statement
 
 module Annotation = AnalysisAnnotation

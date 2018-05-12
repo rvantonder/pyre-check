@@ -7,7 +7,7 @@ open Core
 
 open Ast
 open Analysis
-open Pyre
+open Common.Pyre
 
 module AstSharedMemory = ServiceAstSharedMemory
 module IgnoreSharedMemory = ServiceIgnoreSharedMemory

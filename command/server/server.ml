@@ -8,7 +8,7 @@ open Core
 open Hack_parallel.Std
 
 
-open Pyre
+open Common.Pyre
 
 open Configuration
 open ServerConfiguration

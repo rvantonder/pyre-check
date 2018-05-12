@@ -7,7 +7,7 @@ open Core
 
 open Ast
 open Expression
-open Pyre
+open Common.Pyre
 open Statement
 
 module Resolution = AnalysisResolution

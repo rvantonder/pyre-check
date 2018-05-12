@@ -6,8 +6,8 @@
 open Core
 
 open Ast
-open Common.Pyre
 open External
+open Common.Pyre
 
 module Type = AnalysisType
 module Callable = Type.Callable

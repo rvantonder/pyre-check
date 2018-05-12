@@ -5,7 +5,7 @@
 
 open Core
 
-open Pyre
+open Common.Pyre
 open Ast
 
 module Type = AnalysisType

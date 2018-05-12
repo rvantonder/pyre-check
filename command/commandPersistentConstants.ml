@@ -3,7 +3,7 @@
     This source code is licensed under the MIT license found in the
     LICENSE file in the root directory of this source tree. *)
 
-open Pyre
+open Common.Pyre
 open Path.AppendOperator
 
 let log_path configuration =

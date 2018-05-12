@@ -9,7 +9,7 @@ open OUnit2
 open LanguageServer.Types
 open LanguageServer.Protocol
 open LanguageServer.RequestParser
-open Pyre
+open Common.Pyre
 
 module Parallel = Hack_parallel.Std
 module Protocol = ServerProtocol

@@ -8,8 +8,8 @@ open OUnit2
 
 open Analysis
 open Ast
-open Pyre
-open PyreParser
+open Common.Pyre
+open Common.PyreParser
 
 
 let () =

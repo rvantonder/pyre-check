@@ -7,10 +7,12 @@ B /home/vagrant/.opam/pyre/lib/base/md5
 B /home/vagrant/.opam/pyre/lib/base/shadow_stdlib
 B /home/vagrant/.opam/pyre/lib/bin_prot
 B /home/vagrant/.opam/pyre/lib/bin_prot/shape
+B /home/vagrant/.opam/pyre/lib/biniou
 B /home/vagrant/.opam/pyre/lib/bytes
 B /home/vagrant/.opam/pyre/lib/core
 B /home/vagrant/.opam/pyre/lib/core_kernel
 B /home/vagrant/.opam/pyre/lib/core_kernel/base_for_tests
+B /home/vagrant/.opam/pyre/lib/easy-format
 B /home/vagrant/.opam/pyre/lib/fieldslib
 B /home/vagrant/.opam/pyre/lib/gen
 B /home/vagrant/.opam/pyre/lib/hack_parallel
@@ -50,6 +52,7 @@ B /home/vagrant/.opam/pyre/lib/splittable_random
 B /home/vagrant/.opam/pyre/lib/stdio
 B /home/vagrant/.opam/pyre/lib/typerep
 B /home/vagrant/.opam/pyre/lib/variantslib
+B /home/vagrant/.opam/pyre/lib/yojson
 FLG -open Ast__ -w -40
 FLG -ppx '/home/vagrant/pyre-check/_build/default/.ppx/ppx_compare+ppx_deriving.eq+ppx_deriving.show+ppx_hash+ppx_sexp_conv+ppx_deriving_yojson/ppx.exe --as-ppx --cookie '\''library-name="ast"'\'''
 S .
@@ -61,10 +64,12 @@ S /home/vagrant/.opam/pyre/lib/base/md5
 S /home/vagrant/.opam/pyre/lib/base/shadow_stdlib
 S /home/vagrant/.opam/pyre/lib/bin_prot
 S /home/vagrant/.opam/pyre/lib/bin_prot/shape
+S /home/vagrant/.opam/pyre/lib/biniou
 S /home/vagrant/.opam/pyre/lib/bytes
 S /home/vagrant/.opam/pyre/lib/core
 S /home/vagrant/.opam/pyre/lib/core_kernel
 S /home/vagrant/.opam/pyre/lib/core_kernel/base_for_tests
+S /home/vagrant/.opam/pyre/lib/easy-format
 S /home/vagrant/.opam/pyre/lib/fieldslib
 S /home/vagrant/.opam/pyre/lib/gen
 S /home/vagrant/.opam/pyre/lib/hack_parallel
@@ -104,3 +109,4 @@ S /home/vagrant/.opam/pyre/lib/splittable_random
 S /home/vagrant/.opam/pyre/lib/stdio
 S /home/vagrant/.opam/pyre/lib/typerep
 S /home/vagrant/.opam/pyre/lib/variantslib
+S /home/vagrant/.opam/pyre/lib/yojson

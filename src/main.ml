@@ -6,7 +6,7 @@
 open Core
 
 module Parallel = Hack_parallel.Std
-open PyreCommand
+open Common.PyreCommand
 
 
 let commands = [

@@ -9,7 +9,7 @@ open OUnit2
 open Ast
 open Analysis
 open Statement
-open Pyre
+open Common.Pyre
 
 open Test
 open AnnotatedTest

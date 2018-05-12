@@ -7,7 +7,7 @@ open Core
 
 open Analysis
 open LanguageServerProtocolTypes
-open Pyre
+open Common.Pyre
 
 
 module Range = struct

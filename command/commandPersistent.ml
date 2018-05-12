@@ -6,7 +6,7 @@
 open Core
 
 open LanguageServer.Protocol
-open Pyre
+open Common.Pyre
 
 module Time = Core_kernel.Time_ns.Span
 module Protocol = ServerProtocol

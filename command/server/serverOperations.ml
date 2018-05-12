@@ -6,7 +6,7 @@
 open Core
 
 open Configuration
-open Pyre
+open Common.Pyre
 open ServerConfiguration
 open ServerState
 

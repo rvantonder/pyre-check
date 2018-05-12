@@ -7,7 +7,7 @@ open Core
 
 open Ast
 open Analysis
-open Pyre
+open Common.Pyre
 
 module Scheduler = ServiceScheduler
 module AstSharedMemory = ServiceAstSharedMemory

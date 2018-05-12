@@ -6,7 +6,7 @@
 open Core
 open OUnit2
 
-open Pyre
+open Common.Pyre
 open Test
 
 
