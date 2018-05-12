@@ -4,9 +4,10 @@
     LICENSE file in the root directory of this source tree. *)
 
 open Core
+open Pyre_command.PyreCommand
 
+module Server = Pyre_command.Server
 module Parallel = Hack_parallel.Std
-open Common.PyreCommand
 
 
 let commands = [

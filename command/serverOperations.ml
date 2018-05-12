@@ -8,12 +8,14 @@ open Core
 open Common
 open Configuration
 open Common.Pyre
+open External
 open ServerConfiguration
 open ServerState
 
 module Check = CommandCheck
 module Handshake = CommandHandshake
 module WatchmanConstants = CommandWatchmanConstants
+module Socket = CommandSocket (* FIXME *)
 
 type version_mismatch = {
   server_version: string;

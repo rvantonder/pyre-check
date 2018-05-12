@@ -1,7 +1,6 @@
 B ../_build/default/analysis/.analysis.objs
 B ../_build/default/ast/.ast.objs
 B ../_build/default/command/.pyre_command.objs
-B ../_build/default/command/server/.server.objs
 B ../_build/default/common/.common.objs
 B ../_build/default/external/.external.objs
 B ../_build/default/parser/.pyreParser.objs
@@ -119,4 +118,3 @@ S /home/vagrant/.opam/pyre/lib/stdio
 S /home/vagrant/.opam/pyre/lib/typerep
 S /home/vagrant/.opam/pyre/lib/variantslib
 S /home/vagrant/.opam/pyre/lib/yojson
-S server

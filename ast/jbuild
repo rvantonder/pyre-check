@@ -15,7 +15,9 @@
     (core
      sexplib
      yojson
+     ppx_deriving
      ppx_deriving_yojson
+     ppx_deriving_yojson.runtime
      pyre.external
      pyre.common
      ))))

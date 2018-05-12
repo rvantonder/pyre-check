@@ -5,6 +5,7 @@
 
 open Core
 
+open Common
 open Common.Pyre
 
 open LanguageServer.Types

@@ -4,6 +4,8 @@
     LICENSE file in the root directory of this source tree. *)
 
 open Core
+open Common
+open External
 open Common.Pyre
 
 module Socket = CommandSocket

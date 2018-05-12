@@ -15,8 +15,13 @@
     (core
      sexplib
      ppxlib
+     yojson
+     ppx_deriving
+     ppx_deriving_yojson
+     ppx_deriving_yojson.runtime
      hack_parallel
      pyre.common
-     pyre.server
      pyre.service
+     pyre.ast
+     pyre.analysis
      ))))

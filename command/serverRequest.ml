@@ -5,14 +5,17 @@
 
 open Core
 
+open Ast
 open Analysis
 
 open ServerState
+open Common
 open Configuration
 open ServerConfiguration
 open ServerProtocol
 open Request
 
+open External
 open Common.Pyre
 
 module Rage = CommandRage
@@ -243,7 +246,7 @@ let rec process_request
     | FlushTypeErrorsRequest -> flush_type_errors state
     | StopRequest ->
         Log.info "Stopping the server";
-        Socket.write new_socket StopResponse;
+        CommandSocket.write new_socket StopResponse;
         Mutex.critical_section
           state.lock
           ~f:(fun () ->
@@ -309,7 +312,7 @@ let rec process_request
                      | Ok (_, annotation) -> Type.show annotation
                      | Error error -> error)
                     relative_path
-                    (AstLocation.show_position position)
+                    (Ast.Location.show_position position)
                 in
                 Some
                   (state,

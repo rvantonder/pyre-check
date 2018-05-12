@@ -4,16 +4,35 @@
   ((name pyre)
    (public_name pyre)
    (modules (:standard \ main))
-   (libraries (pyre.pyreParser
-               pyre.analysis
-               pyre.ast
-               pyre.service
-               pyre.command
-               pyre.external))))
+  (preprocess
+    (pps
+      (ppx_deriving.eq
+       ppx_deriving.show
+       ppx_hash
+       ppx_compare
+       ppx_sexp_conv
+       ppx_deriving_yojson)))
+   (libraries (
+     yojson
+     ppx_deriving_yojson
+     pyre.pyreParser
+     pyre.analysis
+     pyre.ast
+     pyre.service
+     pyre.command
+     pyre.external))))
 
 (executable
-  ((libraries (core pyre))
-   (name main)))
+  ((name main)
+  (preprocess
+    (pps
+      (ppx_deriving.eq
+       ppx_deriving.show
+       ppx_hash
+       ppx_compare
+       ppx_sexp_conv
+       ppx_deriving_yojson)))
+  (libraries (pyre))))
 
 (alias
   ((name DEFAULT)

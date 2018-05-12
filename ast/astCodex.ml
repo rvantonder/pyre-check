@@ -8,6 +8,8 @@ open Core
 open Common.Pyre
 open AstExpression
 
+open Yojson
+
 module Expression = AstExpression
 module Location = AstLocation
 module Source = AstSource

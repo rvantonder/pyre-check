@@ -6,6 +6,7 @@
 open Core
 open Hack_parallel.Std
 
+open Common
 open Common.Pyre
 
 open CommandWatchmanConstants

@@ -7,6 +7,7 @@
     cf. https://github.com/Microsoft/language-server-protocol/blob/master/protocol.md#basic-json-structures.contents
     It is not complete: we include what we need for diagnostic messages. *)
 
+open Yojson
 
 (** The ToAny module represents serializing an OCaml type [t] to a "any" JSON data *)
 module type ToAny = sig
