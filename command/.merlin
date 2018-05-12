@@ -1,10 +1,11 @@
 B ../_build/default/analysis/.analysis.objs
 B ../_build/default/ast/.ast.objs
 B ../_build/default/command/.pyre_command.objs
+B ../_build/default/command/server/.server.objs
 B ../_build/default/common/.common.objs
 B ../_build/default/external/.external.objs
-B ../_build/default/language_server/.language_server.objs
 B ../_build/default/parser/.pyreParser.objs
+B ../_build/default/service/.service.objs
 B /home/vagrant/.opam/pyre/lib/base
 B /home/vagrant/.opam/pyre/lib/base/caml
 B /home/vagrant/.opam/pyre/lib/base/md5
@@ -64,8 +65,8 @@ S ../analysis
 S ../ast
 S ../common
 S ../external
-S ../language_server
 S ../parser
+S ../service
 S /home/vagrant/.opam/pyre/lib/base
 S /home/vagrant/.opam/pyre/lib/base/caml
 S /home/vagrant/.opam/pyre/lib/base/md5
@@ -118,3 +119,4 @@ S /home/vagrant/.opam/pyre/lib/stdio
 S /home/vagrant/.opam/pyre/lib/typerep
 S /home/vagrant/.opam/pyre/lib/variantslib
 S /home/vagrant/.opam/pyre/lib/yojson
+S server

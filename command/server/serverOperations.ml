@@ -5,6 +5,7 @@
 
 open Core
 
+open Common
 open Configuration
 open Common.Pyre
 open ServerConfiguration

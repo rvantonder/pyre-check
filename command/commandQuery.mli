@@ -4,6 +4,7 @@
     LICENSE file in the root directory of this source tree. *)
 
 open Core
+open Common
 
 val parse_query: root: Pyre.Path.t -> string -> ServerProtocol.Request.t option
 

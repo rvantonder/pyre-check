@@ -16,5 +16,7 @@
      sexplib
      ppxlib
      hack_parallel
-     language_server
+     pyre.common
+     pyre.server
+     pyre.service
      ))))

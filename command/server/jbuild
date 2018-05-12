@@ -1,8 +1,8 @@
 (jbuild_version 1)
 
 (library
- ((name language_server)
-  (public_name pyre.language_server)
+ ((name server)
+  (public_name pyre.server)
   (preprocess
     (pps
       (ppx_deriving.eq
@@ -14,8 +14,11 @@
   (libraries
     (core
      sexplib
-     ppx_deriving_yojson
-     yojson
      ppxlib
-     pyre.ast
-     pyre.analysis))))
+     yojson
+     ppx_deriving_yojson
+     hack_parallel
+     pyre.common
+     pyre.analysis
+     pyre.service
+     ))))

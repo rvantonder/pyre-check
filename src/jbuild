@@ -8,7 +8,6 @@
                pyre.analysis
                pyre.ast
                pyre.service
-               pyre.language_server
                pyre.command
                pyre.external))))
 

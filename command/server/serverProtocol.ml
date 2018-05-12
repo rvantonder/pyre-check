@@ -6,6 +6,7 @@
 open Core
 
 open Analysis
+open Common
 
 
 module DefinitionRequest = struct

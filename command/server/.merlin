@@ -1,9 +1,10 @@
-B ../_build/default/analysis/.analysis.objs
-B ../_build/default/ast/.ast.objs
-B ../_build/default/common/.common.objs
-B ../_build/default/external/.external.objs
-B ../_build/default/language_server/.language_server.objs
-B ../_build/default/parser/.pyreParser.objs
+B ../../_build/default/analysis/.analysis.objs
+B ../../_build/default/ast/.ast.objs
+B ../../_build/default/command/server/.server.objs
+B ../../_build/default/common/.common.objs
+B ../../_build/default/external/.external.objs
+B ../../_build/default/parser/.pyreParser.objs
+B ../../_build/default/service/.service.objs
 B /home/vagrant/.opam/pyre/lib/base
 B /home/vagrant/.opam/pyre/lib/base/caml
 B /home/vagrant/.opam/pyre/lib/base/md5
@@ -56,14 +57,15 @@ B /home/vagrant/.opam/pyre/lib/stdio
 B /home/vagrant/.opam/pyre/lib/typerep
 B /home/vagrant/.opam/pyre/lib/variantslib
 B /home/vagrant/.opam/pyre/lib/yojson
-FLG -open Language_server -w -40
-FLG -ppx '/home/vagrant/pyre-check/_build/default/.ppx/ppx_compare+ppx_deriving.eq+ppx_deriving.show+ppx_hash+ppx_sexp_conv+ppx_deriving_yojson/ppx.exe --as-ppx --cookie '\''library-name="language_server"'\'''
+FLG -open Server__ -w -40
+FLG -ppx '/home/vagrant/pyre-check/_build/default/.ppx/ppx_compare+ppx_deriving.eq+ppx_deriving.show+ppx_hash+ppx_sexp_conv+ppx_deriving_yojson/ppx.exe --as-ppx --cookie '\''library-name="server"'\'''
 S .
-S ../analysis
-S ../ast
-S ../common
-S ../external
-S ../parser
+S ../../analysis
+S ../../ast
+S ../../common
+S ../../external
+S ../../parser
+S ../../service
 S /home/vagrant/.opam/pyre/lib/base
 S /home/vagrant/.opam/pyre/lib/base/caml
 S /home/vagrant/.opam/pyre/lib/base/md5

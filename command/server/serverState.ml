@@ -5,10 +5,11 @@
 
 open Core
 
+open Common
 
 module Error = Analysis.Error
 module Scheduler = Service.Scheduler
-module Socket = CommandSocket
+(* FIXME module Socket = CommandSocket*)
 
 
 type client = {
@@ -16,9 +17,9 @@ type client = {
 }
 
 type connections = {
-  socket: Socket.t;
+  socket: Caml.Unix.file_descr;
   persistent_clients: client Unix.File_descr.Table.t;
-  file_notifiers: Socket.t list;
+  file_notifiers: Caml.Unix.file_descr list;
 }
 
 type t = {
