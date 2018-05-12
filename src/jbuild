@@ -12,27 +12,6 @@
      pyre.command
      pyre.external))))
 
-(alias
-  ((name DOOT)
-   (deps ())
-   (action
-     (progn
-       (system "mkdir -p ../hack_parallel/heap")
-       (system "mkdir -p ../hack_parallel/utils")
-       (system "mkdir -p ../hack_parallel/third-party/lz4")
-       (system "cp ../../../hack_parallel/_build/hack_parallel/heap/hh_shared.o ../hack_parallel/heap/hh_shared.o")
-       (system "cp ../../../hack_parallel/_build/hack_parallel/utils/files.o ../hack_parallel/utils/files.o")
-       (system "cp ../../../hack_parallel/_build/hack_parallel/utils/handle_stubs.o ../hack_parallel/utils/handle_stubs.o")
-       (system "cp ../../../hack_parallel/_build/hack_parallel/utils/nproc.o ../hack_parallel/utils/nproc.o")
-       (system "cp ../../../hack_parallel/_build/hack_parallel/utils/realpath.o ../hack_parallel/utils/realpath.o")
-       (system "cp ../../../hack_parallel/_build/hack_parallel/utils/sysinfo.o ../hack_parallel/utils/sysinfo.o")
-       (system "cp ../../../hack_parallel/_build/hack_parallel/utils/priorities.o ../hack_parallel/utils/priorities.o")
-       (system "cp ../../../hack_parallel/_build/hack_parallel/third-party/lz4/lz4.o ../hack_parallel/third-party/lz4/lz4.o")
-       (system "cp ../../../hack_parallel/_build/hack_parallel/third-party/lz4/lz4frame.o ../hack_parallel/third-party/lz4/lz4frame.o")
-       (system "cp ../../../hack_parallel/_build/hack_parallel/third-party/lz4/lz4hc.o ../hack_parallel/third-party/lz4/lz4hc.o")
-       (system "cp ../../../hack_parallel/_build/hack_parallel/third-party/lz4/xxhash.o ../hack_parallel/third-party/lz4/xxhash.o")
-        ))))
-
 (executable
   ((name main)
   (libraries (pyre))))

@@ -60,7 +60,6 @@ B /home/vagrant/.opam/pyre/lib/typerep
 B /home/vagrant/.opam/pyre/lib/variantslib
 B /home/vagrant/.opam/pyre/lib/yojson
 FLG -open Pyre -w -40 -w -40
-FLG -ppx '/home/vagrant/pyre-check/_build/default/.ppx/ppx_compare+ppx_deriving.eq+ppx_deriving.show+ppx_hash+ppx_sexp_conv+ppx_deriving_yojson/ppx.exe --as-ppx --cookie '\''library-name="pyre"'\'''
 S .
 S ../analysis
 S ../ast
