@@ -5,6 +5,9 @@
 
 open AstExpression
 
+open Common
+open External
+
 module Ignore = AstIgnore
 module Location = AstLocation
 module Statement = AstStatement

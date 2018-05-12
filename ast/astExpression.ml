@@ -6,7 +6,7 @@
 open Core
 open Sexplib.Std
 
-open Pyre
+open Common.Pyre
 
 module Identifier = AstIdentifier
 module Location = AstLocation

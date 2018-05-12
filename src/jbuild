@@ -1,0 +1,26 @@
+(jbuild_version 1)
+
+(library
+  ((name pyre)
+   (public_name pyre)
+   (libraries (pyre.pyreParser
+               pyre.analysis
+               pyre.annotated
+               pyre.ast
+               pyre.service
+               pyre.language_server
+               pyre.command
+               pyre.external))))
+
+(executable
+  ((libraries (core pyre))
+   (name main)))
+
+(alias
+  ((name DEFAULT)
+   (deps
+  (main.exe))))
+
+(install
+  ((section bin)
+   (files ((main.exe as pyre)))))

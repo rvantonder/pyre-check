@@ -1,0 +1,20 @@
+(jbuild_version 1)
+
+(library
+ ((name analysis)
+  (public_name pyre.analysis)
+  (preprocess
+    (pps
+      (ppx_deriving.eq
+       ppx_deriving.show
+       ppx_hash
+       ppx_compare
+       ppx_sexp_conv
+       ppx_deriving_yojson)))
+  (libraries
+    (core
+     sexplib
+     pyre.ast
+     pyre.pyreParser
+     pyre.external
+     pyre.annotated))))

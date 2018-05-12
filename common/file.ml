@@ -6,6 +6,7 @@
 open Core
 
 open Pyre
+open Hack_parallel (* FIXME Sys_utils *)
 
 
 type t = {

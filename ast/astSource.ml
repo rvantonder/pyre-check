@@ -6,6 +6,7 @@
 open Core
 
 open AstExpression
+open Common
 
 module Ignore = AstIgnore
 module Location = AstLocation

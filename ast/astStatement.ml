@@ -5,7 +5,9 @@
 
 open Core
 
-open Pyre
+open Common.Pyre
+open External
+
 
 module Expression = AstExpression
 module Parameter = AstParameter

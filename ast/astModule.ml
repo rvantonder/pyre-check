@@ -5,7 +5,7 @@
 
 open Core
 
-open Pyre
+open Common.Pyre
 
 module Expression = AstExpression
 module Access = Expression.Access
