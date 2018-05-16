@@ -1,5 +1,9 @@
 #!/bin/bash
 
+rm -rf _build hack_parallel/_build
+ocamlfind remove hack_parallel
+make clean
+
 make hack_parallel
 cp -r _build/hack_parallel/ _build/default
 jbuilder build @install -j 20
