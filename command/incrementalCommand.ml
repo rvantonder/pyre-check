@@ -19,32 +19,27 @@ let run
     show_error_traces
     infer
     recursive_infer
+    run_additional_checks
     sequential
     filter_directories
-    filter_directories_semicolon
     number_of_workers
     log_identifier
     logger
     project_root
     search_path
     typeshed
+    excludes
     local_root
     () =
   try
     let filter_directories =
-      let deprecated_directories =
-        filter_directories
-        >>| List.map ~f:Path.create_absolute
-      in
-      filter_directories_semicolon
+      filter_directories
       >>| String.split_on_chars ~on:[';']
       >>| List.map ~f:String.strip
       >>| List.map ~f:Path.create_absolute
-      |> (fun directories ->
-          if Option.is_some directories then directories else deprecated_directories)
     in
     let configuration =
-      Configuration.create
+      Configuration.Analysis.create
         ~verbose
         ?expected_version
         ~sections
@@ -56,28 +51,30 @@ let run
         ?logger
         ~infer
         ~recursive_infer
+        ~run_additional_checks
         ~parallel:(not sequential)
         ?filter_directories
         ~number_of_workers
-        ~search_path:(List.map ~f:Path.create_absolute search_path)
+        ~search_path:(List.map search_path ~f:Path.SearchPath.create)
         ?typeshed:(typeshed >>| Path.create_absolute)
         ~project_root:(Path.create_absolute project_root)
+        ~excludes
         ~local_root:(Path.create_absolute local_root)
         ()
     in
     (fun () ->
        let socket =
          try
-           Server.Operations.connect ~retries:3 ~configuration
-         with Server.Operations.ConnectionFailure ->
-           raise ServerConfiguration.ServerNotRunning
+           Operations.connect ~retries:3 ~configuration
+         with Operations.ConnectionFailure ->
+           raise Operations.ServerNotRunning
        in
 
-       Socket.write socket Server.Protocol.Request.FlushTypeErrorsRequest;
+       Socket.write socket Protocol.Request.FlushTypeErrorsRequest;
 
        let response_json =
          match Socket.read socket with
-         | Server.Protocol.TypeCheckResponse errors ->
+         | Protocol.TypeCheckResponse errors ->
              errors
              |> List.map ~f:snd
              |> List.concat
@@ -91,10 +88,10 @@ let run
        Log.print "%s" (Yojson.Safe.to_string response_json))
     |> Scheduler.run_process ~configuration
   with
-  | ServerConfiguration.ServerNotRunning ->
+  | Operations.ServerNotRunning ->
       Log.print "Server is not running.\n";
       exit 1
-  | Server.Operations.VersionMismatch _ ->
+  | Operations.VersionMismatch _ ->
       Log.print "The running server has an incompatible version with the current version.\n";
       exit 1
 

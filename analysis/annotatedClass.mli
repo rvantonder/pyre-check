@@ -27,7 +27,6 @@ val create: Class.t Node.t -> t
 
 val name: t -> Access.t
 val bases: t -> Argument.t list
-val body: t -> Statement.t list
 val get_decorator: t -> decorator: string -> decorator list
 
 val annotation: t -> resolution: Resolution.t -> Type.t
@@ -38,12 +37,12 @@ module Method : sig
   type t
   [@@deriving compare, eq, sexp, show, hash]
 
-  val create: define: Define.t -> parent: class_t -> t
+  val create: define: Define.t -> parent: Type.t -> t
 
   val name: t -> Access.t
 
   val define: t -> Define.t
-  val parent: t -> class_t
+  val parent: t -> Type.t
 
   val parameter_annotations
     :  t
@@ -55,9 +54,6 @@ module Method : sig
     -> Type.t Int.Map.t
   val return_annotation: t -> resolution: Resolution.t -> Type.t
 
-  val overrides: t -> resolution: Resolution.t -> t option
-
-  val implements: t -> protocol_method: t -> bool
 end
 
 val generics: t -> resolution: Resolution.t -> Type.t list
@@ -88,16 +84,15 @@ val immediate_superclasses
   -> t option
 
 
-val methods: t -> Method.t list
-val has_method: t -> name: string -> bool
+val methods: t -> resolution: Resolution.t -> Method.t list
 
 val is_protocol: t -> bool
-val implements: t -> protocol: t -> bool
+val implements: resolution: Resolution.t -> t -> protocol: t -> bool
 
 module Attribute : sig
   type attribute = {
     name: Expression.expression;
-    parent: class_t;
+    parent: Type.t;
     annotation: Annotation.t;
     value: Expression.t;
     defined: bool;
@@ -112,6 +107,7 @@ module Attribute : sig
   val create
     :  resolution: Resolution.t
     -> parent: class_t
+    -> ?instantiated: Type.t
     -> ?defined: bool
     -> ?default_class_attribute: bool
     -> Statement.Attribute.t
@@ -122,18 +118,18 @@ module Attribute : sig
   val async: t -> bool
 
   val annotation: t -> Annotation.t
-  val parent: t -> class_t
+  val parent: t -> Type.t
   val value: t -> Expression.t
   val initialized: t -> bool
   val location: t -> Location.t
   val defined: t -> bool
   val class_attribute: t -> bool
 
-  val instantiate: t -> constraints:Type.t Type.Map.t -> t
-end
+  val instantiate: t -> constraints: Type.t Type.Map.t -> t
 
-module AttributesCache : sig
-  val clear: unit -> unit
+  module Cache: sig
+    val clear: unit -> unit
+  end
 end
 
 val attributes
@@ -141,7 +137,7 @@ val attributes
   -> ?class_attributes: bool
   -> ?include_generated_attributes: bool
   -> t
-  -> resolution:Resolution.t
+  -> resolution: Resolution.t
   -> Attribute.t list
 val attribute_fold
   :  ?transitive: bool
@@ -165,3 +161,9 @@ val attribute
 val fallback_attribute: resolution: Resolution.t -> access: Access.t -> t -> Attribute.t option
 
 val constructor: t -> resolution: Resolution.t -> Type.t
+
+val overrides: t -> resolution: Resolution.t -> name: Access.t -> Attribute.t option
+
+val has_method: ?transitive: bool -> t -> resolution: Resolution.t -> name: Access.t -> bool
+
+val inferred_callable_type: t -> resolution: Resolution.t -> Type.t option

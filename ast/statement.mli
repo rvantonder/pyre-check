@@ -17,7 +17,6 @@ module Record : sig
       docstring: string option;
       return_annotation: Expression.t option;
       async: bool;
-      generated: bool;
       parent: Access.t option;
     }
     [@@deriving compare, eq, sexp, show, hash]
@@ -187,7 +186,6 @@ module Define : sig
 
   val create_toplevel: qualifier: Access.t -> statements: statement_t list -> t
   val create_class_toplevel: qualifier: Access.t -> statements: statement_t list -> t
-  val create_generated_constructor: statement_t Record.Class.record -> t
 
   val unqualified_name: t -> Access.t
   val self_identifier: t -> Identifier.t
@@ -198,9 +196,9 @@ module Define : sig
   val is_overloaded_method: t -> bool
   val is_static_method: t -> bool
   val is_class_method: t -> bool
+  val is_class_property: t -> bool
   val is_dunder_method: t -> bool
   val is_constructor: ?in_test: bool -> t -> bool
-  val is_generated_constructor: t -> bool
   val is_property_setter: t -> bool
   val is_untyped: t -> bool
   val is_stub: t -> bool
@@ -227,6 +225,8 @@ module Class : sig
   [@@deriving compare, eq, sexp, show, hash]
 
   val constructors: ?in_test: bool -> t -> Define.t list
+  val defines: t -> Define.t list
+  val find_define: t -> method_name:Identifier.t -> Define.t Node.t option
 
   val implicit_attributes: ?in_test: bool -> t -> Attribute.t Access.SerializableMap.t
   val explicitly_assigned_attributes: t -> Attribute.t Access.SerializableMap.t

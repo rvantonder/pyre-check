@@ -6,7 +6,6 @@ from typing import Set
 
 from .. import log
 from ..error import Error
-from ..filesystem import get_filesystem
 from .command import ClientException, Command
 
 
@@ -21,8 +20,8 @@ class Reporting(Command):
         super().__init__(arguments, configuration, analysis_directory)
         self._verbose = arguments.verbose
         self._output = arguments.output
-        self._do_not_check_paths = configuration.do_not_check
-        self._discovered_analysis_directories = [self._local_root]
+        self._ignore_all_errors_paths = configuration.ignore_all_errors
+        self._discovered_source_directories = [self._local_root]
         self._local_configuration = arguments.local_configuration
 
     def _print(self, errors) -> None:
@@ -30,7 +29,7 @@ class Reporting(Command):
             error
             for error in errors
             if (
-                not error.is_do_not_check()
+                not error.is_ignored()
                 and (self._verbose or not (error.is_external_to_global_root()))
             )
         ]
@@ -50,23 +49,11 @@ class Reporting(Command):
             log.stdout.write(json.dumps([error.__dict__ for error in errors]))
 
     def _get_directories_to_analyze(self) -> Set[str]:
-        local_configurations = get_filesystem().list(".", ".pyre_configuration.local")
-
-        current_project_directory = self._original_directory
-        if self._local_configuration:
-            current_project_directory = self._local_configuration
+        current_project_directory = self._analysis_directory.get_filter_root()
         directories_to_analyze = {
-            os.path.relpath(current_project_directory, os.getcwd())
+            os.path.relpath(filter_root, os.getcwd())
+            for filter_root in current_project_directory
         }
-
-        for configuration_file in local_configurations:
-            try:
-                with open(configuration_file) as file:
-                    configuration = json.loads(file.read())
-                    if bool(configuration.get("push_blocking", False)):
-                        directories_to_analyze.add(os.path.dirname(configuration_file))
-            except (IOError, json.JSONDecodeError):
-                pass
         return directories_to_analyze
 
     def _get_errors(self, result) -> Set[Error]:
@@ -85,14 +72,14 @@ class Reporting(Command):
             # Relativize path to user's cwd.
             relative_path = self._relative_path(full_path)
             error["path"] = relative_path
-            do_not_check = False
+            ignore_error = False
             external_to_global_root = True
             if full_path.startswith(self._current_directory):
                 external_to_global_root = False
-            for do_not_check_path in self._do_not_check_paths:
-                if fnmatch.fnmatch(relative_path, (do_not_check_path + "*")):
-                    do_not_check = True
+            for absolute_ignore_path in self._ignore_all_errors_paths:
+                if fnmatch.fnmatch(full_path, (absolute_ignore_path + "*")):
+                    ignore_error = True
                     break
-            errors.add(Error(do_not_check, external_to_global_root, **error))
+            errors.add(Error(ignore_error, external_to_global_root, **error))
 
         return errors

@@ -10,9 +10,9 @@ include TaintResult.Register(struct
 
     let init ~types:_ ~functions:_ = ()
 
-    let analyze _callable define =
-      let forward, result = ForwardAnalysis.run define in
-      let backward = BackwardAnalysis.run define in
+    let analyze ~callable:_ ~environment ~define =
+      let forward, result = ForwardAnalysis.run ~environment ~define in
+      let backward = BackwardAnalysis.run ~environment ~define in
       let model = { forward; backward; } in
       result, model
   end)

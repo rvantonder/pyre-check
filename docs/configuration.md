@@ -27,8 +27,11 @@ setup and needs. The following configuration options are supported:
 
 `source_directories`: List of paths to type check. Defaults to current directory.
 
-`do_not_check`: A list of paths to omit from type-checking. This may be useful for
-generated files, virtualenv directories, etc.
+`ignore_all_errors`: A list of paths to omit from type-checking. This may be useful for
+generated files, virtualenv directories, etc.  These should be paths relative to the location of
+the configuration file (or the local configuration if applicable).  These can also include basic
+globs using *. **Note**: files matching these paths will still be parsed, please refer to the
+`exclude` configuration item for further options.
 
 `binary`: Location of pyre binary. This can be specified to gradually upgrade a Pyre
 binary in a CI setting.
@@ -45,6 +48,8 @@ build up the typing environment but will *not* check files found in the search p
 provides typed stubs for library functions.
 
 `workers`: Number of workers to spawn for multiprocessing.
+
+`exclude`: List of regular expressions for files and directories that should not be parsed.
 
 
 # Local Configuration
@@ -85,18 +90,22 @@ optional arguments:
   -h, --help            show this help message and exit
   -l LOCAL_CONFIGURATION, --local-configuration LOCAL_CONFIGURATION
                         Use a local configuration
+  --version             show program's version number and exit
+  --binary-version      Print the pyre.bin version to be used
   --show-error-traces   Display errors trace information
   --output {text,json}  How to format output
   --verbose             Enable verbose logging
   --noninteractive      Disable interactive logging
   --show-parse-errors   Display detailed information about parse errors
-  --binary-version      Print the pyre.bin version to be used
   --search-path SEARCH_PATH
-                        Additional directories with modules and stubs to
-                        include in type environment
+                        Add an additional directory of modules and stubs to
+                        include in the type environment
   --preserve-pythonpath
-                        Preserves the value of the PYTHONPATH environment
-                        variable
+                        Preserve the value of the PYTHONPATH environment
+                        variable and inherit the current python environment's
+                        search path
+  --binary BINARY       Location of the pyre binary
+  --exclude EXCLUDE     Exclude files and directories matching this regexp from parsing
   --typeshed TYPESHED   Location of the typeshed stubs
 
 buck:
@@ -151,7 +160,8 @@ Non-interactive mode ensures all terminal output remains visible.
 `--output {text, json}`: Formatting for error return values. Defaults to text.
 
 `--preserve-pythonpath`: Use the `$PYTHONPATH` environment variable to search for external
-sources. This environment variable is ignored otherwise.
+sources, along with the current environment's search path. This environment variable is
+ignored otherwise.
 
 `--search-path SEARCH_PATH`: Provide additional stubs or modules external to the project
 being type-checked. Can also be set in `.pyre_configuration` or often lives in the

@@ -67,24 +67,6 @@ let write { path; content } =
       Log.error "No contents to write to `%s`" path
 
 
-let list ?(filter = fun _ -> true) ~root =
-  let rec list sofar path =
-    if Core.Sys.is_directory path = `Yes then
-      match Core.Sys.ls_dir path with
-      | entries ->
-          let collect sofar entry =
-            list sofar (path ^/ entry) in
-          List.fold ~init:sofar ~f:collect entries
-      | exception Sys_error _ ->
-          Log.error "Could not list `%s`" path;
-          sofar
-    else if filter path then
-      (Path.create_relative ~root ~relative:path) :: sofar
-    else
-      sofar in
-  list [] (Path.absolute root)
-
-
 module Handle = struct
   type t = string
   [@@deriving compare, eq, show, sexp, hash]
@@ -96,6 +78,22 @@ module Handle = struct
 
   let create path =
     path
+
+
+  let is_stub path =
+    String.is_suffix ~suffix:".pyi" path
+
+
+  let to_path ~configuration handle =
+    let construct_relative_to_root root =
+      let root = Path.SearchPath.get_root root in
+      let path = Path.create_relative ~root ~relative:handle in
+      if Path.file_exists path then
+        Some path
+      else
+        None
+    in
+    List.find_map (Configuration.Analysis.search_path configuration) ~f:construct_relative_to_root
 
 
   include Hashable.Make(struct
@@ -135,24 +133,14 @@ module Set = Set.Make(struct
 
 exception NonexistentHandle of string
 
-let handle ~configuration:{ Configuration.local_root; search_path; typeshed; _ } { path; _ } =
-  (* Have an ordering of search_path > typeshed > local_root with the parser. search_path precedes
-   * local_root due to the possibility of having a subdirectory of the root in the search path. *)
-  let possible_roots =
-    let roots =
-      match typeshed with
-      | None ->
-          [local_root]
-      | Some typeshed ->
-          [
-            Path.create_relative ~root:typeshed ~relative:"stdlib";
-            Path.create_relative ~root:typeshed ~relative:"third_party";
-            local_root;
-          ]
-    in
-    search_path @ roots
+
+let handle ~configuration { path; _ } =
+  let search_path = Configuration.Analysis.search_path configuration in
+  let handle =
+    Path.search_for_path ~search_path ~path
+    >>= Path.relative
   in
-  match List.find_map possible_roots ~f:(fun root -> Path.get_relative_to_root ~root ~path) with
+  match handle with
   | Some handle ->
       Handle.create handle
   | None ->
@@ -160,6 +148,8 @@ let handle ~configuration:{ Configuration.local_root; search_path; typeshed; _ }
         Format.sprintf
           "Unable to construct handle for %s. Possible roots: %s"
           (Path.absolute path)
-          (List.to_string possible_roots ~f:Path.absolute)
+          (search_path
+           |> List.map ~f:Path.SearchPath.to_path
+           |> List.to_string ~f:Path.absolute)
       in
       raise (NonexistentHandle message)

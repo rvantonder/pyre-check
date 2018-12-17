@@ -71,7 +71,6 @@ let assert_fixpoint body expected =
     docstring = None;
     return_annotation = None;
     async = false;
-    generated = false;
     parent = None;
   } in
   assert_equal
@@ -188,4 +187,4 @@ let () =
     "join">::test_join;
     "widening">::test_widening;
   ]
-  |> run_test_tt_main
+  |> Test.run

@@ -28,7 +28,7 @@ let test_parse_query _ =
       Commands.Query.parse_query ~root:(mock_path "") serialized
       |> ignore;
       assert_unreached ()
-    with _ ->
+    with Commands.Query.InvalidQuery _ ->
       ()
   in
 
@@ -84,24 +84,37 @@ let test_parse_query _ =
   assert_fails_to_parse "typecheck(1+2)";
 
   assert_parses
-    "type_at_location('a.py', 1, 2)"
-    (TypeAtLocation {
-        Ast.Location.path = "a.py";
-        start = { Ast.Location.line = 1; column = 2 };
-        stop = { Ast.Location.line = 1; column = 2 };
+    "type_at_position('a.py', 1, 2)"
+    (TypeAtPosition {
+        file = File.create (Path.create_relative ~root:(mock_path "") ~relative:"a.py");
+        position = { Ast.Location.line = 1; column = 2 };
       });
-  assert_fails_to_parse "type_at_location(a.py:1:2)";
-  assert_fails_to_parse "type_at_location('a.py', 1, 2)";
+  assert_fails_to_parse "type_at_position(a.py:1:2)";
+  assert_fails_to_parse "type_at_position('a.py', 1, 2, 3)";
+
+  assert_parses
+    "types_in_file('a.py')"
+    (TypesInFile (File.create (Path.create_relative ~root:(mock_path "") ~relative:"a.py")));
+  assert_fails_to_parse "types_in_file(a.py:1:2)";
+  assert_fails_to_parse "types_in_file(a.py)";
+  assert_fails_to_parse "types_in_file('a.py', 1, 2)";
 
   assert_parses "attributes(C)" (Attributes (Access.create "C"));
   assert_fails_to_parse "attributes(C, D)";
 
   assert_parses "signature(a.b)" (Signature (Access.create "a.b"));
-  assert_fails_to_parse "signature(a.b, a.c)"
+  assert_fails_to_parse "signature(a.b, a.c)";
+
+  assert_parses "save_server_state('state')"
+    (SaveServerState
+       (Path.create_absolute
+          ~follow_symbolic_links:false
+          "state"));
+  assert_fails_to_parse "save_server_state(state)"
 
 
 let () =
   "query">:::[
     "parse_query">::test_parse_query;
   ]
-  |> run_test_tt_main
+  |> Test.run

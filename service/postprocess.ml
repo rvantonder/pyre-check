@@ -12,44 +12,50 @@ open Pyre
 open PostprocessSharedMemory
 
 
-let remove_ignores handles =
-  let keys = List.map ~f:File.Handle.show handles in
-  List.filter_map ~f:IgnoreKeys.get keys
-  |> List.concat
-  |> IgnoreLines.KeySet.of_list
-  |> IgnoreLines.remove_batch
-
-
-let register_ignores_for_handle handle =
-  let key = File.Handle.show handle in
-  (* Register new ignores. *)
-  match Ast.SharedMemory.Sources.get handle with
-  | Some source ->
-      let ignore_lines = Source.ignore_lines source in
-      List.iter
-        ~f:(fun ignore_line -> IgnoreLines.add (Ignore.key ignore_line) ignore_line)
-        ignore_lines;
-      IgnoreKeys.add key (List.map ~f:Ignore.key ignore_lines)
-  | _ ->
-      ()
-
-
-let register_mode ~configuration handle =
-  let mode =
-    match Ast.SharedMemory.Sources.get handle with
-    | Some source -> Source.mode source ~configuration
-    | _ -> Source.Default
-  in
-  ErrorModes.add handle mode
-
-
 let register_ignores ~configuration scheduler handles =
+  (* Invalidate keys before updating *)
+  let remove_ignores handles =
+    let keys = List.map ~f:File.Handle.show handles in
+    List.filter_map ~f:IgnoreKeys.get keys
+    |> List.concat
+    |> IgnoreLines.KeySet.of_list
+    |> IgnoreLines.remove_batch;
+    keys
+    |> IgnoreKeys.KeySet.of_list
+    |> IgnoreKeys.remove_batch
+  in
+  let remove_modes handles =
+    ErrorModes.KeySet.of_list handles
+    |> ErrorModes.remove_batch
+  in
   let timer = Timer.start () in
   remove_ignores handles;
+  remove_modes handles;
 
+  (* Register new values *)
+  let register_ignores_for_handle handle =
+    let key = File.Handle.show handle in
+    (* Register new ignores. *)
+    match Ast.SharedMemory.Sources.get handle with
+    | Some source ->
+        let ignore_lines = Source.ignore_lines source in
+        List.iter
+          ~f:(fun ignore_line -> IgnoreLines.add (Ignore.key ignore_line) ignore_line)
+          ignore_lines;
+        IgnoreKeys.add key (List.map ~f:Ignore.key ignore_lines)
+    | _ ->
+        ()
+  in
+  let register_local_mode handle =
+    match Ast.SharedMemory.Sources.get handle with
+    | Some { metadata = { Ast.Source.Metadata.local_mode; _ }; _ } ->
+        ErrorModes.add handle local_mode
+    | _ ->
+        ()
+  in
   let register handles =
     List.iter handles ~f:register_ignores_for_handle;
-    List.iter handles ~f:(register_mode ~configuration);
+    List.iter handles ~f:(register_local_mode);
   in
   Scheduler.iter scheduler ~configuration ~f:register ~inputs:handles;
   Statistics.performance ~name:"registered ignores" ~timer ()
@@ -72,14 +78,6 @@ let ignore ~configuration scheduler handles errors =
     List.filter ~f:not_ignored errors
   in
   let unused_ignores =
-    let paths_from_handles =
-      let get_path paths handle =
-        Ast.SharedMemory.Sources.get handle
-        >>| (fun { Source.handle; _ } -> handle :: paths)
-        |> Option.value ~default:paths
-      in
-      List.fold ~init:[] ~f:get_path
-    in
     let get_unused_ignores path =
       let ignores =
         let key_to_ignores sofar key =
@@ -114,10 +112,7 @@ let ignore ~configuration scheduler handles errors =
       in
       List.fold ~init:[] ~f:filter_active_ignores ignores
     in
-    let map _ handles =
-      paths_from_handles handles
-      |> List.concat_map ~f:get_unused_ignores
-    in
+    let map _ = List.concat_map ~f:get_unused_ignores in
     Scheduler.map_reduce
       scheduler
       ~configuration

@@ -13,27 +13,23 @@ open Expression
 module Class = AnnotatedClass
 
 
-type too_many_arguments = {
-  expected: int;
-  provided: int;
-}
-[@@deriving eq, show]
-
-
 type mismatch = {
   actual: Type.t;
   expected: Type.t;
   name: Identifier.t option;
   position: int;
 }
-[@@deriving eq, show]
+[@@deriving eq, show, compare]
 
 
 type reason =
   | Mismatch of mismatch Node.t
   | MissingArgument of Access.t
-  | TooManyArguments of too_many_arguments
-[@@deriving eq, show]
+  | TooManyArguments of { expected: int; provided: int }
+  | TypedDictionaryAccessWithNonLiteral of string list
+  | TypedDictionaryMissingKey of { typed_dictionary_name: Identifier.t; missing_key: string }
+  | UnexpectedKeyword of Identifier.t
+[@@deriving eq, show, compare]
 
 
 type found = {
@@ -102,12 +98,15 @@ type signature_match = {
 }
 
 
-let select ~resolution ~arguments ~callable:({ Type.Callable.overloads; _ } as callable) =
+let select
+    ~resolution
+    ~arguments
+    ~callable:({ Type.Callable.implementation; overloads; _ } as callable) =
   let open Type.Callable in
-  let match_arity ({ parameters = all_parameters; _ } as overload) =
+  let match_arity ({ parameters = all_parameters; _ } as implementation) =
     let base_signature_match =
       {
-        callable = { callable with Type.Callable.overloads = [overload] };
+        callable = { callable with Type.Callable.implementation; overloads = [] };
         argument_mapping = Parameter.Map.empty;
         constraints = Type.Map.empty;
         ranks = {
@@ -122,42 +121,47 @@ let select ~resolution ~arguments ~callable:({ Type.Callable.overloads; _ } as c
     in
     let rec consume
         ({ argument_mapping; reasons = ({ arity; _ } as reasons); _; } as signature_match)
-        ~position
         ~arguments
         ~parameters =
       let update_mapping parameter argument =
         Map.add_multi argument_mapping ~key:parameter ~data:argument
       in
+      let arity_mismatch reasons ~parameters ~arguments =
+        match parameters with
+        | Defined parameters ->
+            let expected = List.length parameters in
+            let provided = expected + List.length arguments in
+            {
+              reasons with
+              arity = arity @ [TooManyArguments { expected; provided }]
+            }
+        | _ ->
+            reasons
+      in
       match arguments, parameters with
       | [], [] ->
           (* Both empty *)
           Some signature_match
-      | { Argument.value = { Node.value = Starred (Starred.Once _); _ }; _ } :: arguments_tail,
+      | Argument {
+          argument = { Argument.value = { Node.value = Starred (Starred.Once _); _ }; _ };
+          _;
+        } :: arguments_tail,
         []
-      | { Argument.value = { Node.value = Starred (Starred.Twice _); _ }; _ } :: arguments_tail,
+      | Argument {
+          argument = { Argument.value = { Node.value = Starred (Starred.Twice _); _ }; _ };
+          _;
+        } :: arguments_tail,
         [] ->
           (* Starred or double starred arguments; parameters empty *)
-          consume ~position:(position + 1) ~arguments:arguments_tail ~parameters signature_match
+          consume ~arguments:arguments_tail ~parameters signature_match
       | _, [] ->
           (* Arguments; parameters empty *)
-          let reasons =
-            match all_parameters with
-            | Defined parameters ->
-                let expected = List.length parameters in
-                let provided = expected + List.length arguments in
-                {
-                  reasons with
-                  arity = TooManyArguments { expected; provided } :: arity
-                }
-            | _ ->
-                reasons
-          in
+          let reasons = arity_mismatch reasons ~parameters:all_parameters ~arguments in
           Some { signature_match with reasons }
       | [], (Parameter.Named { Parameter.default = true; _ } as parameter) :: parameters_tail ->
           (* Arguments empty, default parameter *)
           let argument_mapping = update_mapping parameter Default in
           consume
-            ~position
             ~arguments
             ~parameters:parameters_tail
             { signature_match with argument_mapping }
@@ -169,20 +173,21 @@ let select ~resolution ~arguments ~callable:({ Type.Callable.overloads; _ } as c
             | None -> Map.set ~key:parameter ~data:[] argument_mapping
           in
           consume
-            ~position
             ~arguments
             ~parameters:parameters_tail
             { signature_match with argument_mapping }
-      | ({ Argument.name = Some _; _ } as argument) :: arguments_tail,
+      | Argument ({ argument = { Argument.name = Some _; _ }; _ } as argument) :: arguments_tail,
         ((Parameter.Keywords _) as parameter) :: _ ->
           (* Labeled argument, keywords parameter *)
-          let argument_mapping = update_mapping parameter (Argument {argument; position}) in
+          let argument_mapping = update_mapping parameter (Argument argument) in
           consume
-            ~position:(position + 1)
             ~arguments:arguments_tail
             ~parameters
             { signature_match with argument_mapping }
-      | ({ Argument.name = Some { Node.value = name; _ }; _ } as argument) :: arguments_tail,
+      | Argument ({
+          argument = { Argument.name = Some { Node.value = name; _ }; _ };
+          _;
+        } as argument) :: arguments_tail,
         parameters ->
           (* Labeled argument *)
           let rec extract_matching_name searched to_search =
@@ -193,88 +198,132 @@ let select ~resolution ~arguments ~callable:({ Type.Callable.overloads; _ } as c
               :: tail
               when Identifier.equal parameter_name name ->
                 Some head, (List.rev searched) @ tail
+            | (Parameter.Keywords _ as head) :: tail ->
+                let matching, parameters = extract_matching_name (head :: searched) tail in
+                let matching = Some (Option.value matching ~default:head) in
+                matching, parameters
             | head :: tail ->
                 extract_matching_name (head :: searched) tail
           in
           let matching_parameter, remaining_parameters = extract_matching_name [] parameters in
-          matching_parameter
-          >>| (fun parameter -> update_mapping parameter (Argument {argument; position}))
-          >>= (fun argument_mapping ->
-              (* Ignore signatures where this isn't found;
-                 should throw new class of arity error instead *)
-              consume
-                ~position:(position + 1)
-                ~arguments:arguments_tail
-                ~parameters:remaining_parameters
-                { signature_match with argument_mapping })
-      | ({ Argument.value = { Node.value = Starred (Starred.Twice _); _ }; _ } as argument)
+          let argument_mapping, reasons =
+            match matching_parameter with
+            | Some matching_parameter ->
+                update_mapping matching_parameter (Argument argument), reasons
+            | None ->
+                argument_mapping, { reasons with arity = arity @ [UnexpectedKeyword name] }
+          in
+          consume
+            ~arguments:arguments_tail
+            ~parameters:remaining_parameters
+            { signature_match with argument_mapping; reasons }
+      | Argument ({
+          argument = { Argument.value = { Node.value = Starred (Starred.Twice _); _ }; _ };
+          _;
+        } as argument)
         :: arguments_tail,
         (Parameter.Keywords _ as parameter) :: _
-      | ({ Argument.value = { Node.value = Starred (Starred.Once _); _ }; _ } as argument)
+      | Argument ({
+            argument = { Argument.value = { Node.value = Starred (Starred.Once _); _ }; _ };
+            _;
+          } as argument)
         :: arguments_tail,
         (Parameter.Variable _ as parameter) :: _ ->
           (* (Double) starred argument, (double) starred parameter *)
-          let argument_mapping = update_mapping parameter (Argument {argument; position}) in
+          let argument_mapping = update_mapping parameter (Argument argument) in
           consume
-            ~position:(position + 1)
             ~arguments:arguments_tail
             ~parameters
             { signature_match with argument_mapping }
-      | { Argument.value = { Node.value = Starred (Starred.Once _); _ }; _ } :: _,
+      | Argument {
+          argument = { Argument.value = { Node.value = Starred (Starred.Once _); _ }; _ };
+          _;
+        } :: _,
         Parameter.Keywords _ :: parameters_tail ->
           (* Starred argument, double starred parameter *)
           consume
-            ~position
             ~arguments
             ~parameters:parameters_tail
             { signature_match with argument_mapping }
-      | { Argument.name = None; _ } :: _, Parameter.Keywords _ :: parameters_tail ->
+      | Argument { argument = { Argument.name = None; _ }; _ } :: _,
+        Parameter.Keywords _ :: parameters_tail ->
           (* Unlabeled argument, double starred parameter *)
           consume
-            ~position
             ~arguments
             ~parameters:parameters_tail
             { signature_match with argument_mapping }
-      | { Argument.value = { Node.value = Starred (Starred.Twice _); _ }; _ } :: _,
+      | Argument {
+          argument = { Argument.value = { Node.value = Starred (Starred.Twice _); _ }; _ };
+          _;
+        } :: _,
         Parameter.Variable _ :: parameters_tail ->
           (* Double starred argument, starred parameter *)
           consume
-            ~position
             ~arguments
             ~parameters:parameters_tail
             { signature_match with argument_mapping }
-      | ({ Argument.name = None; _ } as argument):: arguments_tail,
+      | Argument ({ argument = { Argument.name = None; _ }; _ } as argument) :: arguments_tail,
         (Parameter.Variable _ as parameter) :: _ ->
           (* Unlabeled argument, starred parameter *)
-          let argument_mapping = update_mapping parameter (Argument {argument; position}) in
+          let signature_match =
+            if Identifier.show_sanitized (Parameter.name parameter) = "*" then
+              {
+                signature_match with
+                reasons = arity_mismatch reasons ~parameters:all_parameters ~arguments;
+              }
+            else
+              let argument_mapping = update_mapping parameter (Argument argument) in
+              { signature_match with argument_mapping }
+          in
           consume
-            ~position:(position + 1)
             ~arguments:arguments_tail
             ~parameters
-            { signature_match with argument_mapping }
-      | ({ Argument.value = { Node.value = Starred (Starred.Twice _); _ }; _ } as argument) :: _,
+            signature_match
+      | Argument ({
+          argument = { Argument.value = { Node.value = Starred (Starred.Twice _); _ }; _ };
+          _;
+        } as argument) :: _,
         parameter :: parameters_tail
-      | ({ Argument.value = { Node.value = Starred (Starred.Once _); _ }; _ } as argument) :: _,
+      | Argument ({
+            argument = { Argument.value = { Node.value = Starred (Starred.Once _); _ }; _ };
+            _;
+          } as argument) :: _,
         parameter :: parameters_tail ->
           (* Double starred or starred argument, parameter *)
-          let argument_mapping = update_mapping parameter (Argument {argument; position}) in
+          let argument_mapping = update_mapping parameter (Argument argument) in
           consume
-            ~position
             ~arguments
             ~parameters:parameters_tail
             { signature_match with argument_mapping }
-      | ({ Argument.name = None; _ } as argument) :: arguments_tail, parameter :: parameters_tail ->
+      | Argument ({ argument = { Argument.name = None; _ }; _ } as argument) :: arguments_tail,
+        parameter :: parameters_tail ->
           (* Unlabeled argument, parameter *)
-          let argument_mapping = update_mapping parameter (Argument {argument; position}) in
+          let argument_mapping = update_mapping parameter (Argument argument) in
           consume
-            ~position:(position + 1)
             ~arguments:arguments_tail
             ~parameters:parameters_tail
             { signature_match with argument_mapping }
+      | Default :: _, _ ->
+          failwith "Unpossible"
     in
     match all_parameters with
     | Defined parameters ->
-        consume base_signature_match ~position:1 ~arguments ~parameters
+        let ordered_arguments =
+          let add_original_positions index argument =
+            Argument { argument; position = index + 1 }
+          in
+          let is_labeled = function
+            | Argument { argument = { Argument.name = Some _; _ }; _ } -> true
+            | _ -> false
+          in
+          let labeled_arguments, unlabeled_arguments =
+            arguments
+            |> List.mapi ~f:add_original_positions
+            |> List.partition_tf ~f:is_labeled
+          in
+          labeled_arguments @ unlabeled_arguments
+        in
+        consume base_signature_match ~arguments:ordered_arguments ~parameters
     | Undefined ->
         Some base_signature_match
   in
@@ -282,8 +331,6 @@ let select ~resolution ~arguments ~callable:({ Type.Callable.overloads; _ } as c
     let update ~key ~data ({ reasons = { arity; _ } as reasons; _; } as signature_match) =
       let (parameter_name, parameter_annotation) =
         match key with
-        | Parameter.Anonymous { Parameter.annotation; _ } ->
-            (Access.create "anonymous"), annotation
         | Parameter.Named { Parameter.name; annotation; _ }
         | Parameter.Variable { Parameter.name; annotation; _ }
         | Parameter.Keywords { Parameter.name; annotation; _ } ->
@@ -313,10 +360,16 @@ let select ~resolution ~arguments ~callable:({ Type.Callable.overloads; _ } as c
               ({ constraints; reasons = { annotation; _ }; _; } as signature_match) =
             let reasons =
               let mismatch =
+                let location =
+                  name
+                  >>| Node.location
+                  |> Option.value ~default:location
+                in
                 {
                   actual = argument_annotation;
                   expected = parameter_annotation;
-                  name = Option.map name ~f:Node.value; position;
+                  name = Option.map name ~f:Node.value;
+                  position;
                 }
                 |> Node.create ~location
                 |> fun mismatch -> Mismatch mismatch
@@ -356,7 +409,7 @@ let select ~resolution ~arguments ~callable:({ Type.Callable.overloads; _ } as c
                 let parameters_to_infer = Type.variables parameter_annotation |> List.length in
                 if parameters_to_infer > 0 then
                   let updated_constraints =
-                    let rec update parameter_annotation constraints =
+                    let rec update argument_annotation parameter_annotation constraints =
                       let update_constraints ~constraints ~variable ~resolved =
                         let resolved =
                           Map.find constraints variable
@@ -365,11 +418,13 @@ let select ~resolution ~arguments ~callable:({ Type.Callable.overloads; _ } as c
                         in
                         let in_constraints =
                           match variable with
-                          | Type.Variable { Type.constraints = Type.Explicit constraints; _ } ->
+                          | Type.Variable { constraints = Type.Explicit constraints; _ } ->
                               let in_constraint bound =
                                 Resolution.less_or_equal resolution ~left:resolved ~right:bound
                               in
                               List.exists ~f:in_constraint constraints
+                          | Type.Variable { constraints = Type.Bound bound; _ } ->
+                              Resolution.less_or_equal resolution ~left:resolved ~right:bound
                           | _ ->
                               true
                         in
@@ -411,12 +466,56 @@ let select ~resolution ~arguments ~callable:({ Type.Callable.overloads; _ } as c
                       | _, Type.Union annotations ->
                           List.fold
                             ~init:(Some constraints)
-                            ~f:(fun constraints annotation -> constraints >>= update annotation)
+                            ~f:(fun constraints annotation ->
+                                constraints >>= update argument_annotation annotation)
                             annotations
+                      | Type.Callable {
+                          Type.Callable.implementation = {
+                            Type.Callable.annotation = argument_annotation;
+                            parameters = argument_parameters;
+                          };
+                          _;
+                        },
+                        Type.Callable {
+                          Type.Callable.implementation = {
+                            Type.Callable.annotation = parameter_annotation;
+                            parameters = parameters;
+                          };
+                          _;
+                        } ->
+                          let constraints =
+                            update
+                              argument_annotation
+                              parameter_annotation
+                              constraints
+                          in
+                          let argument_parameters =
+                            match argument_parameters with
+                            | Type.Callable.Defined parameters ->
+                                List.map parameters ~f:Type.Callable.Parameter.annotation
+                            | _ ->
+                                []
+                          in
+                          let parameters =
+                            match parameters with
+                            | Type.Callable.Defined parameters ->
+                                List.map parameters ~f:Type.Callable.Parameter.annotation
+                            | _ ->
+                                []
+                          in
+                          List.fold2
+                            argument_parameters
+                            parameters
+                            ~init:constraints
+                            ~f:(fun constraints argument parameter ->
+                                constraints >>= update argument parameter)
+                          |> (function
+                              | List.Or_unequal_lengths.Ok constraints -> constraints
+                              | _ -> None)
                       | _ ->
                           Some constraints
                     in
-                    update parameter_annotation constraints
+                    update argument_annotation parameter_annotation constraints
                   in
                   updated_constraints
                   >>| (fun updated_constraints ->
@@ -453,14 +552,19 @@ let select ~resolution ~arguments ~callable:({ Type.Callable.overloads; _ } as c
                       |> mapping_value_parameter
                   | { Argument.value = { Node.value = Starred (Starred.Once expression); _ }; _ } ->
                       let sequence_parameter annotation =
-                        let sequence = Type.parametric "typing.Sequence" [Type.Object] in
-                        if Resolution.less_or_equal resolution ~left:annotation ~right:sequence then
-                          (* Try to extract first parameter. *)
-                          Type.parameters annotation
-                          |> List.hd
-                          |> Option.value ~default:Type.Top
+                        let iterable =
+                          (* Unannotated parameters are assigned a type of Bottom for inference,
+                             in which case we should avoid joining with an iterable, as doing so
+                             would suppress errors. *)
+                          if Type.equal annotation Type.Bottom then
+                            Type.Top
+                          else
+                            Resolution.join resolution annotation (Type.iterable Type.Bottom)
+                        in
+                        if Type.is_iterable iterable then
+                          Type.single_parameter iterable
                         else
-                          annotation
+                          Type.Top
                       in
                       Resolution.resolve resolution expression
                       |> sequence_parameter
@@ -482,17 +586,22 @@ let select ~resolution ~arguments ~callable:({ Type.Callable.overloads; _ } as c
                 |> (fun signature_match -> check signature_match tail)
           in
           let instantiate_unbound_constraints
-              ({ callable = { Type.Callable.overloads; _ }; constraints; _ } as signature_match) =
+              ({
+                callable = { Type.Callable.implementation; _ };
+                constraints;
+                _;
+              } as signature_match) =
             (* Map unresolved and unbound constraints to `Bottom`. *)
             let unbound_variables =
               let is_unbound = function
-                | Type.Variable { Type.constraints = Type.Explicit _; _ } -> false
+                | Type.Variable { constraints = Type.Explicit _; _ } -> false
                 | _ -> true
               in
               Type.Callable {
                 Type.Callable.kind = Anonymous;
-                overloads;
-                implicit = Function;
+                implementation;
+                overloads = [];
+                implicit = None;
               }
               |> Type.variables
               |> List.filter ~f:is_unbound
@@ -570,15 +679,26 @@ let select ~resolution ~arguments ~callable:({ Type.Callable.overloads; _ } as c
     >>| determine_reason
     |> Option.value ~default:(NotFound { callable; reason = None })
   in
-  List.filter_map ~f:match_arity overloads
-  |> List.map ~f:check_annotations
-  |> List.map ~f:calculate_rank
-  |> find_closest
+  let get_match signatures =
+    signatures
+    |> List.filter_map ~f:match_arity
+    |> List.map ~f:check_annotations
+    |> List.map ~f:calculate_rank
+    |> find_closest
+  in
+  if List.is_empty overloads then
+    get_match [implementation]
+  else if Type.Callable.Overload.is_undefined implementation then
+    get_match overloads
+  else
+    match get_match overloads with
+    | Found signature_match -> Found signature_match
+    | NotFound _ -> get_match [implementation]
 
 
 let determine signature ~resolution ~annotation =
   match annotation, signature with
-  | Type.Parametric { Type.name; parameters } as annotation,
+  | Type.Parametric { name; parameters } as annotation,
     Found { constraints; _ } ->
       Resolution.class_definition resolution annotation
       >>| Class.create
@@ -593,7 +713,7 @@ let determine signature ~resolution ~annotation =
                   | _ -> parameter
                 in
                 let parameters = List.map2_exn ~f:uninstantiated generics parameters in
-                Type.Parametric { Type.name; parameters }
+                Type.Parametric { name; parameters }
               in
               Type.instantiate ~constraints:(Map.find constraints) uninstantiated
               |> Type.instantiate

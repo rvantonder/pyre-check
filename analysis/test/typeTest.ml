@@ -40,6 +40,13 @@ let test_create _ =
   assert_create
     "typing.Dict.__getitem__((int, str))"
     (Type.dictionary ~key:Type.integer ~value:Type.string);
+  (* Type aliases in typeshed. *)
+  assert_create "typing.Counter" (Type.parametric "collections.Counter" [Type.Object]);
+  assert_create "typing.Counter[int]" (Type.parametric "collections.Counter" [Type.integer]);
+  assert_create "typing.ChainMap" (Type.parametric "collections.ChainMap" [Type.Object]);
+  assert_create "typing.ChainMap[int]" (Type.parametric "collections.ChainMap" [Type.integer]);
+  assert_create "typing.Deque" (Type.parametric "collections.deque" [Type.Object]);
+  assert_create "typing.Deque[int]" (Type.parametric "collections.deque" [Type.integer]);
 
   (* Check renaming. *)
   assert_create "typing.List[int]" (Type.list Type.integer);
@@ -62,6 +69,14 @@ let test_create _ =
   assert_create "typing.Union[int, str]" (Type.union [Type.integer; Type.string]);
   assert_create "typing.Union[int, typing.Any]" Type.Object;
   assert_create "typing.Union[int, typing.Optional[$bottom]]" (Type.optional Type.integer);
+  assert_create "typing.Union[int, typing.Optional[$bottom], str, typing.Tuple[int, str]]"
+    (Type.optional
+       (Type.union [
+           Type.integer;
+           Type.string;
+           Type.tuple [Type.integer; Type.string];
+         ]
+       ));
 
   (* Nested renaming. *)
   assert_create "typing.Set[typing.Any]" (Type.set Type.Object);
@@ -71,7 +86,14 @@ let test_create _ =
 
   (* Check variables. *)
   assert_create "typing.TypeVar('_T')" (Type.variable "_T");
-  assert_create "typing.TypeVar('_T', covariant=True)" (Type.variable "_T");
+  assert_create
+    "typing.TypeVar('_T', $parameter$covariant=True)"
+    (Type.variable ~variance:Covariant "_T");
+  assert_create "typing.TypeVar('_T', $parameter$covariant=False)" (Type.variable "_T");
+  assert_create
+    "typing.TypeVar('_T', $parameter$contravariant=True)"
+    (Type.variable ~variance:Contravariant "_T");
+  assert_create "typing.TypeVar('_T', $parameter$contravariant=False)" (Type.variable "_T");
   assert_create
     "typing.TypeVar('_T', int)"
     (Type.variable ~constraints:(Type.Explicit [Type.integer]) "_T");
@@ -79,6 +101,12 @@ let test_create _ =
   assert_create
     "typing.TypeVar('_T', $parameter$bound=int)"
     (Type.variable ~constraints:(Type.Bound Type.integer) "_T");
+  assert_create
+    "typing.TypeVar('_T', $parameter$bound='C')"
+    (Type.variable ~constraints:(Type.Bound (Type.primitive "C")) "_T");
+  assert_create
+    "typing.TypeVar('_T', 'C', X)"
+    (Type.variable ~constraints:(Type.Explicit [Type.primitive "C"; Type.primitive "X"]) "_T");
   assert_create
     "typing.TypeVar('_T', int, name=float)"
     (Type.variable ~constraints:(Type.Explicit [Type.integer]) "_T");
@@ -164,7 +192,7 @@ let test_create _ =
     "typing.Callable.__getitem__((..., int))"
     (Type.callable ~annotation:Type.integer ());
   assert_create
-    "typing.Callable[..., int][..., str]"
+    "typing.Callable[..., int][[..., str]]"
     (Type.callable
        ~overloads:[
          {
@@ -179,9 +207,20 @@ let test_create _ =
     "typing.Callable('name')[..., int]"
     (Type.Callable {
         kind = Type.Callable.Named (Access.create "name");
-        overloads = [ { annotation = Type.integer; parameters = Undefined }];
-        implicit = Type.Callable.Function;
+        implementation = { annotation = Type.integer; parameters = Undefined };
+        overloads = [];
+        implicit = None;
       });
+
+  assert_create
+    "typing.Callable('foo')[..., $unknown]"
+    (Type.Callable {
+        kind = Type.Callable.Named (Access.create "foo");
+        implementation = { annotation = Type.Top; parameters = Undefined };
+        overloads = [];
+        implicit = None;
+      });
+
   assert_create
     "typing.Other('name')[..., int]"
     Type.Top;
@@ -190,89 +229,115 @@ let test_create _ =
     "typing.Callable[[int, str], int]"
     (Type.Callable {
         kind = Type.Callable.Anonymous;
-        overloads = [
-          {
-            annotation = Type.integer;
-            parameters = Defined [
-                Parameter.Anonymous { Parameter.index = 0; annotation = Type.integer};
-                Parameter.Anonymous { Parameter.index = 1; annotation = Type.string};
-              ];
-          };
-        ];
-        implicit = Type.Callable.Function;
+        implementation = {
+          annotation = Type.integer;
+          parameters = Defined [
+              Parameter.Named {
+                Parameter.name = Access.create "$0";
+                annotation = Type.integer;
+                default = false;
+              };
+              Parameter.Named {
+                Parameter.name = Access.create "$1";
+                annotation = Type.string;
+                default = false;
+              };
+            ];
+        };
+        overloads = [];
+        implicit = None;
       });
   assert_create
     "typing.Callable[[int, Named(a, int), Variable(variable), Keywords(keywords)], int]"
     (Type.Callable {
         kind = Anonymous;
-        overloads = [
-          {
-            annotation = Type.integer;
-            parameters = Defined [
-                Parameter.Anonymous { Parameter.index = 0; annotation = Type.integer};
-                Parameter.Named {
-                  Parameter.name = Access.create "a";
-                  annotation = Type.integer;
-                  default = false;
-                };
-                Parameter.Variable {
-                  Parameter.name = Access.create "variable";
-                  annotation = Type.Top;
-                  default = false;
-                };
-                Parameter.Keywords {
-                  Parameter.name = Access.create "keywords";
-                  annotation = Type.Top;
-                  default = false;
-                };
-              ];
-          };
-        ];
-        implicit = Type.Callable.Function;
+        implementation = {
+          annotation = Type.integer;
+          parameters = Defined [
+              Parameter.Named {
+                Parameter.name = Access.create "$0";
+                annotation = Type.integer;
+                default = false;
+              };
+              Parameter.Named {
+                Parameter.name = Access.create "a";
+                annotation = Type.integer;
+                default = false;
+              };
+              Parameter.Variable {
+                Parameter.name = Access.create "variable";
+                annotation = Type.Top;
+                default = false;
+              };
+              Parameter.Keywords {
+                Parameter.name = Access.create "keywords";
+                annotation = Type.Top;
+                default = false;
+              };
+            ];
+        };
+        overloads = [];
+        implicit = None;
       });
   assert_create
     "typing.Callable[[int, Variable(variable, int), Keywords(keywords, str)], int]"
     (Type.Callable {
         kind = Anonymous;
-        overloads = [
-          {
-            annotation = Type.integer;
-            parameters = Defined [
-                Parameter.Anonymous { Parameter.index = 0; annotation = Type.integer};
-                Parameter.Variable {
-                  Parameter.name = Access.create "variable";
-                  annotation = Type.integer;
-                  default = false;
-                };
-                Parameter.Keywords {
-                  Parameter.name = Access.create "keywords";
-                  annotation = Type.string;
-                  default = false;
-                };
-              ];
-          };
-        ];
-        implicit = Type.Callable.Function;
+        implementation = {
+          annotation = Type.integer;
+          parameters = Defined [
+              Parameter.Named {
+                Parameter.name = Access.create "$0";
+                annotation = Type.integer;
+                default = false;
+              };
+              Parameter.Variable {
+                Parameter.name = Access.create "variable";
+                annotation = Type.integer;
+                default = false;
+              };
+              Parameter.Keywords {
+                Parameter.name = Access.create "keywords";
+                annotation = Type.string;
+                default = false;
+              };
+            ];
+        };
+        overloads = [];
+        implicit = None;
       });
   assert_create
     "typing.Callable[[Named(a, int, default)], int]"
     (Type.Callable {
         kind = Anonymous;
-        overloads = [
-          {
-            annotation = Type.integer;
-            parameters = Defined [
-                Parameter.Named {
-                  Parameter.name = Access.create "a";
-                  annotation = Type.integer;
-                  default = true;
-                };
-              ];
-          };
-        ];
-        implicit = Type.Callable.Function;
+        implementation = {
+          annotation = Type.integer;
+          parameters = Defined [
+              Parameter.Named {
+                Parameter.name = Access.create "a";
+                annotation = Type.integer;
+                default = true;
+              };
+            ];
+        };
+        overloads = [];
+        implicit = None;
       });
-  assert_create "typing.Callable[int]" (Type.callable ~annotation:Type.Top ())
+  assert_create "typing.Callable[int]" (Type.callable ~annotation:Type.Top ());
+  assert_create "function" (Type.callable ~annotation:Type.Object ());
+  assert_create
+    "typing.Callable[..., function]"
+    (Type.callable ~annotation:(Type.callable ~annotation:Type.Object ()) ());
+
+  assert_create
+    "mypy_extensions.TypedDict[('Movie', ('year', int), ('name', str))]"
+    (Type.TypedDictionary {
+        name = (Identifier.create "Movie");
+        fields = [
+          { name = "year"; annotation = Type.integer };
+          { name = "name"; annotation = Type.string };
+        ];
+      })
 
 
 let test_instantiate _ =
@@ -313,7 +378,7 @@ let test_expression _ =
 
   assert_expression
     (Type.Parametric {
-        Type.name = ~~"foo.bar";
+        name = ~~"foo.bar";
         parameters = [Type.primitive "baz"];
       })
     "foo.bar.__getitem__(baz)";
@@ -325,7 +390,7 @@ let test_expression _ =
     (Type.Tuple (Type.Unbounded Type.integer))
     "typing.Tuple.__getitem__((int, ...))";
   assert_expression
-    (Type.Parametric { Type.name = ~~"list"; parameters = [Type.integer] })
+    (Type.Parametric { name = ~~"list"; parameters = [Type.integer] })
     "typing.List.__getitem__(int)";
 
   (* Callables. *)
@@ -347,17 +412,25 @@ let test_expression _ =
        ]
        ~annotation:Type.integer
        ())
-    "typing.Callable.__getitem__((..., int)).__getitem__((..., str))";
+    "typing.Callable.__getitem__((..., int)).__getitem__(__getitem__((..., str)))";
 
   assert_expression
     (Type.callable
        ~parameters:(Type.Callable.Defined [
-           Parameter.Anonymous { Parameter.index = 0; annotation = Type.integer};
-           Parameter.Anonymous { Parameter.index = 1; annotation = Type.string};
+           Parameter.Named {
+             Parameter.name = Access.create "$0";
+             annotation = Type.integer;
+             default = false;
+           };
+           Parameter.Named {
+             Parameter.name = Access.create "$1";
+             annotation = Type.string;
+             default = false;
+           };
          ])
        ~annotation:Type.integer
        ())
-    "typing.Callable.__getitem__(([int, str], int))";
+    "typing.Callable.__getitem__(([Named($0, int), Named($1, str)], int))";
   assert_expression
     (Type.callable
        ~parameters:(Type.Callable.Defined [
@@ -390,7 +463,11 @@ let test_expression _ =
   assert_expression
     (Type.callable
        ~parameters:(Defined [
-           Parameter.Anonymous { Parameter.index = 1; annotation = Type.integer};
+           Parameter.Named {
+             Parameter.name = Access.create "$0";
+             annotation = Type.integer;
+             default = false;
+           };
            Parameter.Variable {
              Parameter.name = Access.create "variable";
              annotation = Type.integer;
@@ -404,7 +481,18 @@ let test_expression _ =
          ])
        ~annotation:Type.integer
        ())
-    "typing.Callable.__getitem__(([int, Variable(variable, int), Keywords(keywords, str)], int))"
+    "typing.Callable.__getitem__(([Named($0, int), Variable(variable, int), Keywords(keywords, str)], int))";
+
+  assert_expression
+    (Type.TypedDictionary {
+        name = Identifier.create "Movie";
+        fields = [
+          { name = "title"; annotation = Type.string };
+          { name = "year"; annotation = Type.integer };
+        ];
+      }
+    )
+    "mypy_extensions.TypedDict[(\"Movie\", (\"title\", str), (\"year\", int))]"
 
 
 let test_union _ =
@@ -421,6 +509,9 @@ let test_union _ =
     (Type.union [Type.float; Type.string; Type.optional Type.float])
     (Type.Union [Type.optional Type.float; Type.string]);
 
+  assert_true (Type.equal (Type.union [Type.float; Type.Object]) Type.Object);
+  assert_true (Type.equal (Type.union [Type.float; Type.Top]) Type.Top);
+
   assert_true
     (Type.equal (Type.union [Type.string; Type.float]) (Type.Union [Type.float; Type.string]));
   assert_true
@@ -431,6 +522,76 @@ let test_union _ =
   assert_equal
     (Type.union [Type.float; Type.union[Type.string; Type.bytes]])
     (Type.union [Type.float; Type.string; Type.bytes])
+
+
+let test_primitives _ =
+  assert_equal
+    []
+    (Type.primitives (Type.callable ~annotation:Type.Top ()));
+  assert_equal
+    [Type.integer]
+    (Type.primitives (Type.callable ~annotation:Type.integer ()));
+
+  assert_equal
+    []
+    (Type.primitives (Type.optional Type.Top));
+  assert_equal
+    [Type.integer]
+    (Type.primitives (Type.optional Type.integer));
+
+  assert_equal
+    []
+    (Type.primitives (Type.Tuple (Type.Unbounded Type.Top)));
+  assert_equal
+    [Type.integer]
+    (Type.primitives (Type.Tuple (Type.Unbounded Type.integer)));
+
+  assert_equal
+    []
+    (Type.primitives (Type.variable ~constraints:(Type.Explicit [Type.Top]) "T"));
+  assert_equal
+    [Type.integer]
+    (Type.primitives (Type.variable ~constraints:(Type.Explicit [Type.integer]) "T"));
+
+  assert_equal
+    [Type.integer]
+    (Type.primitives (Type.parametric "parametric" [Type.integer; Type.Top]));
+  assert_equal
+    [Type.integer; Type.string]
+    (Type.primitives (Type.parametric "parametric" [Type.integer; Type.string]));
+
+  assert_equal
+    [Type.string]
+    (Type.primitives (Type.tuple [Type.Top; Type.string]));
+  assert_equal
+    [Type.integer; Type.string]
+    (Type.primitives (Type.tuple [Type.integer; Type.string]));
+  assert_equal
+    [Type.integer; Type.string]
+    (Type.primitives (Type.union [Type.integer; Type.string]));
+
+  assert_equal
+    []
+    (Type.primitives Type.Top);
+  assert_equal
+    []
+    (Type.primitives Type.Bottom);
+  assert_equal
+    [Type.integer]
+    (Type.primitives Type.integer);
+  assert_equal
+    []
+    (Type.primitives Type.Object);
+
+  assert_equal
+    [Type.integer; Type.string]
+    (Type.TypedDictionary {
+        name = (Identifier.create "Movie");
+        fields = [
+          { name = "year"; annotation = Type.integer };
+          { name = "name"; annotation = Type.string };
+        ];
+      } |> Type.primitives)
 
 
 let test_exists _ =
@@ -489,11 +650,11 @@ let test_is_not_instantiated _ =
 let test_is_meta _ =
   assert_true
     (Type.is_meta
-       (Type.Parametric { Type.name = ~~"type"; parameters = [Type.integer] }));
+       (Type.Parametric { name = ~~"type"; parameters = [Type.integer] }));
   assert_false (Type.is_meta Type.integer);
   assert_false
     (Type.is_meta
-       (Type.Parametric { Type.name = ~~"typing.Type"; parameters = [Type.integer] }))
+       (Type.Parametric { name = ~~"typing.Type"; parameters = [Type.integer] }))
 
 
 
@@ -520,20 +681,20 @@ let test_is_unknown _ =
     (Type.is_unknown (
         Type.Optional
           (Type.Parametric {
-              Type.name = ~~"foo";
+              name = ~~"foo";
               parameters = [Type.integer; Type.Top];
             })));
 
   assert_true
     (Type.is_unknown (
         (Type.Parametric {
-            Type.name = ~~"foo";
+            name = ~~"foo";
             parameters = [Type.integer; Type.Top];
           })));
   assert_false
     (Type.is_unknown (
         (Type.Parametric {
-            Type.name = ~~"foo";
+            name = ~~"foo";
             parameters = [Type.integer];
           })));
 
@@ -603,6 +764,16 @@ let test_mismatch_with_any _ =
     (Type.mismatch_with_any
        (Type.dictionary ~key:Type.Object ~value:Type.bool)
        (Type.parametric "typing.Mapping" [Type.integer; Type.bool]));
+
+  assert_true
+    (Type.mismatch_with_any
+       (Type.dictionary ~key:Type.Object ~value:Type.bool)
+       (Type.parametric "collections.OrderedDict" [Type.integer; Type.bool]));
+
+  assert_true
+    (Type.mismatch_with_any
+       (Type.dictionary ~key:Type.integer ~value:Type.bool)
+       (Type.parametric "collections.OrderedDict" [Type.Object; Type.bool]));
 
   assert_true
     (Type.mismatch_with_any
@@ -696,7 +867,37 @@ let test_mismatch_with_any _ =
   assert_false
     (Type.mismatch_with_any
        (Type.Union [Type.list Type.integer; Type.string])
-       (Type.parametric "unknown" [Type.Object]))
+       (Type.parametric "unknown" [Type.Object]));
+
+  assert_true
+    (Type.mismatch_with_any
+       (Type.callable ~annotation:Type.integer ())
+       Type.Object);
+  assert_true
+    (Type.mismatch_with_any
+       Type.Object
+       (Type.callable ~annotation:Type.integer ()));
+  assert_true
+    (Type.mismatch_with_any
+       Type.Object
+       (Type.union [Type.integer; Type.callable ~annotation:Type.integer ()]));
+
+  assert_true
+    (Type.mismatch_with_any
+       (parse_callable "typing.Callable[[typing.Any], int]")
+       (parse_callable "typing.Callable[[str], int]"));
+  assert_true
+    (Type.mismatch_with_any
+       (parse_callable "typing.Callable[[int], typing.Any]")
+       (parse_callable "typing.Callable[[int], int]"));
+  assert_true
+    (Type.mismatch_with_any
+       (parse_callable "typing.Callable[[int], typing.Any]")
+       (parse_callable "typing.Callable[[str], int]"));
+  assert_false
+    (Type.mismatch_with_any
+       (parse_callable "typing.Callable[[typing.Any, typing.Any], typing.Any]")
+       (parse_callable "typing.Callable[[typing.Any], typing.Any]"))
 
 
 let test_class_name _ =
@@ -721,21 +922,21 @@ let test_optional_value _ =
     (Type.optional_value (
         Type.Optional
           (Type.Parametric {
-              Type.name = ~~"foo";
+              name = ~~"foo";
               parameters = [Type.integer; Type.Top];
             })))
     (Type.Parametric {
-        Type.name = ~~"foo";
+        name = ~~"foo";
         parameters = [Type.integer; Type.Top];
       });
   assert_equal
     (Type.optional_value
        (Type.Parametric {
-           Type.name = ~~"foo";
+           name = ~~"foo";
            parameters = [Type.integer; Type.Top];
          }))
     (Type.Parametric {
-        Type.name = ~~"foo";
+        name = ~~"foo";
         parameters = [Type.integer; Type.Top];
       })
 
@@ -745,11 +946,11 @@ let test_async_generator_value _ =
     ~printer:(Format.asprintf "%a" Type.pp)
     (Type.async_generator_value (
         Type.Parametric {
-          Type.name = Identifier.create "typing.AsyncGenerator";
+          name = Identifier.create "typing.AsyncGenerator";
           parameters = [Type.integer; Type.Optional Type.Bottom];
         }))
     (Type.Parametric {
-        Type.name = Identifier.create "typing.Generator";
+        name = Identifier.create "typing.Generator";
         parameters = [Type.integer; Type.Optional Type.Bottom; Type.Optional Type.Bottom];
       })
 
@@ -787,7 +988,7 @@ let test_dequalify _ =
 
   assert_dequalify
     (Type.Union [Type.string; create "A.B.C"])
-    (Type.parametric "typing.Union" [Type.string; create "C"]);
+    (Type.parametric "typing.Union" [create "C"; Type.string]);
 
   assert_dequalify
     (create "d")
@@ -822,18 +1023,24 @@ let test_from_overloads _ =
   assert_create ["typing.Callable('foo')[..., int]"; "typing.Callable('bar')[..., int]"] "$unknown";
   assert_create
     ["typing.Callable('foo')[..., int]"; "typing.Callable('foo')[..., str]"]
-    "typing.Callable('foo')[..., int][..., str]";
+    "typing.Callable('foo')[..., str]";
   assert_create
     [
       "typing.Callable('foo')[..., int]";
       "typing.Callable('foo')[[int, str], str]";
       "typing.Callable('foo')[[int, str, str], int]";
     ]
-    "typing.Callable('foo')[..., int][[int, str], str][[int, str, str], int]"
-
+    "typing.Callable('foo')[[int, str, str], int]";
+  assert_create
+    [
+      "typing.Callable('foo')[..., $unknown][[[int], int]]";
+      "typing.Callable('foo')[[str], str]";
+      "typing.Callable('foo')[[int], int][[[str], str]]";
+    ]
+    "typing.Callable('foo')[[int], int][[[int], int][[str], str]]"
 
 let test_with_return_annotation _ =
-  let assert_with_return_annotation return_annotation callable expected =
+  let assert_with_return_annotation annotation callable expected =
     let callable =
       match Type.create ~aliases:(fun _ -> None) (parse_single_expression callable) with
       | Type.Callable callable -> callable
@@ -843,7 +1050,7 @@ let test_with_return_annotation _ =
       ~cmp:Type.equal
       ~printer:Type.show
       (Type.create ~aliases:(fun _ -> None) (parse_single_expression expected))
-      (Type.Callable (Type.Callable.with_return_annotation ~return_annotation callable))
+      (Type.Callable (Type.Callable.with_return_annotation ~annotation callable))
   in
 
   assert_with_return_annotation
@@ -853,8 +1060,217 @@ let test_with_return_annotation _ =
 
   assert_with_return_annotation
     Type.string
-    "typing.Callable('foo')[..., int][[int], int]"
-    "typing.Callable('foo')[..., str][[int], str]"
+    "typing.Callable('foo')[..., int][[[int], int]]"
+    "typing.Callable('foo')[..., str][[[int], str]]"
+
+
+let test_overload_parameters _ =
+  let assert_parameters callable expected =
+    let { Type.Callable.overloads; _ } =
+      Type.create ~aliases:(fun _ -> None) (parse_single_expression callable)
+      |> function
+      | Type.Callable callable -> callable
+      | _ -> failwith ("Could not extract callable from " ^ callable)
+    in
+    let parameters =
+      List.hd_exn overloads
+      |> Type.Callable.Overload.parameters
+      |> Option.value ~default:[]
+      |> List.map ~f:Type.Callable.Parameter.annotation
+      |> List.map ~f:Type.show
+    in
+    assert_equal parameters expected
+  in
+  assert_parameters "typing.Callable('foo')[..., $unknown][[[int], str]]" ["int"];
+  assert_parameters "typing.Callable('foo')[..., $unknown][[[int, str], str]]" ["int"; "str"];
+  assert_parameters "typing.Callable('foo')[..., $unknown][[[], str]]" []
+
+
+let test_variables _ =
+  let assert_variables source expected =
+    let aliases =
+      let aliases =
+        Type.Map.of_alist_exn [
+          Type.primitive "T", Type.variable "T";
+          Type.primitive "S", Type.variable "S";
+        ]
+      in
+      Map.find aliases
+    in
+    let variables =
+      Type.create ~aliases (parse_single_expression source)
+      |> Type.variables
+    in
+    assert_equal (List.map expected ~f:Type.variable) variables
+  in
+  assert_variables "T" ["T"];
+  assert_variables "Parametric[int, T]" ["T"];
+  assert_variables "Parametric[T, S]" ["T"; "S"];
+  assert_variables "typing.Callable[..., int]" [];
+  assert_variables "typing.Callable[..., T]" ["T"];
+  assert_variables "typing.Callable[[T, int], str]" ["T"]
+
+
+let test_parameter_name_compatibility _ =
+  let parameter name =
+    Type.Callable.Parameter.Named {
+      Type.Callable.Parameter.name = Access.create name;
+      annotation = Type.integer;
+      default = false;
+    }
+  in
+  assert_true
+    (Type.Callable.Parameter.names_compatible
+       (parameter "argument")
+       (parameter "argument"));
+  assert_true
+    (Type.Callable.Parameter.names_compatible
+       (parameter "argument")
+       (parameter "$0"));
+  assert_true
+    (Type.Callable.Parameter.names_compatible
+       (parameter "$0")
+       (parameter "argument"));
+  assert_true
+    (Type.Callable.Parameter.names_compatible
+       (parameter "$0")
+       (parameter "$1"));
+
+  (* Underscores are ignored for the purposes of typechecking parameter compatibility. *)
+  assert_true
+    (Type.Callable.Parameter.names_compatible
+       (parameter "argument")
+       (parameter "_argument"));
+  assert_true
+    (Type.Callable.Parameter.names_compatible
+       (parameter "_argument")
+       (parameter "argument"));
+  assert_true
+    (Type.Callable.Parameter.names_compatible
+       (parameter "__argument")
+       (parameter "argument"));
+  assert_true
+    (Type.Callable.Parameter.names_compatible
+       (parameter "argument")
+       (parameter "__argument"));
+  assert_false
+    (Type.Callable.Parameter.names_compatible
+       (parameter "argument")
+       (parameter "other"));
+  assert_false
+    (Type.Callable.Parameter.names_compatible
+       (parameter "_argument")
+       (parameter "other"))
+
+
+let test_lambda _ =
+  assert_true
+    (Type.equal
+       (parse_callable "typing.Callable[[Named(x, str)], int]")
+       (Type.lambda
+          ~parameters:[Access.create "x", Type.string]
+          ~return_annotation:Type.integer));
+  assert_true
+    (Type.equal
+       (parse_callable "typing.Callable[[Keywords(kwargs, str)], int]")
+       (Type.lambda
+          ~parameters:[Access.create "**kwargs", Type.string]
+          ~return_annotation:Type.integer));
+  assert_true
+    (Type.equal
+       (parse_callable "typing.Callable[[Variable(args, str)], int]")
+       (Type.lambda
+          ~parameters:[Access.create "*args", Type.string]
+          ~return_annotation:Type.integer))
+
+
+let test_visit _ =
+  let create source =
+    Type.create ~aliases:(fun _ -> None) (parse_single_expression source)
+  in
+  let assert_types_equal annotation expected  =
+    assert_equal
+      ~printer:Type.show
+      ~cmp:Type.equal
+      expected
+      annotation
+  in
+
+  let module CountTransform = Type.Transform.Make(struct
+      type state = int
+      let visit state _ = (state + 1), Type.integer
+      let visit_children _  _ = true
+    end)
+  in
+  let end_state, transformed = CountTransform.visit 0 (create "typing.List[int]") in
+  assert_types_equal transformed Type.integer;
+  assert_equal ~printer:string_of_int 2 end_state;
+
+  let end_state, transformed = CountTransform.visit 0 (create "Foo[Bar[Baz, Bop], Bang]") in
+  assert_types_equal transformed Type.integer;
+  assert_equal ~printer:string_of_int 5 end_state;
+
+  let module SubstitutionTransform = Type.Transform.Make(struct
+      type state = int
+      let visit state annotation =
+        match annotation with
+        | Type.Primitive integer when Identifier.show integer = "int" && state > 0 ->
+            (state - 1), Type.string
+        | _ ->
+            state, annotation
+      let visit_children _ = function | Type.Optional _ -> false | _ -> true
+    end)
+  in
+
+  let end_state, transformed =
+    SubstitutionTransform.visit 1 (create "typing.Callable[[int], int]")
+  in
+  assert_types_equal transformed (create "typing.Callable[[str], int]");
+  assert_equal ~printer:string_of_int  0 end_state;
+
+  let end_state, transformed =
+    SubstitutionTransform.visit 1 (create "typing.Callable[[typing.Optional[int], int], int]")
+  in
+  assert_types_equal transformed (create "typing.Callable[[typing.Optional[int], str], int]");
+  assert_equal ~printer:string_of_int  0 end_state;
+
+  let end_state, transformed =
+    SubstitutionTransform.visit
+      1
+      (create "mypy_extensions.TypedDict[('int', ('int', int), ('str', int))]")
+  in
+  assert_types_equal
+    transformed
+    (create "mypy_extensions.TypedDict[('int', ('int', str), ('str', int))]");
+  assert_equal ~printer:string_of_int 0 end_state;
+
+  let module ConcatenateTransform = Type.Transform.Make(struct
+      type state = string
+      let visit state annotation =
+        match annotation with
+        | Type.Primitive primitive ->
+            state ^ (Identifier.show primitive), annotation
+        | Type.Parametric { name; parameters; } ->
+            "",
+            Type.Parametric
+              { name = Identifier.create ((Identifier.show name) ^ state); parameters }
+        | _ ->
+            state, annotation
+      let visit_children _  _ = true
+    end)
+  in
+  let end_state, transformed =
+    ConcatenateTransform.visit "" (create "Foo[Bar[Baz, Bop], Bro[Loop, typing.Optional[Land]]]")
+  in
+  assert_types_equal
+    transformed
+    (create "Foo[BarBazBop[Baz, Bop], BroLoopLand[Loop, typing.Optional[Land]]]");
+  assert_equal "" end_state;
+
+  ()
+
+
+
 
 let () =
   "type">:::[
@@ -862,6 +1278,7 @@ let () =
     "instantiate">::test_instantiate;
     "expression">::test_expression;
     "union">::test_union;
+    "primitives">::test_primitives;
     "exists">::test_exists;
     "is_async_generator">::test_is_generator;
     "contains_callable">::test_contains_callable;
@@ -877,10 +1294,14 @@ let () =
     "optional_value">::test_optional_value;
     "async_generator_value">::test_async_generator_value;
     "dequalify">::test_dequalify;
+    "variables">::test_variables;
+    "lambda">::test_lambda;
+    "visit">:: test_visit;
   ]
-  |> run_test_tt_main;
+  |> Test.run;
   "callable">:::[
     "from_overloads">::test_from_overloads;
     "with_return_annotation">::test_with_return_annotation;
+    "overload_parameters">::test_overload_parameters;
   ]
-  |> run_test_tt_main
+  |> Test.run

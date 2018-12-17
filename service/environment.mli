@@ -8,6 +8,7 @@ open Analysis
 
 val populate
   :  (module Environment.Handler)
+  -> configuration: Configuration.Analysis.t
   -> Source.t list
   -> unit
 
@@ -15,7 +16,7 @@ val populate
 module SharedHandler: Environment.Handler
 
 val populate_shared_memory
-  :  configuration: Configuration.t
+  :  configuration: Configuration.Analysis.t
   -> stubs: File.Handle.t list
   -> sources: File.Handle.t list
   -> unit

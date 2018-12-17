@@ -26,7 +26,7 @@ let test_generics _ =
     | { Node.value = Statement.Class definition; _ } ->
         let resolution =
           populate source
-          |> fun environment -> Environment.resolution environment ()
+          |> fun environment -> TypeCheck.resolution environment ()
         in
         assert_equal
           ~cmp:(List.equal ~equal:Type.equal)
@@ -88,7 +88,7 @@ let test_superclasses _ =
     |> Node.create_with_default_location
     |> Class.create
   in
-  let resolution = Environment.resolution environment () in
+  let resolution = TypeCheck.resolution environment () in
   let assert_successors target expected =
     let actual = Class.successors ~resolution target in
     assert_equal
@@ -227,10 +227,10 @@ let test_get_decorator _ =
 
 let test_constructors _ =
   let assert_constructor source constructors =
-    Class.AttributesCache.clear ();
+    Class.Attribute.Cache.clear ();
     let resolution =
       populate source
-      |> fun environment -> Environment.resolution environment ()
+      |> fun environment -> TypeCheck.resolution environment ()
     in
     match parse_last_statement source with
     | { Node.value = Statement.Class definition; _ } ->
@@ -252,11 +252,11 @@ let test_constructors _ =
   (* Undefined constructors. *)
   assert_constructor
     "class Foo: pass"
-    (Some "typing.Callable('object.__init__')[[Named(self, $unknown)], Foo]");
+    (Some "typing.Callable('object.__init__')[[], Foo]");
 
   assert_constructor
     "class Foo: ..."
-    (Some "typing.Callable('object.__init__')[[Named(self, $unknown)], Foo]");
+    (Some "typing.Callable('object.__init__')[[], Foo]");
 
   (* Statement.Defined constructors. *)
   assert_constructor
@@ -264,17 +264,18 @@ let test_constructors _ =
       class Foo:
         def Foo.__init__(self, a: int) -> None: pass
     |}
-    (Some "typing.Callable('Foo.__init__')[[Named(self, $unknown), Named(a, int)], Foo]");
+    (Some "typing.Callable('Foo.__init__')[[Named(a, int)], Foo]");
 
   assert_constructor
     {|
       class Foo:
         def Foo.__init__(self, a: int) -> None: pass
+        @typing.overload
         def Foo.__init__(self, b: str) -> None: pass
     |}
     (Some
-       ("typing.Callable('Foo.__init__')[[Named(self, $unknown), Named(b, str)], Foo]" ^
-        "[[Named(self, $unknown), Named(a, int)], Foo]"));
+       ("typing.Callable('Foo.__init__')[[Named(a, int)], Foo]" ^
+        "[[[Named(b, str)], Foo]]"));
 
   (* Generic classes. *)
   assert_constructor
@@ -284,7 +285,7 @@ let test_constructors _ =
       class Foo(typing.Generic[_K, _V]):
         def Foo.__init__(self) -> None: pass
     |}
-    (Some "typing.Callable('Foo.__init__')[[Named(self, $unknown)], Foo[_K, _V]]");
+    (Some "typing.Callable('Foo.__init__')[[], Foo[_K, _V]]");
 
   (* Tuples. *)
   assert_constructor
@@ -293,7 +294,7 @@ let test_constructors _ =
       class tuple(typing.Generic[_T]):
         def tuple.__init__(self) -> None: ...
     |}
-    (Some "typing.Callable('tuple.__init__')[[Named(self, $unknown)], typing.Tuple[_T, ...]]");
+    (Some "typing.Callable('tuple.__init__')[[], typing.Tuple[_T, ...]]");
 
   (* Constructors, both __init__ and __new__, are inherited from parents. *)
   assert_constructor
@@ -304,7 +305,7 @@ let test_constructors _ =
       class C(Parent):
         pass
     |}
-    (Some "typing.Callable('Parent.__init__')[[Named(self, $unknown), Named(x, int)], C]");
+    (Some "typing.Callable('Parent.__init__')[[Named(x, int)], C]");
   assert_constructor
     {|
       class Parent:
@@ -313,13 +314,17 @@ let test_constructors _ =
       class C(Parent):
         pass
     |}
-    (Some "typing.Callable('Parent.__new__')[[Named(self, C), Named(x, str)], C]")
+    (Some "typing.Callable('Parent.__new__')[[Named(x, str)], C]")
 
 
 let test_methods _ =
   let assert_methods source methods =
     match parse_last_statement source with
     | { Node.value = Statement.Class definition; _ } ->
+        let resolution =
+          populate source
+          |> fun environment -> TypeCheck.resolution environment ()
+        in
         let actuals =
           let method_name { Define.name; _ } =
             List.tl_exn name
@@ -327,7 +332,7 @@ let test_methods _ =
           in
           Node.create_with_default_location definition
           |> Class.create
-          |> Class.methods
+          |> Class.methods ~resolution
           |> List.map ~f:(fun definition -> Method.define definition |> method_name)
         in
         assert_equal methods actuals
@@ -348,12 +353,16 @@ let test_methods _ =
 
 let test_has_method _ =
   let get_actual source target_method =
+    let resolution =
+      populate source
+      |> fun environment -> TypeCheck.resolution environment ()
+    in
     match parse_last_statement source with
     | { Node.value = Statement.Class definition; _ } ->
         let actual =
           Node.create_with_default_location definition
           |> Class.create
-          |> Class.has_method ~name:target_method
+          |> Class.has_method ~resolution ~name:(Access.create target_method)
         in
         actual
     | _ ->
@@ -413,20 +422,41 @@ let test_is_protocol _ =
 
 
 let test_implements _ =
+  (* TODO(T36516076) Adapt assert_conforms to fit testing idioms *)
   let assert_conforms definition protocol conforms =
-    match parse_last_statement definition with
-    | { Node.value = Statement.Class definition; _ } ->
-        begin
-          match parse_last_statement protocol with
-          | { Node.value = Statement.Class protocol; _ } ->
-              assert_equal
-                (Class.implements
-                   ~protocol:(Class.create (Node.create_with_default_location protocol))
-                   (Class.create (Node.create_with_default_location definition)))
-                conforms
-          | _ ->
-              assert_unreached ()
-        end
+    let get_last_statement { Source.statements; _ } =
+      List.last_exn statements
+    in
+    let environment = Environment.Builder.create () in
+    let definition =
+      definition
+      |> parse
+      |> Preprocessing.preprocess
+    in
+    let protocol =
+      protocol
+      |> parse
+      |> Preprocessing.preprocess
+    in
+    Service.Environment.populate
+      ~configuration
+      (Environment.handler ~configuration environment)
+      (definition :: protocol :: Test.typeshed_stubs);
+    let ((module Handler: Environment.Handler) as handler) =
+      Environment.handler environment ~configuration
+    in
+    let resolution = TypeCheck.resolution handler () in
+    Annotated.Class.Attribute.Cache.clear ();
+    match get_last_statement definition,
+          get_last_statement protocol with
+    | { Node.value = Statement.Class definition; _ },
+      { Node.value = Statement.Class protocol; _ } ->
+        assert_equal
+          (Class.implements
+             ~resolution
+             ~protocol:(Class.create (Node.create_with_default_location protocol))
+             (Class.create (Node.create_with_default_location definition)))
+          conforms
     | _ ->
         assert_unreached ()
   in
@@ -475,6 +505,49 @@ let test_implements _ =
         def foo(): pass
         def bar(): pass
     |}
+    true;
+  assert_conforms
+    {|
+      class List():
+        def empty() -> bool: pass
+        def length() -> int: pass
+    |}
+    {|
+      class Sized(typing.Protocol):
+        def empty() -> bool: pass
+        def len() -> int: pass
+    |}
+    false;
+  assert_conforms
+    {|
+      class List():
+        def empty() -> bool: pass
+        @typing.overload
+        def length(x: int) -> str: pass
+        def length() -> str: pass
+        def length(x: int) -> int: pass
+        def length() -> int: pass
+    |}
+    {|
+      class Sized(typing.Protocol):
+        def empty() -> bool: pass
+        def length() -> int: pass
+    |}
+    true;
+  assert_conforms
+    {|
+      class List():
+        def empty() -> bool: pass
+        @typing.overload
+        def length(x: int) -> str: pass
+        def length() -> str: pass
+        def length(x: int) -> int: pass
+    |}
+    {|
+      class Sized(typing.Protocol):
+        def empty() -> bool: pass
+        def length() -> int: pass
+    |}
     true
 
 
@@ -489,7 +562,7 @@ let test_class_attributes _ =
     in
     populate source
     |> fun environment ->
-    Environment.resolution environment (),
+    TypeCheck.resolution environment (),
     Class.create (Node.create_with_default_location parent)
   in
 
@@ -539,11 +612,11 @@ let test_class_attributes _ =
 
   (* Test `Class.attributes`. *)
   let assert_attributes definition attributes =
-    Annotated.Class.AttributesCache.clear ();
+    Annotated.Class.Attribute.Cache.clear ();
     let attribute_list_equal =
       let equal left right =
         Expression.equal_expression (Attribute.name left) (Attribute.name right) &&
-        Class.equal (Attribute.parent left) (Attribute.parent right)
+        Type.equal (Attribute.parent left) (Attribute.parent right)
       in
       List.equal ~equal
     in
@@ -602,7 +675,7 @@ let test_class_attributes _ =
 
   (* Test `attribute_fold`. *)
   let assert_fold ?(class_attributes = false) source fold =
-    Annotated.Class.AttributesCache.clear ();
+    Annotated.Class.Attribute.Cache.clear ();
     let callback
         string_names
         attribute =
@@ -664,6 +737,7 @@ let test_class_attributes _ =
       "second";
       "third";
       "__name__";
+      "__doc__";
       "__getitem__";
       "__init__";
       "__new__";
@@ -685,6 +759,7 @@ let test_class_attributes _ =
       "__static__";
       "__meta__";
       "__name__";
+      "__doc__";
       "__type__";
       "__getitem__";
       "__init__";
@@ -731,7 +806,7 @@ let test_class_attributes _ =
   let create_expected_attribute name callable =
     {
       Class.Attribute.name = Expression.Access (Access.create name);
-      parent = Class.create (+parent);
+      parent = Type.primitive "Attributes";
       annotation = (Annotation.create_immutable ~global:true (parse_callable callable));
       value = Node.create_with_default_location Expression.Ellipses;
       defined = true;
@@ -746,7 +821,7 @@ let test_class_attributes _ =
     ~expected_attribute:(
       create_expected_attribute
         "bar"
-        "typing.Callable('Attributes.bar')[[Named(self, $unknown)], int]");
+        "typing.Callable('Attributes.bar')[[], int]");
   assert_attribute
     ~parent
     ~parent_instantiated_type:(Type.primitive "Attributes")
@@ -754,15 +829,15 @@ let test_class_attributes _ =
     ~expected_attribute:(
       create_expected_attribute
         "baz"
-        ("typing.Callable('Attributes.baz')[[Named(self, $unknown), Named(x, str)], str]" ^
-         "[[Named(self, $unknown), Named(x, int)], int]"))
+        ("typing.Callable('Attributes.baz')[[Named(x, str)], str]"))
 
 
 let test_fallback_attribute _ =
   let assert_fallback_attribute source annotation =
+    Class.Attribute.Cache.clear ();
     let resolution =
       populate source
-      |> fun environment -> Environment.resolution environment ()
+      |> fun environment -> TypeCheck.resolution environment ()
     in
     let attribute =
       parse_last_statement source
@@ -794,20 +869,20 @@ let test_fallback_attribute _ =
   assert_fallback_attribute
     {|
       class Foo:
-        def __getattr__(self, attribute: str) -> int:
+        def Foo.__getattr__(self, attribute: str) -> int:
           return 1
     |}
     (Some Type.integer);
   assert_fallback_attribute
     {|
       class Foo:
-        def __getattr__(self, attribute: str) -> int: ...
+        def Foo.__getattr__(self, attribute: str) -> int: ...
     |}
     (Some Type.integer);
   assert_fallback_attribute
     {|
       class Foo:
-        def __getattr__(self, attribute: str) -> int: ...
+        def Foo.__getattr__(self, attribute: str) -> int: ...
       class Bar(Foo):
         pass
     |}
@@ -818,7 +893,7 @@ let test_constraints _ =
   let assert_constraints ~target ~instantiated ?parameters source expected =
     let resolution =
       populate source
-      |> fun environment -> Environment.resolution environment ()
+      |> fun environment -> TypeCheck.resolution environment ()
     in
     let target =
       let { Source.statements; _ } = parse source in
@@ -1094,157 +1169,59 @@ let test_metaclasses _ =
     "Meta"
 
 
-let test_method_overloads _ =
+let test_overrides _ =
   let resolution =
     populate {|
       class Foo:
-        def foo(): pass
+        def Foo.foo(): pass
       class Bar(Foo):
         pass
       class Baz(Bar):
-        def foo(): pass
-        def baz(): pass
+        def Baz.foo(): pass
+        def Baz.baz(): pass
     |}
-    |> fun environment -> Environment.resolution environment ()
+    |> fun environment -> TypeCheck.resolution environment ()
   in
-  let foo, baz =
-    Resolution.class_definition resolution (Type.Primitive ~~"Baz")
-    >>| Class.create
-    >>| Class.methods
-    >>| (fun methods ->
-        match methods with
-        | [foo; bar] -> foo, bar
-        | _ -> failwith "Could not find `foo` and `bar`")
-    |> value
+  let definition =
+    let definition =
+      Resolution.class_definition resolution (Type.Primitive ~~"Baz")
+      >>| Class.create
+    in
+    Option.value_exn ~message:"Missing definition."  definition
   in
 
-  assert_is_none (Method.overrides ~resolution baz);
-  let overloads = Method.overrides ~resolution foo in
-  assert_is_some overloads;
+  assert_is_none (Class.overrides definition ~resolution ~name:(Access.create "baz"));
+  let overrides = Class.overrides definition ~resolution ~name:(Access.create "foo") in
+  assert_is_some overrides;
   assert_equal
     ~cmp:Access.equal
-    (Method.parent (Option.value_exn overloads) |> Class.name)
+    ~printer:Access.show
+    (Attribute.access (Option.value_exn overrides))
+    (Access.create "foo");
+  assert_equal
+    ~cmp:Access.equal
+    ~printer:Access.show
+    (Option.value_exn overrides
+     |> Attribute.parent
+     |> Type.show
+     |> Access.create)
     (Access.create "Foo")
-
-
-let test_method_implements _ =
-  let definition ?(parameters = []) ?return_annotation name =
-    Method.create
-      ~define:{
-        Statement.Define.name = Access.create name;
-        parameters;
-        body = [+Pass];
-        decorators = [];
-        docstring = None;
-        return_annotation;
-        async = false;
-        generated = false;
-        parent = Some (Access.create "Parent");
-      }
-      ~parent:
-        (Class.create
-           (Node.create_with_default_location
-              {
-                Statement.Class.name = Access.create "Parent";
-                bases = [];
-                body = [+Pass];
-                decorators = [];
-                docstring = None;
-              }))
-  in
-
-  assert_true
-    (Method.implements
-       ~protocol_method:(definition "match")
-       (definition "match"));
-  assert_false
-    (Method.implements
-       ~protocol_method:(definition "mismatch")
-       (definition "match"));
-
-  let parameters =
-    [
-      Parameter.create ~name:(~~"a") ();
-      Parameter.create ~name:(~~"b") ();
-    ]
-  in
-  assert_true
-    (Method.implements
-       ~protocol_method:(definition ~parameters "match")
-       (definition ~parameters "match"));
-
-  (* Naming of parameters doesn't matter. *)
-  let definition_parameters =
-    [
-      Parameter.create ~name:(~~"a") ();
-      Parameter.create ~name:(~~"b") ();
-    ]
-  in
-  let protocol_parameters =
-    [
-      Parameter.create ~name:(~~"a") ();
-      Parameter.create ~name:(~~"c") ();
-    ]
-  in
-  assert_true
-    (Method.implements
-       ~protocol_method:(definition ~parameters:protocol_parameters "match")
-       (definition ~parameters:definition_parameters "match"));
-
-  (* Number of parameters, parameter and return annotations matter. *)
-  let definition_parameters =
-    [
-      Parameter.create ~name:(~~"a") ();
-      Parameter.create ~name:(~~"b") ();
-    ]
-  in
-  let protocol_parameters =
-    [
-      Parameter.create ~name:(~~"a") ();
-      Parameter.create ~name:(~~"c") ();
-      Parameter.create ~name:(~~"z") ();
-    ]
-  in
-  assert_false
-    (Method.implements
-       ~protocol_method:(definition ~parameters:protocol_parameters "match")
-       (definition ~parameters:definition_parameters "match"));
-
-  let definition_parameters = [Parameter.create ~name:(~~"a") ~annotation:!"int" ()] in
-  let protocol_parameters = [Parameter.create ~name:(~~"a") ()] in
-  assert_false
-    (Method.implements
-       ~protocol_method:(definition ~parameters:protocol_parameters "match")
-       (definition ~parameters:definition_parameters "match"));
-
-  assert_true
-    (Method.implements
-       ~protocol_method:(definition ~return_annotation:!"int" "match")
-       (definition ~return_annotation:!"int" "match"));
-  assert_false
-    (Method.implements
-       ~protocol_method:(definition ~return_annotation:!"int" "match")
-       (definition ~return_annotation:!"float" "match"))
 
 
 let () =
   "class">:::[
-    "generics">::test_generics;
-    "superclasses">::test_superclasses;
-    "get_decorator">::test_get_decorator;
+    "attributes">::test_class_attributes;
+    "constraints">::test_constraints;
     "constructors">::test_constructors;
+    "fallback_attribute">::test_fallback_attribute;
+    "generics">::test_generics;
+    "get_decorator">::test_get_decorator;
+    "implements">::test_implements;
+    "inferred_generic_base">::test_inferred_generic_base;
+    "is_protocol">::test_is_protocol;
     "metaclasses">::test_metaclasses;
     "methods">::test_methods;
-    "is_protocol">::test_is_protocol;
-    "implements">::test_implements;
-    "attributes">::test_class_attributes;
-    "fallback_attribute">::test_fallback_attribute;
-    "constraints">::test_constraints;
-    "inferred_generic_base">::test_inferred_generic_base;
+    "overrides">::test_overrides;
+    "superclasses">::test_superclasses;
   ]
-  |> run_test_tt_main;
-  "method">:::[
-    "overloads">::test_method_overloads;
-    "implements">::test_method_implements;
-  ]
-  |> run_test_tt_main
+  |> Test.run

@@ -29,7 +29,7 @@ module TextDocumentDefinitionRequest = Types.TextDocumentDefinitionRequest
 module PublishDiagnostics = struct
   include Types.PublishDiagnostics
 
-  let of_errors handle errors =
+  let of_errors ~configuration handle errors =
     let diagnostic_of_error error =
       let { Ast.Location.start; stop; _ } =
         TypeCheck.Error.location error in
@@ -42,13 +42,12 @@ module PublishDiagnostics = struct
         })
     in
     let failed_response =
-        Format.asprintf "Valid path does not exist for %s." (File.Handle.show handle)
-        |> Or_error.error_string
+      Format.asprintf "Valid path does not exist for %s." (File.Handle.show handle)
+      |> Or_error.error_string
     in
     try
       let path =
-        Ast.SharedMemory.Sources.get handle
-        >>= (fun { Ast.Source.path; _ } -> path)
+        File.Handle.to_path ~configuration handle
       in
       match path with
       | Some path ->
@@ -162,11 +161,7 @@ module ShutdownResponse = struct
     {
       jsonrpc = "2.0";
       id;
-      result = begin
-        match Types.Null.of_yojson `Null with
-        | Ok result -> Some result
-        | Error _ -> None
-      end;
+      result = None;
       error = None;
     }
 end
@@ -175,11 +170,10 @@ end
 module TextDocumentDefinitionResponse = struct
   include Types.TextDocumentDefinitionResponse
 
-  let create ~id ~location =
+  let create ~configuration ~id ~location =
     let uri ~path =
       File.Handle.create path
-      |> Ast.SharedMemory.Sources.get
-      >>= fun { Ast.Source.path; _ } -> path
+      |> File.Handle.to_path ~configuration
       >>| Path.real_path
       >>| Path.uri
     in
@@ -190,7 +184,7 @@ module TextDocumentDefinitionResponse = struct
         Some
           (location
            >>= (fun { Ast.Location.start; stop; path } -> uri ~path
-               >>| fun uri -> { Location.uri; range = Range.create ~start ~stop })
+                 >>| fun uri -> { Location.uri; range = Range.create ~start ~stop })
            |> Option.to_list);
       error = None;
     }

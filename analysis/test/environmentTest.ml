@@ -26,13 +26,13 @@ let value option =
   Option.value_exn option
 
 
-let configuration = Configuration.create ~infer:true ()
+let configuration = Configuration.Analysis.create ~infer:true ()
 
 
 let plain_populate sources =
   let environment = Environment.Builder.create () in
   let handler = Environment.handler ~configuration environment in
-  Service.Environment.populate handler sources;
+  Service.Environment.populate ~configuration handler sources;
   environment
 
 
@@ -44,19 +44,25 @@ let populate_with_sources sources =
 let populate source =
   populate_with_sources [parse source]
 
+let populate_preprocess source =
+  populate_with_sources [
+    source
+    |> parse
+    |> Preprocessing.preprocess
+  ]
 
 let global environment =
-  Environment.resolution environment ()
+  TypeCheck.resolution environment ()
   |> Resolution.global
 
 
 let class_definition environment =
-  Environment.resolution environment ()
+  TypeCheck.resolution environment ()
   |> Resolution.class_definition
 
 
 let parse_annotation environment =
-  Environment.resolution environment ()
+  TypeCheck.resolution environment ()
   |> Resolution.parse_annotation
 
 
@@ -142,7 +148,8 @@ let test_refine_class_definitions _ =
     Environment.register_class_definitions (module Handler) source
     |> Set.to_list
   in
-  Environment.connect_type_order (module Handler) source;
+  let resolution = TypeCheck.resolution (module Handler) () in
+  Environment.connect_type_order (module Handler) resolution source;
   TypeOrder.deduplicate (module Handler.TypeOrderHandler) ~annotations:all_annotations;
   TypeOrder.connect_annotations_to_top
     (module Handler.TypeOrderHandler)
@@ -284,13 +291,6 @@ let test_register_aliases _ =
       "qualifier.A", "qualifier.D";
     ];
 
-  assert_resolved
-    [
-      parse ~qualifier:(Access.create "collections") "class Collection: ...";
-      parse "from collections import *";
-    ]
-    ["Collection", "collections.Collection"];
-
   assert_resolved [parse "X = None"] ["X", "None"];
 
   assert_resolved
@@ -321,6 +321,19 @@ let test_register_aliases _ =
         {|
           from builtins import int
           from builtins import dict as CDict
+        |};
+    ]
+    [
+      "collections.int", "int";
+      "collections.CDict", "typing.Dict[typing.Any, typing.Any]";
+    ];
+  assert_resolved
+    [
+      parse
+        ~qualifier:(Access.create "collections")
+        {|
+          from future.builtins import int
+          from future.builtins import dict as CDict
         |};
     ]
     [
@@ -394,13 +407,47 @@ let test_register_aliases _ =
         |};
     ]
     ["qualifier.T", "typing.Any"; "qualifier.Q", "typing.Any"];
+
+  assert_resolved
+    [
+      parse
+        ~qualifier:(Access.create "t")
+        {|
+          import x
+          X = typing.Dict[int, int]
+          T = typing.Dict[int, X]
+          C = typing.Callable[[T], int]
+        |};
+      parse
+        ~qualifier:(Access.create "x")
+        {|
+          import t
+          X = typing.Dict[int, int]
+          T = typing.Dict[int, t.X]
+          C = typing.Callable[[T], int]
+        |};
+    ]
+    [
+      "x.C", "typing.Callable[[typing.Dict[int, typing.Dict[int, int]]], int]";
+      "t.C", "typing.Callable[[typing.Dict[int, typing.Dict[int, int]]], int]";
+    ];
+
+  assert_resolved
+    [
+      parse
+        ~qualifier:(Access.create "x")
+        {|
+          C = typing.Callable[[gurbage], gurbage]
+        |};
+    ]
+    ["x.C", "x.C"];
   ()
 
 
 let test_connect_definition _ =
   let environment = Environment.Builder.create () in
   let (module Handler: Environment.Handler) = Environment.handler ~configuration environment in
-  let resolution = Environment.resolution (module Handler) () in
+  let resolution = TypeCheck.resolution (module Handler) () in
 
   let (module TypeOrderHandler: TypeOrder.Handler) = (module Handler.TypeOrderHandler) in
   TypeOrder.insert (module TypeOrderHandler) (Type.primitive "C");
@@ -460,6 +507,7 @@ let test_connect_definition _ =
 let test_register_globals _ =
   let environment = Environment.Builder.create () in
   let (module Handler: Environment.Handler) = Environment.handler ~configuration environment in
+  let resolution = TypeCheck.resolution (module Handler) () in
   let source =
     parse
       {|
@@ -474,7 +522,7 @@ let test_register_globals _ =
           qualifier.in_branch: int = 2
       |}
   in
-  Environment.register_globals (module Handler) source;
+  Environment.register_globals (module Handler) resolution source;
 
   let assert_global access expected =
     let actual =
@@ -498,12 +546,16 @@ let test_register_globals _ =
 let test_connect_type_order _ =
   let environment = Environment.Builder.create () in
   let (module Handler: Environment.Handler) = Environment.handler ~configuration environment in
+  let resolution = TypeCheck.resolution (module Handler) () in
   let source =
     parse {|
        class C:
          ...
        class D(C):
          pass
+       class CallMe:
+         def CallMe.__call__(self, x: int) -> str:
+           ...
        B = D
        A = B
        def foo()->A:
@@ -516,9 +568,12 @@ let test_connect_type_order _ =
     |> Set.to_list
   in
   Environment.register_aliases (module Handler) [source];
-  Environment.connect_type_order (module Handler) source;
+  Environment.connect_type_order (module Handler) resolution source;
   let assert_successors annotation successors =
-    assert_equal (TypeOrder.successors order annotation) successors
+    assert_equal
+      ~printer:(List.to_string ~f:Type.show)
+      (TypeOrder.successors order annotation)
+      successors
   in
   (* Classes get connected to object via `connect_annotations_to_top`. *)
   assert_successors (Type.primitive "C") [];
@@ -527,11 +582,15 @@ let test_connect_type_order _ =
   TypeOrder.connect_annotations_to_top order ~top:Type.Object all_annotations;
 
   assert_successors (Type.primitive "C") [Type.Object; Type.Deleted; Type.Top];
-  assert_successors (Type.primitive "D") [Type.primitive "C"; Type.Object; Type.Deleted; Type.Top]
+  assert_successors (Type.primitive "D") [Type.primitive "C"; Type.Object; Type.Deleted; Type.Top];
+  assert_successors
+    (Type.primitive "CallMe")
+    [Type.primitive "typing.Callable"; Type.Object; Type.Deleted; Type.Top]
 
 let test_register_functions _ =
   let environment = Environment.Builder.create () in
   let (module Handler: Environment.Handler) = Environment.handler ~configuration environment in
+  let resolution = TypeCheck.resolution (module Handler) () in
   let source =
     parse {|
        def function() -> int: ...
@@ -540,10 +599,12 @@ let test_register_functions _ =
        class Class:
          def Class.__init__(self) -> None: ...
          def Class.method(self, i: int) -> int: ...
+         @classmethod
+         def Class.classmethod(cls, i: str) -> str: ...
          @property
          def Class.property_method(self) -> int: ...
          class Class.Nested:
-           def Class.Nested.nested_class_method(self) -> str: ...
+           def Class.Nested.nested_instance_method(self) -> str: ...
 
        class ClassWithOverloadedConstructor:
          @overload
@@ -552,6 +613,7 @@ let test_register_functions _ =
 
        @overload
        def overloaded(i: int) -> None: ...
+       @overload
        def overloaded(i: float) -> None: ...
        def overloaded(i: str) -> None:
          pass
@@ -561,7 +623,7 @@ let test_register_functions _ =
            pass
     |}
   in
-  Environment.register_functions (module Handler) source;
+  Environment.register_functions (module Handler) resolution source;
   assert_is_some (Handler.function_definitions (access ["function"]));
   assert_is_some (Handler.function_definitions (access ["Class.__init__"]));
   assert_is_none (Handler.function_definitions (access ["nested_in_function"]));
@@ -574,43 +636,40 @@ let test_register_functions _ =
       >>| Node.value
       >>| Annotation.annotation
     in
-    let expected =
-      expected
-      >>| parse_single_expression
-      >>| Type.create ~aliases:(fun _ -> None)
-    in
     assert_equal
       ~printer:(function | Some annotation -> Type.show annotation | _ -> "None")
       ~cmp:(Option.equal Type.equal)
-      expected
+      (Some (parse_callable expected))
       actual
   in
-  assert_global "function" (Some "typing.Callable('function')[[], int]");
+  assert_global "function" "typing.Callable('function')[[], int]";
   assert_global
     "function_with_arguments"
-    (Some "typing.Callable('function_with_arguments')[[Named(i, int)], None]");
+    "typing.Callable('function_with_arguments')[[Named(i, int)], None]";
 
   assert_global
     "Class.__init__"
-    (Some "typing.Callable('Class.__init__')[[Named(self, $unknown)], None]");
+    "typing.Callable('Class.__init__')[[Named(self, $unknown)], None]";
   assert_global
     "Class.method"
-    (Some "typing.Callable('Class.method')[[Named(self, $unknown), Named(i, int)], int]");
+    "typing.Callable('Class.method')[[Named(self, $unknown), Named(i, int)], int]";
   assert_global
-    "Class.Nested.nested_class_method"
-    (Some "typing.Callable('Class.Nested.nested_class_method')[[Named(self, $unknown)], str]");
+    "Class.classmethod"
+    "typing.Callable('Class.classmethod')[[Named(i, str)], str]";
+  assert_global
+    "Class.Nested.nested_instance_method"
+    "typing.Callable('Class.Nested.nested_instance_method')[[Named(self, $unknown)], str]";
 
   assert_global
     "overloaded"
-    (Some
-       ("typing.Callable('overloaded')" ^
-        "[[Named(i, str)], None][[Named(i, float)], None][[Named(i, int)], None]"));
+    ("typing.Callable('overloaded')[[Named(i, str)], None]" ^
+     "[[[Named(i, int)], None]" ^
+     "[[Named(i, float)], None]]");
   assert_global
     "ClassWithOverloadedConstructor.__init__"
-    (Some
-       ("typing.Callable('ClassWithOverloadedConstructor.__init__')" ^
-        "[[Named(self, $unknown), Named(i, int)], None]" ^
-        "[[Named(self, $unknown), Named(s, str)], None]"))
+    ("typing.Callable('ClassWithOverloadedConstructor.__init__')" ^
+     "[[Named(self, $unknown), Named(i, int)], None]" ^
+     "[[[Named(self, $unknown), Named(s, str)], None]]")
 
 
 let test_populate _ =
@@ -651,7 +710,7 @@ let test_populate _ =
   assert_equal (parse_annotation environment !"S") Type.string;
   assert_equal (parse_annotation environment !"S2") Type.string;
 
-  let assert_superclasses ~environment ~base ~superclasses =
+  let assert_superclasses ?(superclass_parameters = fun _ -> []) ~environment base ~superclasses =
     let (module Handler: Environment.Handler) = environment in
     let index annotation =
       Handler.TypeOrderHandler.find_unsafe
@@ -663,8 +722,33 @@ let test_populate _ =
          (Handler.TypeOrderHandler.edges ())
          (index (Type.primitive base)))
     in
-    let to_target annotation = { TypeOrder.Target.target = index annotation; parameters = [] } in
-    assert_equal targets (Some (List.map superclasses ~f:to_target))
+    let to_target annotation = {
+      TypeOrder.Target.target = index annotation;
+      parameters = superclass_parameters annotation;
+    }
+    in
+    let show_targets = function
+      | None ->
+          ""
+      | Some targets ->
+          let show_target { TypeOrder.Target.target; parameters } =
+            let index = Int.to_string target in
+            let target =
+              Handler.TypeOrderHandler.find_unsafe
+                (Handler.TypeOrderHandler.annotations ())
+                target
+              |> Type.show
+            in
+            let parameters = List.to_string parameters ~f:Type.show in
+            Format.sprintf "%s: %s%s" index target parameters
+          in
+          List.to_string targets ~f:show_target
+    in
+    assert_equal
+      ~printer:show_targets
+      ~cmp:(Option.equal (List.equal ~equal:TypeOrder.Target.equal))
+      targets
+      (Some (List.map superclasses ~f:to_target))
   in
   (* Metaclasses aren't superclasses. *)
   let environment =
@@ -673,7 +757,7 @@ let test_populate _ =
       class C(metaclass=abc.ABCMeta): ...
     |}
   in
-  assert_superclasses ~environment ~base:"C" ~superclasses:[Type.Object];
+  assert_superclasses ~environment "C" ~superclasses:[Type.Object];
 
   (* Ensure object is a superclass if a class only has unsupported bases. *)
   let environment =
@@ -684,7 +768,7 @@ let test_populate _ =
         pass
     |}
   in
-  assert_superclasses ~environment ~base:"C" ~superclasses:[Type.Object];
+  assert_superclasses ~environment "C" ~superclasses:[Type.Object];
 
   (* Globals *)
   let assert_global_with_environment environment actual expected =
@@ -795,31 +879,57 @@ let test_populate _ =
     "A"
     (Type.primitive "A"
      |> Type.meta
-     |> Annotation.create_immutable ~global:true ~original:(Some Type.Top))
+     |> Annotation.create_immutable ~global:true ~original:(Some Type.Top));
+
+  (* Callable classes. *)
+  let environment = populate {|
+      class CallMe:
+        def CallMe.__call__(self, x: int) -> str:
+          pass
+      class AlsoCallable(CallMe):
+        pass
+  |}
+  in
+  let type_parameters annotation =
+    match Type.show annotation with
+    | "typing.Callable" ->
+        [
+          parse_single_expression "typing.Callable('CallMe.__call__')[[Named(x, int)], str]"
+          |> Type.create ~aliases:(fun _ -> None)
+        ]
+    | _ ->
+        []
+  in
+  assert_superclasses
+    ~superclass_parameters:type_parameters
+    ~environment
+    "CallMe"
+    ~superclasses:[Type.primitive "typing.Callable"];
+  ()
 
 
-let test_infer_protocols _ =
+let test_infer_protocols_edges _ =
   let edges =
     let environment =
-      populate {|
+      populate_preprocess {|
         class Empty(typing.Protocol):
           pass
         class Sized(typing.Protocol):
-          def empty() -> bool: pass
-          def len() -> int: pass
+          def empty(self) -> bool: pass
+          def len(self) -> int: pass
         class Supersized(typing.Protocol):
-          def empty() -> bool: pass
-          def len() -> int: pass
+          def empty(self) -> bool: pass
+          def len(self) -> int: pass
         class List():
-          def empty() -> bool: pass
-          def length() -> int: pass
+          def empty(self) -> bool: pass
+          def length(self) -> int: pass
         class Set():
-          def empty() -> bool: pass
-          def len() -> int: pass
+          def empty(self) -> bool: pass
+          def len(self) -> int: pass
         class Subset(Set): pass
         class AlmostSet():
-          def empty(a) -> bool: pass
-          def len() -> int: pass
+          def empty(self, a) -> bool: pass
+          def len(self) -> int: pass
         class object:
           def __hash__(self) -> int: ...
         class SuperObject(typing.Protocol):
@@ -827,6 +937,7 @@ let test_infer_protocols _ =
             def __hash__(self) -> int: ...
       |}
     in
+    let resolution = TypeCheck.resolution environment () in
 
     let methods_to_implementing_classes =
       let add key values map =
@@ -847,17 +958,20 @@ let test_infer_protocols _ =
     let empty_edges =
       Environment.infer_implementations
         environment
+        resolution
         ~implementing_classes
         ~protocol:(Type.primitive "Empty")
     in
-    assert_equal 9 (Set.length empty_edges);
+    assert_equal 10 (Set.length empty_edges);
     Environment.infer_implementations
       environment
+      resolution
       ~implementing_classes
       ~protocol:(Type.primitive "Sized")
     |> Set.union
       (Environment.infer_implementations
          environment
+         resolution
          ~implementing_classes
          ~protocol:(Type.primitive "SuperObject"))
     |> Set.union empty_edges
@@ -869,7 +983,7 @@ let test_infer_protocols _ =
     assert_false (Set.mem edges { TypeOrder.Edge.source; target })
   in
 
-  assert_equal (Set.length edges) 10;
+  assert_equal ~printer:Int.to_string (Set.length edges) 11;
 
   assert_edge_not_inferred (Type.primitive "List") (Type.primitive "Sized");
   assert_edge_inferred (Type.primitive "Set") (Type.primitive "Sized");
@@ -1186,19 +1300,14 @@ let test_supertypes _ =
     ~printer:(List.to_string ~f:Type.show)
     [
       Type.Parametric {
-        Type.name = ~~"typing.Generic";
+        name = ~~"typing.Generic";
         parameters = [Type.integer];
       };
       Type.Object;
       Type.Deleted;
       Type.Top;
     ]
-    (TypeOrder.successors
-       order
-       (Type.Parametric {
-           Type.name = ~~"typing.Iterable";
-           parameters = [Type.integer];
-         }))
+    (TypeOrder.successors order (Type.parametric "typing.Iterable" [Type.integer]))
 
 
 let test_class_definition _ =
@@ -1214,26 +1323,12 @@ let test_class_definition _ =
         pass
     |} in
   assert_true (is_defined environment (Type.primitive "baz.baz"));
-  assert_true
-    (is_defined
-       environment
-       (Type.Parametric {
-           Type.name = ~~"baz.baz";
-           parameters = [Type.integer];
-         }));
-  assert_is_some
-    (class_definition environment (Type.primitive "baz.baz"));
+  assert_true (is_defined environment (Type.parametric "baz.baz" [Type.integer]));
+  assert_is_some (class_definition environment (Type.primitive "baz.baz"));
 
   assert_false (is_defined environment (Type.primitive "bar.bar"));
-  assert_false
-    (is_defined
-       environment
-       (Type.Parametric {
-           Type.name = ~~"bar.bar";
-           parameters = [Type.integer];
-         }));
-  assert_is_none
-    (class_definition environment (Type.primitive "bar.bar"));
+  assert_false (is_defined environment (Type.parametric "bar.bar" [Type.integer]));
+  assert_is_none (class_definition environment (Type.primitive "bar.bar"));
 
   let any =
     class_definition environment Type.Object
@@ -1357,6 +1452,7 @@ let test_purge _ =
     |}
   in
   Service.Environment.populate
+    ~configuration
     handler
     [parse ~handle:"test.py" source];
   assert_is_some (Handler.class_definition (Type.primitive "baz.baz"));
@@ -1378,10 +1474,10 @@ let test_purge _ =
 
 let test_infer_protocols _ =
   let open Analysis in
-  Scheduler.mock () |> ignore;
-  let configuration = Configuration.create () in
+  let configuration = Configuration.Analysis.create () in
   let type_sources = Test.typeshed_stubs in
   let assert_protocols ?classes_to_infer source expected_edges =
+    Annotated.Class.Attribute.Cache.clear ();
     let expected_edges =
       let to_edge (source, target) =
         {
@@ -1398,11 +1494,13 @@ let test_infer_protocols _ =
     in
     let environment = Environment.Builder.create () in
     Service.Environment.populate
+      ~configuration
       (Environment.handler ~configuration environment)
       (source :: type_sources);
     let ((module Handler: Environment.Handler) as handler) =
       Environment.handler environment ~configuration
     in
+    let resolution = TypeCheck.resolution (module Handler) () in
     let classes_to_infer =
       match classes_to_infer with
       | None ->
@@ -1412,7 +1510,7 @@ let test_infer_protocols _ =
           |> List.filter_map
             ~f:(Handler.TypeOrderHandler.find (Handler.TypeOrderHandler.indices ()))
     in
-    let edges = Environment.infer_protocol_edges ~handler ~classes_to_infer in
+    let edges = Environment.infer_protocol_edges ~handler resolution ~classes_to_infer in
     let expected_edges = Edge.Set.of_list expected_edges in
     assert_equal
       ~cmp:Edge.Set.equal
@@ -1496,7 +1594,7 @@ let test_infer_protocols _ =
         def foo() -> str:
           pass
     |}
-    ["A", "P"]
+    ["A", "P"; "C", "P"]
 
 
 let () =
@@ -1507,12 +1605,12 @@ let () =
     "meet">::test_meet;
     "supertypes">::test_supertypes;
   ]
-  |> run_test_tt_main;
+  |> Test.run;
   "environment">:::[
     "class_definition">::test_class_definition;
     "connect_definition">::test_connect_definition;
     "import_dependencies">::test_import_dependencies;
-    "infer_protocols">::test_infer_protocols;
+    "infer_protocols_edges">::test_infer_protocols_edges;
     "infer_protocols">::test_infer_protocols;
     "modules">::test_modules;
     "populate">::test_populate;
@@ -1525,4 +1623,4 @@ let () =
     "register_functions">::test_register_functions;
     "register_globals">::test_register_globals;
   ]
-  |> run_test_tt_main
+  |> Test.run

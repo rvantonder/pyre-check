@@ -19,7 +19,7 @@ end
 
 module LocationKey = struct
   type t = Location.t
-  let to_string = Location.Reference.to_string
+  let to_string = Location.Reference.show
   let compare = Location.Reference.compare
 end
 
@@ -52,6 +52,6 @@ module ModeValue = struct
 end
 
 
-module IgnoreLines = SharedMemory.WithCache (LocationKey) (IgnoreValue)
-module IgnoreKeys = SharedMemory.WithCache (StringKey) (LocationListValue)
-module ErrorModes = SharedMemory.WithCache (FileHandleKey) (ModeValue)
+module IgnoreLines = SharedMemory.NoCache (LocationKey) (IgnoreValue)
+module IgnoreKeys = SharedMemory.NoCache (StringKey) (LocationListValue)
+module ErrorModes = SharedMemory.NoCache (FileHandleKey) (ModeValue)

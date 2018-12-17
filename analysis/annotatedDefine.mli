@@ -10,8 +10,6 @@ open Statement
 
 module Callable = AnnotatedCallable
 module Class = AnnotatedClass
-module Attribute = Class.Attribute
-module Method = Class.Method
 
 
 type t
@@ -29,4 +27,3 @@ val parameter_annotations
   -> Type.t Int.Map.t
 
 val parent_definition: t -> resolution: Resolution.t -> Class.t option
-val method_definition: t -> resolution: Resolution.t -> Method.t option

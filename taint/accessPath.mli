@@ -4,6 +4,7 @@
     LICENSE file in the root directory of this source tree. *)
 
 open Ast
+open Analysis
 open Expression
 
 
@@ -11,22 +12,31 @@ open Expression
 module Root : sig
   type t =
     | LocalResult (* Special root representing the return value location. *)
-    | Parameter of { position: int }
+    | PositionalParameter of { position: int; name: Identifier.t; }
+    | NamedParameter of { name: Identifier.t; }
+    | StarParameter of { position: int }
+    | StarStarParameter of { excluded: Identifier.t list }
     | Variable of Identifier.t
-  [@@deriving compare, sexp, show, hash]
+  [@@deriving compare, eq, sexp, show, hash]
+
+  val normalize_parameters: 'a Parameter.t list -> (t * Identifier.t * 'a option) list
+
+  val parameter_name: t -> string option
 end
 
 
 type t = {
   root: Root.t;
-  path: AccessPathTree.Label.path;
+  path: AbstractTreeDomain.Label.path;
 }
 
+val create: Root.t -> AbstractTreeDomain.Label.path -> t
 
 val of_accesses: Access.t -> t option
 
 val of_expression: Expression.t -> t option
 
+val get_index: Expression.t -> AbstractTreeDomain.Label.t
 
 type normalized_expression =
   | Access of { expression: normalized_expression; member: Identifier.t }
@@ -34,11 +44,30 @@ type normalized_expression =
       callee: normalized_expression;
       arguments: Argument.t list Node.t;
     }
-  | Global of Identifier.t list
+  | Index of {
+      expression: normalized_expression;
+      index: AbstractTreeDomain.Label.t;
+      original: Identifier.t;
+      arguments: ((Expression.t Argument.record) list) Node.t;
+    }
+  | Global of Access.t
   | Local of Identifier.t
   | Expression of Expression.t
-[@@deriving show]
+[@@deriving eq, show]
 
-val normalize_access: Access.t -> normalized_expression
+val normalize_access: resolution: Resolution.t -> Access.t -> normalized_expression
 
 val as_access: normalized_expression -> Access.t
+
+val to_json: t -> Yojson.Safe.json
+
+type argument_match = {
+  root: Root.t;
+  actual_path: AbstractTreeDomain.Label.path;
+  formal_path: AbstractTreeDomain.Label.path;
+}
+
+val match_actuals_to_formals :
+  Expression.t Argument.record list
+  -> Root.t list
+  -> (Expression.t * argument_match list) list

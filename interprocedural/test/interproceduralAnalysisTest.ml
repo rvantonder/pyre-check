@@ -12,21 +12,21 @@ open Interprocedural
 open Statement
 
 
-let configuration = Configuration.create ()
+let configuration = Configuration.Analysis.create ()
 
 
 let environment ?(sources = []) ?(configuration = configuration) () =
   let _ = Test.parse "" in  (* Make sure Test module is loaded. *)
   let environment = Environment.Builder.create () in
   let handler = Environment.handler ~configuration environment in
-  Service.Environment.populate handler sources;
+  Service.Environment.populate ~configuration handler sources;
   handler
 
 
 let setup_environment ?(sources = []) () =
   let () = Scheduler.Daemon.check_entry_point () in
   let environment = environment ~sources ~configuration () in
-  Service.Environment.populate environment sources
+  Service.Environment.populate ~configuration environment sources
 
 
 module ResultA = Interprocedural.Result.Make(struct
@@ -51,7 +51,7 @@ module ResultA = Interprocedural.Result.Make(struct
     let reached_fixpoint ~iteration:_ ~previous ~next =
       next <= previous
 
-    let summaries callable result_option model =
+    let externalize callable result_option model =
       let result_json = match result_option with
         | None -> `Null
         | Some result -> `String result
@@ -61,8 +61,13 @@ module ResultA = Interprocedural.Result.Make(struct
           "analysis", `String name;
           "name", `String (Callable.show callable);
           "model", `Int model;
-          "result", result_json
+          "result", result_json;
         ]
+      ]
+
+    let metadata () =
+      `Assoc [
+        "codes", `List [`String "A"];
       ]
   end)
 
@@ -70,7 +75,7 @@ module ResultA = Interprocedural.Result.Make(struct
 module AnalysisA = ResultA.Register(struct
     let init ~types:_ ~functions:_ = ()
 
-    let analyze _callable _body =
+    let analyze ~callable:_ ~environment:_ ~define:_ =
       "A", 5
   end)
 
@@ -98,7 +103,7 @@ module ResultB = Interprocedural.Result.Make(struct
     let reached_fixpoint ~iteration:_ ~previous ~next =
       next <= previous
 
-    let summaries callable result_option model =
+    let externalize callable result_option model =
       let result_json = match result_option with
         | None -> `Null
         | Some result -> `Int result
@@ -111,13 +116,19 @@ module ResultB = Interprocedural.Result.Make(struct
           "result", result_json;
         ]
       ]
+
+    let metadata () =
+      `Assoc [
+        "codes", `List [`String "B"];
+      ]
+
   end)
 
 
 module AnalysisB = ResultB.Register(struct
     let init ~types:_ ~functions:_ = ()
 
-    let analyze _callable _body =
+    let analyze ~callable:_ ~environment:_ ~define:_ =
       7, "B"
   end)
 
@@ -134,10 +145,11 @@ let assert_summaries ~expected summaries =
 let test_unknown_function_analysis _ =
   let targets =
     List.map ~f:Access.create ["fun_a"; "fun_b"; "fun_c"]
-    |> List.map ~f:(fun access -> Callable.make_real access)
+    |> List.map ~f:(fun access -> Callable.create_function access)
   in
   let step = Fixpoint.{ epoch = 1; iteration = 0; } in
-  let () = Analysis.one_analysis_pass step ~analyses ~callables:targets in
+  let environment = environment () in
+  let _ = Analysis.one_analysis_pass step ~analyses ~environment ~callables:targets in
   let check_obscure_model target =
     match Fixpoint.get_model target with
     | None ->
@@ -147,15 +159,18 @@ let test_unknown_function_analysis _ =
         assert_equal (Result.get_model ResultA.kind models) (Some ResultA.obscure_model);
         assert_equal (Result.get_model ResultB.kind models) (Some ResultB.obscure_model)
   in
-  let summaries = List.concat_map ~f:Analysis.summaries targets in
+  let externalized_A = List.concat_map ~f:(Analysis.externalize AnalysisA.abstract_kind) targets in
+  let externalized_B = List.concat_map ~f:(Analysis.externalize AnalysisB.abstract_kind) targets in
   List.iter ~f:check_obscure_model targets;
-  assert_summaries summaries ~expected:[
-    {| {"analysis":"analysisA","name":"`RealTarget (fun_a)","model":-1,"result":null} |};
-    {| {"analysis":"analysisB","name":"`RealTarget (fun_a)","model":"obscure","result":null} |};
-    {| {"analysis":"analysisA","name":"`RealTarget (fun_b)","model":-1,"result":null} |};
-    {| {"analysis":"analysisB","name":"`RealTarget (fun_b)","model":"obscure","result":null} |};
-    {| {"analysis":"analysisA","name":"`RealTarget (fun_c)","model":-1,"result":null} |};
-    {| {"analysis":"analysisB","name":"`RealTarget (fun_c)","model":"obscure","result":null} |};
+  assert_summaries externalized_A ~expected:[
+    {| {"analysis":"analysisA","name":"fun_a (fun)","model":-1,"result":null} |};
+    {| {"analysis":"analysisA","name":"fun_b (fun)","model":-1,"result":null} |};
+    {| {"analysis":"analysisA","name":"fun_c (fun)","model":-1,"result":null} |};
+  ];
+  assert_summaries externalized_B ~expected:[
+    {| {"analysis":"analysisB","name":"fun_a (fun)","model":"obscure","result":null} |};
+    {| {"analysis":"analysisB","name":"fun_b (fun)","model":"obscure","result":null} |};
+    {| {"analysis":"analysisB","name":"fun_c (fun)","model":"obscure","result":null} |};
   ]
 
 
@@ -181,9 +196,10 @@ let check_meta_data ~step ~is_partial target =
 let test_meta_data _ =
   let targets =
     List.map ~f:Access.create ["fun_a"; "fun_b"; "fun_c"]
-    |> List.map ~f:Callable.make_real in
+    |> List.map ~f:Callable.create_function in
   let step1 = Fixpoint.{ epoch = 1; iteration = 0; } in
-  let () = Analysis.one_analysis_pass step1 ~analyses ~callables:targets in
+  let environment = environment () in
+  let _ = Analysis.one_analysis_pass step1 ~analyses ~environment ~callables:targets in
   (* All obscure functions should reach fixpoint in 1st step *)
   let () = List.iter ~f:(check_meta_data ~step:step1 ~is_partial:false) targets in
   ()
@@ -195,4 +211,4 @@ let () =
     "test_obscure">::test_unknown_function_analysis;
     "test_meta_data">::test_meta_data;
   ]
-  |> run_test_tt_main
+  |> Test.run

@@ -5,6 +5,8 @@
 
 open Core
 
+open Pyre
+
 open Network
 
 
@@ -14,6 +16,18 @@ type version_mismatch = {
 }
 [@@deriving show]
 
+exception ServerNotRunning
+
+val socket_path: ?create: bool -> Configuration.Analysis.t -> Path.t
+
+val create_configuration :
+  ?daemonize: bool ->
+  ?log_path: PyrePath.t ->
+  ?use_watchman: bool ->
+  ?saved_state_action: Configuration.Server.saved_state_action ->
+  Configuration.Analysis.t ->
+  Configuration.Server.t
+
 exception ConnectionFailure
 exception VersionMismatch of version_mismatch
 
@@ -21,13 +35,13 @@ val start
   :  ?old_state: State.t
   -> lock: Mutex.t
   -> connections: State.connections ref
-  -> configuration: ServerConfiguration.t
+  -> configuration: Configuration.Server.t
   -> unit
   -> State.t
 val stop
   :  reason: string
-  -> configuration: ServerConfiguration.t
+  -> configuration: Configuration.Server.t
   -> socket: Unix.File_descr.t
   -> unit
 
-val connect: retries: int -> configuration: Configuration.t -> Socket.t
+val connect: retries: int -> configuration: Configuration.Analysis.t -> Socket.t

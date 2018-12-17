@@ -43,7 +43,7 @@ let assert_errors
     expected_errors =
   let root = Path.current_working_directory () in
   let configuration =
-    Configuration.create ~local_root:root ~project_root:(Path.create_absolute "/") ()
+    Configuration.Analysis.create ~local_root:root ~project_root:(Path.create_absolute "/") ()
   in
   let scheduler = Scheduler.mock () in
   let handles =
@@ -58,7 +58,7 @@ let assert_errors
   add_defaults_to_environment environment;
   Service.Ignore.register ~configuration scheduler handles;
   let descriptions =
-    Service.TypeCheck.analyze_sources
+    Service.Check.analyze_sources
       scheduler
       configuration
       environment
@@ -209,4 +209,4 @@ let () =
   "typeChecker">:::[
     "ignore_lines">::ignore_lines_test;
   ]
-  |> run_test_tt_main
+  |> Test.run

@@ -61,24 +61,36 @@ let parse_query ~root query =
             Request.TypeQueryRequest (Methods (access name))
         | "normalize_type", [name] ->
             Request.TypeQueryRequest (NormalizeType (access name))
+        | "save_server_state", [path] ->
+            Request.TypeQueryRequest
+              (SaveServerState
+                 (Path.create_absolute
+                    ~follow_symbolic_links:false
+                    (string path)))
         | "signature", [name] ->
             Request.TypeQueryRequest (Signature (access name))
         | "superclasses", [name] ->
             Request.TypeQueryRequest (Superclasses (access name))
         | "type", [argument] ->
             Request.TypeQueryRequest (Type (expression argument))
-        | "type_at_location",
+        | "type_at_position",
           [
             path;
             { Argument.value = { Node.value = Integer line; _ }; _ };
             { Argument.value = { Node.value = Integer column; _ }; _ };
           ] ->
-            let location =
-              let path = string path in
-              let position = { Location.line; column } in
-              { Location.path; start = position; stop = position }
+            let file =
+              Path.create_relative ~root ~relative:(string path)
+              |> File.create
             in
-            Request.TypeQueryRequest (TypeAtLocation location)
+            let position = { Location.line; column } in
+            Request.TypeQueryRequest (TypeAtPosition { file; position })
+        | "types_in_file", [path] ->
+            let file =
+              Path.create_relative ~root ~relative:(string path)
+              |> File.create
+            in
+            Request.TypeQueryRequest (TypesInFile file)
         | "type_check", arguments ->
             let files =
               arguments
@@ -92,11 +104,13 @@ let parse_query ~root query =
       end
   | _ ->
       raise (InvalidQuery "unexpected query")
+  | exception Parser.Error message ->
+      raise (InvalidQuery ("failed to parse query: " ^ message))
 
 
 let run_query serialized local_root () =
   let local_root = Path.create_absolute local_root in
-  let configuration = Configuration.create ~local_root () in
+  let configuration = Configuration.Analysis.create ~local_root () in
   (fun () ->
      let response =
        try

@@ -1,0 +1,6 @@
+Call dependencies
+qualifier.Data::__init__ (method) -> []
+qualifier.get_data (fun) -> []
+qualifier.product_data (fun) -> [qualifier.get_data (fun) qualifier.product_data (fun)]
+qualifier.product_data_wrapper (fun) -> [qualifier.product_data (fun)]
+qualifier.test_tito (fun) -> [__testSource (fun) qualifier.product_data_wrapper (fun)]

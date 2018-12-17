@@ -12,7 +12,7 @@ open Test
 
 let assert_errors ?filter_directories ~root ~files errors =
   let configuration =
-    Configuration.create ?filter_directories ~project_root:root ~local_root:root ()
+    Configuration.Analysis.create ?filter_directories ~project_root:root ~local_root:root ()
   in
   let scheduler = Scheduler.mock () in
   let add_file file =
@@ -27,13 +27,15 @@ let assert_errors ?filter_directories ~root ~files errors =
     Out_channel.write_all path ~data:content
   in
   List.iter ~f:add_file files;
-  let handles = Service.Parser.parse_sources ~configuration ~scheduler ~files in
+  let { Service.Parser.parsed = handles; _ } =
+    Service.Parser.parse_sources ~configuration ~scheduler ~files
+  in
   let ((module Handler: Analysis.Environment.Handler) as environment) =
     (module Service.Environment.SharedHandler: Analysis.Environment.Handler)
   in
   Service.Environment.populate_shared_memory ~configuration ~stubs:[] ~sources:handles;
   let actual_errors =
-    Service.TypeCheck.analyze_sources ~scheduler ~configuration ~environment ~handles
+    Service.Check.analyze_sources ~scheduler ~configuration ~environment ~handles
     |> fst
     |> List.map ~f:(Analysis.Error.description ~detailed:false)
   in
@@ -119,4 +121,4 @@ let () =
     "type_check_sources_list">::type_check_sources_list_test;
     "filter_directories">::test_filter_directories;
   ]
-  |> run_test_tt_main
+  |> Test.run

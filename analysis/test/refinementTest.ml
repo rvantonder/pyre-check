@@ -13,10 +13,10 @@ open Test
 
 
 let resolution =
-  let configuration = Configuration.create () in
+  let configuration = Configuration.Analysis.create () in
   Environment.Builder.create ()
   |> Environment.handler ~configuration
-  |> fun handler -> Environment.resolution handler ()
+  |> fun handler -> TypeCheck.resolution handler ()
 
 
 let test_refine _ =
@@ -154,4 +154,4 @@ let () =
     "join">::test_join;
     "meet">::test_meet;
   ]
-  |> run_test_tt_main
+  |> Test.run

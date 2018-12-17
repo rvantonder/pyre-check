@@ -35,11 +35,10 @@ let test_return_annotation _ =
         docstring = None;
         return_annotation;
         async;
-        generated = false;
         parent = None;
       }
       |> (fun define ->
-          Callable.return_annotation ~define ~resolution:(Environment.resolution environment ()))
+          Callable.return_annotation ~define ~resolution:(TypeCheck.resolution environment ()))
     in
     assert_equal ~cmp:Type.equal expected return_annotation
   in
@@ -61,7 +60,7 @@ let test_apply_decorators _ =
         class contextlib.GeneratorContextManager(contextlib.ContextManager[_T], typing.Generic[_T]):
           pass
       |}
-      |> fun environment -> Environment.resolution environment ()
+      |> fun environment -> TypeCheck.resolution environment ()
     in
     let applied_return_annotation =
       Callable.apply_decorators ~define ~resolution
@@ -82,7 +81,6 @@ let test_apply_decorators _ =
       docstring = None;
       return_annotation;
       async = false;
-      generated = false;
       parent = None;
     }
   in
@@ -93,111 +91,131 @@ let test_apply_decorators _ =
     (create_define
        ~decorators:[!"contextlib.contextmanager"]
        ~return_annotation:(Some (+String (StringLiteral.create "typing.Iterator[str]"))))
-    (Type.Parametric {
-        Type.name = ~~"contextlib.GeneratorContextManager";
-        parameters = [Type.string];
-      });
+    (Type.parametric "contextlib.GeneratorContextManager" [Type.string]);
   assert_apply_decorators
     (create_define
        ~decorators:[!"contextlib.contextmanager"]
        ~return_annotation:
          (Some (+String (StringLiteral.create "typing.Generator[str, None, None]"))))
-    (Type.Parametric {
-        Type.name = ~~"contextlib.GeneratorContextManager";
-        parameters = [Type.string];
-      })
+    (Type.parametric "contextlib.GeneratorContextManager" [Type.string])
 
 
 let test_create _ =
-  let assert_callable ?parent source expected =
+  let assert_callable ?expected_implicit ?parent ~expected source =
     let resolution =
       populate source
-      |> fun environment -> Environment.resolution environment ()
+      |> fun environment -> TypeCheck.resolution environment ()
+    in
+
+    let expected = parse_callable expected in
+    let check_implicit { Type.Callable.implicit = actual; _ } =
+      match expected_implicit with
+      (* Verify implicit if we're checking for it explicitly, ignore otherwise
+         for convenience. *)
+      | Some expected ->
+          assert_equal
+            ~cmp:(Option.equal Type.Callable.equal_implicit)
+            (Some expected)
+            actual
+      | _ ->
+          ()
+    in
+    let implicit =
+      match expected with
+      | Type.Callable { Type.Callable.implicit; _ } ->
+          implicit
+      | _ ->
+          None
     in
     let callable =
+      let parent_annotation = parent >>| Type.primitive in
       let parent = parent >>| Access.create in
       parse source
       |> Preprocessing.defines ~include_stubs:true
+      |> List.rev
       |> List.map ~f:Node.value
       |> List.map ~f:(fun define -> { define with Statement.Define.parent })
-      |> Callable.create ~resolution
-      |> fun callable -> Type.Callable callable
+      |> Callable.create ~parent:parent_annotation ~resolution
+      |> (fun callable -> check_implicit callable; callable)
+      |> fun callable -> Type.Callable { callable with Type.Callable.implicit }
     in
     assert_equal
       ~printer:Type.show
       ~cmp:Type.equal
-      (parse_callable expected)
+      expected
       callable
   in
 
-  assert_callable "def foo() -> int: ..." "typing.Callable('foo')[[], int]";
-  assert_callable "async def foo() -> int: ..." "typing.Callable('foo')[[], typing.Awaitable[int]]";
+  assert_callable "def foo() -> int: ..." ~expected:"typing.Callable('foo')[[], int]";
+  assert_callable
+    "async def foo() -> int: ..."
+    ~expected:"typing.Callable('foo')[[], typing.Awaitable[int]]";
 
   assert_callable
     "def foo(a, b) -> str: ..."
-    "typing.Callable('foo')[[Named(a, $unknown), Named(b, $unknown)], str]";
+    ~expected:"typing.Callable('foo')[[Named(a, $unknown), Named(b, $unknown)], str]";
   assert_callable
     "def foo(a: int, b) -> str: ..."
-    "typing.Callable('foo')[[Named(a, int), Named(b, $unknown)], str]";
+    ~expected:"typing.Callable('foo')[[Named(a, int), Named(b, $unknown)], str]";
   assert_callable
     "def foo(a: int = 1) -> str: ..."
-    "typing.Callable('foo')[[Named(a, int, default)], str]";
+    ~expected:"typing.Callable('foo')[[Named(a, int, default)], str]";
 
   assert_callable
     "def foo(a, *args, **kwargs) -> str: ..."
-    "typing.Callable('foo')[[Named(a, $unknown), Variable(args), Keywords(kwargs)], str]";
+    ~expected:"typing.Callable('foo')[[Named(a, $unknown), Variable(args), Keywords(kwargs)], str]";
   assert_callable
     "def foo(**kwargs: typing.Dict[str, typing.Any]) -> str: ..."
-    "typing.Callable('foo')[[Keywords(kwargs, typing.Dict[str, typing.Any])], str]";
+    ~expected:"typing.Callable('foo')[[Keywords(kwargs, typing.Dict[str, typing.Any])], str]";
 
   assert_callable
     ~parent:"module.Foo"
     "def module.Foo.foo(a: int, b) -> str: ..."
-    "typing.Callable('module.Foo.foo')[[Named(a, int), Named(b, $unknown)], str]";
+    ~expected:"typing.Callable('module.Foo.foo')[[Named(b, $unknown)], str]";
 
   assert_callable
     ~parent:"module.Foo"
     {|
       @overload
-      def module.Foo.foo(a: int) -> int: ...
+      def module.Foo.foo(self, a: int) -> int: ...
       @overload
-      def module.Foo.foo(a: str) -> str: ...
+      def module.Foo.foo(self, a: str) -> str: ...
     |}
-    (* Note that the overload order is reversed from the declaration - shouldn't matter. *)
-    "typing.Callable('module.Foo.foo')[[Named(a, str)], str][[Named(a, int)], int]";
+    ~expected:(
+      "typing.Callable('module.Foo.foo')[..., $unknown]" ^
+      "[[[Named(a, str)], str][[Named(a, int)], int]]");
 
-  let assert_implicit_argument ?parent source expected =
-    let resolution =
-      populate source
-      |> fun environment -> Environment.resolution environment ()
-    in
-    let implicit_argument =
-      let parent = parent >>| Access.create in
-      parse_single_define source
-      |> (fun define -> { define with Statement.Define.parent })
-      |> (fun define -> Callable.create ~resolution [define])
-      |> fun { Type.Callable.implicit; _ } -> implicit
-    in
-    assert_equal
-      expected
-      implicit_argument
-  in
-  assert_implicit_argument "def foo(self) -> None: ..." Type.Callable.Function;
-  assert_implicit_argument ~parent:"module.Foo" "def foo(self) -> None: ..." Type.Callable.Instance;
-  assert_implicit_argument
+  assert_callable
     ~parent:"module.Foo"
     {|
-      @classmethod
-      def foo(cls, other) -> None: ...
-    |}
-    Type.Callable.Class;
-  assert_implicit_argument
+        @overload
+        def module.Foo.foo(self, a: int) -> int: ...
+        @overload
+        def module.Foo.foo(self, a: str, b: int) -> str: ...
+      |}
+    ~expected:(
+      "typing.Callable('module.Foo.foo')[..., $unknown]" ^
+      "[[[Named(a, str), Named(b, int)], str][[Named(a, int)], int]]");
+
+  assert_callable
     ~parent:"module.Foo"
     {|
-      @staticmethod
-      def foo(other) -> None: ...
+        def module.Foo.foo(self, a: int) -> int: ...
+        def module.Foo.foo(self, a: str) -> str: ...
+      |}
+    ~expected:(
+      "typing.Callable('module.Foo.foo')[[Named(a, str)], str]");
+
+  assert_callable
+    ~parent:"module.Foo"
+    ~expected_implicit:{
+      implicit_annotation = Type.primitive "module.Foo";
+      name = Access.create "self";
+    }
+    {|
+      def module.Foo.foo(self, a: int) -> int: ...
     |}
-    Type.Callable.Function
+    ~expected:("typing.Callable('module.Foo.foo')[[Named(a, int)], int]")
 
 
 let () =
@@ -206,4 +224,4 @@ let () =
     "apply_decorators">::test_apply_decorators;
     "create">::test_create;
   ]
-  |> run_test_tt_main;
+  |> Test.run;

@@ -17,7 +17,17 @@ open TypeCheck
 open Test
 
 
-let assert_type_errors = Test.assert_type_errors
+let assert_type_errors =
+  let check ~configuration ~environment ~source =
+    let { TypeCheck.Result.errors; _ } =
+      TypeCheck.check
+        ~configuration
+        ~environment
+        ~source
+    in
+    errors
+  in
+  assert_errors ~check
 
 
 let resolution = Test.resolution ()
@@ -64,32 +74,31 @@ let assert_state_equal =
     ~pp_diff:(diff ~print:State.pp)
 
 
-let assert_initial
-    ~parameters
-    ?parent
-    ?return_annotation
-    ?(decorators = [])
-    ?(initial = (fun resolution define ->
-        State.initial ~resolution define))
-    expected =
-  let define = {
-    Define.name = Access.create "foo";
-    parameters = List.map parameters ~f:(~+);
-    body = [];
-    decorators;
-    docstring = None;
-    return_annotation;
-    async = false;
-    generated = false;
-    parent = parent >>| Access.create;
-  }
-  in
-  assert_state_equal
-    expected
-    (initial resolution (+define))
-
-
 let test_initial _ =
+  let assert_initial
+      ~parameters
+      ?parent
+      ?return_annotation
+      ?(decorators = [])
+      ?(initial = (fun resolution define ->
+          State.initial ~resolution define))
+      expected =
+    let define = {
+      Define.name = Access.create "foo";
+      parameters = List.map parameters ~f:(~+);
+      body = [];
+      decorators;
+      docstring = None;
+      return_annotation;
+      async = false;
+      parent = parent >>| Access.create;
+    }
+    in
+    assert_state_equal
+      expected
+      (initial resolution (+define))
+  in
+
   assert_initial
     ~parameters:[
       {
@@ -321,7 +330,8 @@ let test_forward_expression _ =
     ~precondition:["x", Type.dictionary ~key:Type.integer ~value:Type.Bottom]
     ~postcondition:["x", Type.dictionary ~key:Type.integer ~value:Type.Bottom]
     ~errors:(`Specific [
-        "Incompatible parameter type [6]: Expected `int` but got `str`.";
+        "Incompatible parameter type [6]: "^
+        "Expected `int` for 1st anonymous parameter to call `dict.add_key` but got `str`.";
       ])
     "x.add_key('string')"
     Type.none;
@@ -364,6 +374,26 @@ let test_forward_expression _ =
   assert_forward "1 < 2" Type.bool;
   assert_forward "1 < 2 < 3" Type.bool;
   assert_forward "1 is 2" Type.bool;
+  assert_forward
+    ~precondition:["container", Type.list Type.integer]
+    ~postcondition:["container", Type.list Type.integer]
+    "1 in container"
+    Type.bool;
+  assert_forward
+    ~precondition:["container", Type.list Type.integer]
+    ~postcondition:["container", Type.list Type.integer]
+    "1 not in container"
+    Type.bool;
+  assert_forward
+    ~precondition:["container", Type.iterator Type.integer]
+    ~postcondition:["container", Type.iterator Type.integer]
+    "1 in container"
+    Type.bool;
+  assert_forward
+    ~precondition:["container", Type.iterator Type.integer]
+    ~postcondition:["container", Type.iterator Type.integer]
+    "1 not in container"
+    Type.bool;
   assert_forward ~errors:(`Undefined 1) "undefined < 1" Type.Top;
   assert_forward ~errors:(`Undefined 2) "undefined == undefined" Type.Top;
 
@@ -385,9 +415,12 @@ let test_forward_expression _ =
     (Type.dictionary ~key:Type.integer ~value:(Type.union [Type.integer; Type.string]));
   assert_forward "{**{1: 1}}" (Type.dictionary ~key:Type.integer ~value:Type.integer);
   assert_forward
+    "{**{1: 1}, **{'a': 'b'}}"
+    (Type.dictionary ~key:Type.Object ~value:Type.Object);
+  assert_forward
     ~errors:(`Undefined 1)
     "{1: 'string', **{undefined: 1}}"
-    (Type.dictionary ~key:Type.Top ~value:(Type.union [Type.string; Type.integer]));
+    (Type.dictionary ~key:Type.Object ~value:Type.Object);
   assert_forward
     ~errors:(`Undefined 1)
     "{undefined: 1}"
@@ -434,23 +467,27 @@ let test_forward_expression _ =
   let callable ~parameters ~annotation =
     let parameters =
       let open Type.Callable in
-      let rec anonymous_parameters = function
-        | count when count > 0 ->
-            Parameter.Anonymous { Parameter.index = (count - 1); annotation = Type.Object }
-            :: anonymous_parameters (count - 1)
-        | _ ->
-            []
+      let to_parameter name =
+        Parameter.Named {
+          Parameter.name = Access.create name;
+          annotation = Type.Object;
+          default = false;
+        }
       in
-      Defined (List.rev (anonymous_parameters parameters))
+      Defined (List.map parameters ~f:to_parameter)
     in
     Type.callable ~parameters ~annotation ()
   in
-  assert_forward "lambda: 1" (callable ~parameters:0 ~annotation:Type.integer);
-  assert_forward "lambda parameter: parameter" (callable ~parameters:1 ~annotation:Type.Object);
+  assert_forward "lambda: 1" (callable ~parameters:[] ~annotation:Type.integer);
+  assert_forward
+    "lambda parameter: parameter"
+    (callable
+       ~parameters:["parameter"]
+       ~annotation:Type.Object);
   assert_forward
     ~errors:(`Undefined 1)
     "lambda: undefined"
-    (callable ~parameters:0 ~annotation:Type.Top);
+    (callable ~parameters:[] ~annotation:Type.Top);
 
   (* Lists. *)
   assert_forward "[]" (Type.list Type.Bottom);
@@ -459,6 +496,21 @@ let test_forward_expression _ =
   assert_forward ~errors:(`Undefined 1) "[undefined]" (Type.list Type.Top);
   assert_forward ~errors:(`Undefined 2) "[undefined, undefined]" (Type.list Type.Top);
   assert_forward "[element for element in [1]]" (Type.list Type.integer);
+  assert_forward
+    ~precondition:["x", Type.list Type.integer]
+    ~postcondition:["x", Type.list Type.integer]
+    "[*x]"
+    (Type.list Type.integer);
+  assert_forward
+    ~precondition:["x", Type.list Type.integer]
+    ~postcondition:["x", Type.list Type.integer]
+    "[1, *x]"
+    (Type.list Type.integer);
+  assert_forward
+    ~precondition:["x", Type.list Type.integer]
+    ~postcondition:["x", Type.list Type.integer]
+    "['', *x]"
+    (Type.list (Type.union [Type.string; Type.integer]));
 
   (* Sets. *)
   assert_forward "{1}" (Type.set Type.integer);
@@ -466,6 +518,21 @@ let test_forward_expression _ =
   assert_forward ~errors:(`Undefined 1) "{undefined}" (Type.set Type.Top);
   assert_forward ~errors:(`Undefined 2) "{undefined, undefined}" (Type.set Type.Top);
   assert_forward "{element for element in [1]}" (Type.set Type.integer);
+  assert_forward
+    ~precondition:["x", Type.list Type.integer]
+    ~postcondition:["x", Type.list Type.integer]
+    "{*x}"
+    (Type.set Type.integer);
+  assert_forward
+    ~precondition:["x", Type.list Type.integer]
+    ~postcondition:["x", Type.list Type.integer]
+    "{1, *x}"
+    (Type.set Type.integer);
+  assert_forward
+    ~precondition:["x", Type.set Type.integer]
+    ~postcondition:["x", Type.set Type.integer]
+    "{'', *x}"
+    (Type.set (Type.union [Type.string; Type.integer]));
 
   (* Starred expressions. *)
   assert_forward "*1" Type.Top;
@@ -575,7 +642,7 @@ let test_forward_statement _ =
     ["a", Type.integer; "b", Type.Top; "c", Type.integer; "d", Type.Top];
   assert_forward
     ~errors:
-      (`Specific ["Unable to unpack [23]: Unable to unpack single value, 2 were expected."])
+      (`Specific ["Unable to unpack [23]: Unable to unpack `int` into 2 values."])
     ["z", Type.integer]
     "x, y = z"
     ["x", Type.Top; "y", Type.Top; "z", Type.integer];
@@ -602,7 +669,7 @@ let test_forward_statement _ =
   assert_forward
     ~errors:
       (`Specific [
-          "Unable to unpack [23]: Unable to unpack single value, 2 were expected.";
+          "Unable to unpack [23]: Unable to unpack `unknown` into 2 values.";
         ])
     []
     "(x, y), z = 1"
@@ -720,13 +787,17 @@ let test_forward_statement _ =
     ["x", Type.optional Type.integer]
     "assert x is None"
     ["x", Type.optional Type.Bottom];
+  assert_forward
+    ["x", Type.optional Type.integer]
+    "assert (not x) or 1"
+    ["x", Type.optional Type.integer];
 
+  (* Isinstance. *)
   assert_forward ["x", Type.Object] "assert isinstance(x, int)" ["x", Type.integer];
   assert_forward
     ["x", Type.Object; "y", Type.Top]
     "assert isinstance(y, str)"
     ["x", Type.Object; "y", Type.string];
-
   assert_forward
     ["x", Type.Object]
     "assert isinstance(x, (int, str))"
@@ -735,12 +806,93 @@ let test_forward_statement _ =
     ["x", Type.integer]
     "assert isinstance(x, (int, str))"
     ["x", Type.integer];
+  assert_forward
+    ~bottom:false
+    ["x", Type.integer]
+    "assert isinstance(x, str)"
+    ["x", Type.string];
+  assert_forward
+    ~bottom:false
+    ["x", Type.Bottom]
+    "assert isinstance(x, str)"
+    ["x", Type.string];
+  assert_forward
+    ~bottom:false
+    ["x", Type.float]
+    "assert isinstance(x, int)"
+    ["x", Type.integer];
+  assert_forward
+    ~bottom:false
+    ~errors:
+      (`Specific
+         ["Incompatible parameter type [6]: " ^
+          "Expected `typing.Type[typing.Any]` for 2nd anonymous parameter to call `isinstance` " ^
+          "but got `int`."])
+    ["x", Type.integer]
+    "assert isinstance(x, 1)"
+    ["x", Type.integer];
+  assert_forward
+    ~errors:
+      (`Specific
+         ["Impossible isinstance check [25]: `x` has type `int`, checking if `x` not " ^
+          "isinstance `int` will always fail."])
+    ~bottom:true
+    ["x", Type.integer]
+    "assert not isinstance(x, int)"
+    ["x", Type.integer];
+  assert_forward
+    ~errors:
+      (`Specific
+         ["Impossible isinstance check [25]: `x` has type `int`, checking if `x` not " ^
+          "isinstance `float` will always fail."])
+    ~bottom:true
+    ["x", Type.integer]
+    "assert not isinstance(x, float)"
+    ["x", Type.integer];
+  assert_forward
+    ~bottom:false
+    ["x", Type.float]
+    "assert not isinstance(x, int)"
+    ["x", Type.float];
+  assert_forward
+    ["x", Type.optional (Type.union [Type.integer; Type.string])]
+    "assert not isinstance(x, int)"
+    ["x", Type.optional Type.string];
+  assert_forward
+    ["x", Type.optional (Type.union [Type.integer; Type.string])]
+    "assert not isinstance(x, type(None))"
+    [
+      "$type", Type.meta Type.none;
+      "x", Type.union [Type.integer; Type.string];
+    ];
+
+  (* Works for general expressions. *)
+  assert_forward
+    ~errors:
+      (`Specific
+         ["Impossible isinstance check [25]: `x.__add__(1)` has type `int`, checking if " ^
+          "`x.__add__(1)` not isinstance `int` will always fail."])
+    ~bottom:true
+    ["x", Type.integer]
+    "assert not isinstance(x + 1, int)"
+    ["x", Type.integer];
+
+  assert_forward
+    ~bottom:false
+    ["x", Type.Bottom]
+    "assert not isinstance(x, int)"
+    ["x", Type.Bottom];
 
   assert_forward
     ~bottom:true
-    ["x", Type.integer]
-    "assert isinstance(x, str)"
-    ["x", Type.integer];
+    []
+    "assert False"
+    [];
+  assert_forward
+    ~bottom:false
+    []
+    "assert (not True)"
+    [];
 
   (* Raise. *)
   assert_forward [] "raise 1" [];
@@ -843,10 +995,10 @@ let test_show_error_traces _ =
 
   assert_type_errors ~show_error_traces:true
     {|
-    class Foo:
-      attribute: int
-      def __init__(self) -> None:
-        self.attribute = ""
+      class Foo:
+        attribute: int
+        def __init__(self) -> None:
+          self.attribute = ""
     |}
     [
       "Incompatible attribute type [8]: Attribute `attribute` declared in class `Foo` has type " ^
@@ -856,14 +1008,15 @@ let test_show_error_traces _ =
 
   assert_type_errors ~show_error_traces:true
     {|
-    constant: int
-    def foo() -> None:
-      global constant
-      constant = "hi"
+      constant: int
+      def foo() -> None:
+        global constant
+        constant = "hi"
     |}
     [
       "Incompatible variable type [9]: constant is declared to have type `int` but is used as " ^
-      "type `str`. constant incorrectly used on line 5.";
+      "type `str`. Redeclare `constant` on line 5 if you wish to override the previously " ^
+      "declared type.";
     ];
 
   assert_type_errors ~show_error_traces:true
@@ -879,10 +1032,10 @@ let test_show_error_traces _ =
 
   assert_type_errors ~show_error_traces:true
     {|
-    class Foo:
-      attribute: int
-      def __init__(self) -> None:
-        attribute = 0
+      class Foo:
+        attribute: int
+        def __init__(self) -> None:
+          attribute = 0
     |}
     [
       "Uninitialized attribute [13]: Attribute `attribute` is declared in class `Foo` to have " ^
@@ -908,10 +1061,10 @@ let test_show_error_traces _ =
 
   assert_type_errors ~show_error_traces:true
     {|
-    constant = x
-    def foo() -> None:
-      global constant
-      constant = 1
+      constant = x
+      def foo() -> None:
+        global constant
+        constant = 1
     |}
     [
       "Missing global annotation [5]: Globally accessible variable `constant` has type `int` but " ^
@@ -922,11 +1075,11 @@ let test_show_error_traces _ =
 
   assert_type_errors ~show_error_traces:true
     {|
-    constant = x
-    def foo() -> None:
-      global constant
-      constant = "hi"
-      constant = 1
+      constant = x
+      def foo() -> None:
+        global constant
+        constant = "hi"
+        constant = 1
     |}
     [
       "Missing global annotation [5]: Globally accessible variable `constant` has type " ^
@@ -967,6 +1120,31 @@ let test_show_error_traces _ =
       "`typing.Union[int, str]` but no type is specified. Global variable `x` " ^
       "declared on line 7, type `typing.Union[int, str]` deduced from test.py:4:2, " ^
       "test.py:7:2."
+    ];
+
+  assert_type_errors ~show_error_traces:true
+    {|
+      a: typing.List[float] = [1]
+      b: typing.List[int] = [2]
+      a = b
+    |}
+    [
+      "Incompatible variable type [9]: a is declared to have type `typing.List[float]` but is \
+       used as type `typing.List[int]`. Redeclare `a` on line 4 if you wish to override the \
+       previously declared type.  See https://pyre-check.org/docs/error-types.html#list-and-\
+       dictionary-mismatches-with-subclassing for mutable container errors.";
+    ];
+  assert_type_errors ~show_error_traces:true
+    {|
+      def foo() -> typing.List[float]:
+        l = [1]
+        return l
+    |}
+    [
+      "Incompatible return type [7]: Expected `typing.List[float]` but got `typing.List[int]`. \
+       Type `typing.List[float]` expected on line 4, specified on line 2.  \
+       See https://pyre-check.org/docs/error-types.html#list-and-dictionary-mismatches-with-\
+       subclassing for mutable container errors.";
     ]
 
 
@@ -989,9 +1167,9 @@ let test_check_with_qualification _ =
 
   assert_type_errors
     {|
-      list: typing.List[int] = [1]
+      l: typing.List[int] = [1]
       def hello() -> int:
-        for i in list:
+        for i in l:
           return i
         return -1
     |}
@@ -1158,7 +1336,13 @@ let test_check_imports _ =
       import durp
       a = durp.x
     |}
-    ["Undefined import [21]: Could not find a module corresponding to import `durp`."]
+    ["Undefined import [21]: Could not find a module corresponding to import `durp`."];
+  assert_type_errors
+    {|
+      from typing import Optional
+      def foo() -> None: return 1
+    |}
+    ["Incompatible return type [7]: Expected `None` but got `int`."]
 
 
 let test_reveal_type _ =
@@ -1172,12 +1356,13 @@ let test_reveal_type _ =
     ];
 
   assert_type_errors
+    ~debug:false
     {|
       def foo(x) -> None:
         reveal_type(x)
     |}
     [
-      "Revealed type [-1]: Revealed type for `x` is `typing.Unbound`.";
+      "Revealed type [-1]: Revealed type for `x` is `undefined`.";
     ];
   assert_type_errors
     {|
@@ -1203,9 +1388,9 @@ let test_coverage _ =
     let { Result.coverage; _ } =
       let environment = Test.environment () in
       Analysis.TypeCheck.check
-        Test.mock_configuration
-        environment
-        (parse source)
+        ~configuration:Test.mock_configuration
+        ~environment
+        ~source:(parse source)
     in
     assert_equal ~printer:Coverage.show expected coverage
   in
@@ -1214,20 +1399,20 @@ let test_coverage _ =
     { Coverage.full = 0; partial = 0; untyped = 0; ignore = 0; crashes = 0 };
   assert_coverage
     {|
-     def foo(y: int):
-       if True:
-         x = y
-       else:
-         x = z
+      def foo(y: int):
+        if condition():
+          x = y
+        else:
+          x = z
     |}
     { Coverage.full = 1; partial = 0; untyped = 1; ignore = 0; crashes = 0 };
   assert_coverage
     {|
-     def foo(y: asdf):
-      if True:
-        x = y
-      else:
-        x = 1
+      def foo(y: asdf):
+        if condition():
+          x = y
+        else:
+          x = 1
     |}
     { Coverage.full = 0; partial = 0; untyped = 0; ignore = 0; crashes = 1 };
 
@@ -1237,7 +1422,7 @@ let test_coverage _ =
         x = returns_undefined()
         return x
     |}
-    { Coverage.full = 0; partial = 0; untyped = 0; ignore = 0; crashes = 1 }
+    { Coverage.full = 1; partial = 0; untyped = 1; ignore = 0; crashes = 0 }
 
 
 let test_check _ =
@@ -1320,21 +1505,7 @@ let test_check _ =
     [];
 
   assert_type_errors
-    {|
-      class Foo:
-        @overload
-        def derp(self, x: int) -> int:
-          pass
-        @overload
-        def derp(self, x: str) -> str:
-          pass
-
-      def herp(x: Foo) -> int:
-        return x.derp(5)
-    |}
-    [];
-
-  assert_type_errors
+    ~debug:false
     {|
       def f(d: typing.Dict[int, int], x) -> None:
         d.update({ 1: x })
@@ -1342,6 +1513,7 @@ let test_check _ =
     [];
 
   assert_type_errors
+    ~debug:false
     {|
       def f(d: typing.Dict[int, str], x) -> str:
         return d.get(x, "")
@@ -1416,6 +1588,7 @@ let test_check _ =
     [];
 
   assert_type_errors
+    ~debug:false
     {|
       def f(x) -> int:
         class Stub:
@@ -1434,14 +1607,31 @@ let test_check _ =
 
   assert_type_errors
     {|
+      isinstance(1, NonexistentClass)
+    |}
+    ["Undefined name [18]: Global name `NonexistentClass` is undefined."];
+  assert_type_errors "isinstance(1, (int, str))" [];
+  assert_type_errors "isinstance(1, (int, (int, str)))" [];
+  assert_type_errors
+    "isinstance(str, '')"
+    ["Incompatible parameter type [6]: " ^
+     "Expected `typing.Type[typing.Any]` for 2nd anonymous parameter to call `isinstance` " ^
+     "but got `str`."];
+  assert_type_errors
+    "isinstance(1, (int, ('', str)))"
+    ["Incompatible parameter type [6]: " ^
+     "Expected `typing.Type[typing.Any]` for 2nd anonymous parameter to call `isinstance` " ^
+     "but got `str`."];
+
+  assert_type_errors
+    {|
       _T = typing.TypeVar("_T")
       def meta(x: typing.Type[_T]) -> None: ...
       meta(typing.Dict)
     |}
-    [
-      "Incompatible parameter type [6]: Expected `typing.Type[Variable[_T]]` but got " ^
-      "`typing.TypeAlias`.";
-    ];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `typing.Type[Variable[_T]]` for 1st anonymous parameter to call `meta` but got " ^
+     "`typing.TypeAlias`."];
 
   assert_type_errors
     {|
@@ -1515,7 +1705,7 @@ let test_check _ =
         return x + y + z
     |}
     [
-      "Unable to unpack [23]: Unable to unpack single value, 2 were expected.";
+      "Unable to unpack [23]: Unable to unpack `unknown` into 2 values.";
       "Incompatible return type [7]: Expected `int` but got `unknown`.";
     ];
 
@@ -1577,25 +1767,25 @@ let test_check _ =
   assert_type_errors
     {|
       def x() -> int:
-        if condition:
+        if unknown_condition:
           return 1
     |}
     [
       "Incompatible return type [7]: Expected `int` but got implicit return value of `None`.";
-      "Undefined name [18]: Global name `condition` is undefined.";
+      "Undefined name [18]: Global name `unknown_condition` is undefined.";
     ];
 
   assert_type_errors
     {|
       def foo() -> int:
-        if condition:
+        if unknown_condition:
           return 1
         else:
           x = 1
     |}
     [
       "Incompatible return type [7]: Expected `int` but got implicit return value of `None`.";
-      "Undefined name [18]: Global name `condition` is undefined.";
+      "Undefined name [18]: Global name `unknown_condition` is undefined.";
     ];
 
   assert_type_errors
@@ -1645,15 +1835,15 @@ let test_check _ =
 
   assert_type_errors
     {|
-     def derp()->typing.Set[int]:
-      return {1}
+      def derp()->typing.Set[int]:
+        return {1}
     |}
     [];
 
   assert_type_errors
     {|
-     def derp()->typing.Set[int]:
-      return {""}
+      def derp()->typing.Set[int]:
+        return {""}
     |}
     [
       "Incompatible return type [7]: Expected `typing.Set[int]` but got `typing.Set[str]`."
@@ -1661,11 +1851,11 @@ let test_check _ =
 
   assert_type_errors
     {|
-     def foo() -> str:
-      if True:
-        return 1
-      else:
-        return 2
+      def foo() -> str:
+        if condition():
+          return 1
+        else:
+          return 2
     |}
     [
       "Incompatible return type [7]: Expected `str` but got `int`.";
@@ -1701,7 +1891,8 @@ let test_check _ =
           expect_string(x)
 
     |}
-    ["Incompatible parameter type [6]: Expected `str` but got `int`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `str` for 1st anonymous parameter to call `expect_string` but got `int`."];
 
   assert_type_errors
     {|
@@ -1710,7 +1901,7 @@ let test_check _ =
       def f() -> None:
         a = foo(1,2)
     |}
-    ["Too many arguments [19]: Call `foo` expects 1 positional argument, 2 were provided."];
+    ["Too many arguments [19]: Call `foo` expects 1 argument, 2 were provided."];
 
   assert_type_errors
     {|
@@ -1728,7 +1919,7 @@ let test_check _ =
       def f() -> None:
         a = foo(y=4)
     |}
-    [];
+    ["Unexpected keyword [28]: Unexpected keyword argument `y` to call `foo`."];
 
   assert_type_errors
     {|
@@ -1748,7 +1939,7 @@ let test_check _ =
       def f(c: C) -> None:
         a = c.f("", "")
     |}
-    ["Too many arguments [19]: Call `C.f` expects 2 positional arguments, 3 were provided."];
+    ["Too many arguments [19]: Call `C.f` expects 1 argument, 2 were provided."];
 
   assert_type_errors
     {|
@@ -1766,7 +1957,7 @@ let test_check _ =
       def f() -> None:
         a = foo(1,2,3,4)
     |}
-    ["Too many arguments [19]: Call `foo` expects 0 positional arguments, 4 were provided."];
+    ["Too many arguments [19]: Call `foo` expects 0 arguments, 4 were provided."];
 
   assert_type_errors
     {|
@@ -1801,7 +1992,7 @@ let test_check _ =
     |}
     [
       "Incompatible return type [7]: Expected `typing.Iterable[str]` but " ^
-      "got `typing.Sequence[int]`.";
+      "got `typing.Tuple[int, ...]`.";
     ];
 
   assert_type_errors
@@ -1819,7 +2010,25 @@ let test_check _ =
         return f( *args)
     |}
     [];
-  ();
+  assert_type_errors
+    {|
+      def f(a: int, b: int) -> None:
+       pass
+      def g(collection: typing.Collection[str]) -> None:
+        return f( *collection)
+    |}
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `f` but got `str`."];
+  assert_type_errors
+    {|
+      class C(typing.Iterable[int]):
+        ...
+      def f(a: int, b: int) -> None:
+       pass
+      def g(c: C) -> None:
+        return f( *c)
+    |}
+    [];
 
   assert_type_errors
     {|
@@ -1865,13 +2074,176 @@ let test_check _ =
       "`typing.Type[typing.Any]`.";
     ];
 
+  assert_type_errors
+    {|
+      def expect_type_float(meta: typing.Type[float]) -> None:
+        pass
+      expect_type_float(int)
+    |}
+    [];
+
   (* object methods are picked up for optionals. *)
   assert_type_errors
     {|
       def f() -> int:
         return None.__sizeof__()
     |}
-    []
+    [];
+
+  assert_type_errors
+    {|
+      def f(x: typing.List[int]) -> typing.Set[str]:
+        return {1, *x}
+    |}
+    ["Incompatible return type [7]: Expected `typing.Set[str]` but got `typing.Set[int]`."];
+
+  assert_type_errors
+    {|
+      def foo() -> int:
+        bar, baz = list(range(2))
+        reveal_type(bar)
+        return bar
+    |}
+    ["Revealed type [-1]: Revealed type for `bar` is `int`."];
+
+  assert_type_errors
+    {|
+      def foo(s: typing.Sequence[float]) -> list[float]:
+        l = list(s)
+        bar, baz = l
+        reveal_type(bar)
+        return l
+    |}
+    ["Revealed type [-1]: Revealed type for `bar` is `float`."];
+
+  assert_type_errors
+    {|
+      def foo() -> dict[str, int]:
+        d = dict(a = 1, b = 2)
+        bar = d['a']
+        reveal_type(bar)
+        return d
+    |}
+    ["Revealed type [-1]: Revealed type for `bar` is `int`."];
+
+  assert_type_errors
+    {|
+      def foo(map: typing.Mapping[str, int]) -> dict[str, int]:
+        d = dict(map)
+        bar = d['a']
+        reveal_type(bar)
+        return d
+    |}
+    ["Revealed type [-1]: Revealed type for `bar` is `int`."];
+
+  assert_type_errors
+    {|
+      def foo(t: typing.Iterable[Tuple[str, int]]) -> dict[str, int]:
+        d = dict(t)
+        bar = d['a']
+        reveal_type(bar)
+        return d
+    |}
+    ["Revealed type [-1]: Revealed type for `bar` is `int`."];
+
+  assert_type_errors
+    {|
+      class WeirdContains:
+        def __contains__(self, x: int) -> int:
+          ...
+      reveal_type(1 in WeirdContains())
+    |}
+    ["Revealed type [-1]: Revealed type for `1 in WeirdContains()` is `int`."];
+
+  assert_type_errors
+    {|
+      class WeirdIterator:
+        def __eq__(self, other) -> str:
+          ...
+        def __iter__(self) -> typing.Iterator[WeirdIterator]:
+          ...
+      reveal_type(1 in WeirdIterator())
+    |}
+    ["Revealed type [-1]: Revealed type for `1 in WeirdIterator()` is `str`."];
+  assert_type_errors
+    {|
+      class WeirdEqual:
+        def __eq__(self, other: object) -> typing.List[int]:
+          ...
+      class WeirdGetItem:
+        def __getitem__(self, x: int) -> WeirdEqual:
+          ...
+      reveal_type(1 in WeirdGetItem())
+    |}
+    ["Revealed type [-1]: Revealed type for `1 in WeirdGetItem()` is `typing.List[int]`."];
+  assert_type_errors
+    {|
+      class Equal:
+        def __eq__(self, other: object) -> str:
+          ...
+      class Multiple:
+        def __iter__(self, x: int) -> typing.Iterator[Equal]:
+          ...
+        def __contains__(self, a: object) -> bool:
+          ...
+      reveal_type(1 in Multiple())
+    |}
+    ["Revealed type [-1]: Revealed type for `1 in Multiple()` is `bool`."];
+  assert_type_errors
+    {|
+      class Equal:
+        def __eq__(self, other: object) -> str:
+          ...
+      class Multiple:
+        def __getitem__(self, x: int) -> Equal:
+          ...
+        def __contains__(self, a: object) -> int:
+          ...
+      reveal_type(1 in Multiple())
+    |}
+    ["Revealed type [-1]: Revealed type for `1 in Multiple()` is `int`."];
+  assert_type_errors
+    {|
+      class Equal:
+        def __eq__(self, other: object) -> typing.List[int]:
+          ...
+      class GetItemA:
+        def __getitem__(self, x: int) -> Equal:
+          ...
+      class GetItemB:
+        def __getitem__(self, x: int) -> Equal:
+          ...
+      def foo(a: typing.Union[GetItemA, GetItemB]) -> None:
+        5 in a
+    |}
+    [];
+  (* We require that all elements in a union have the same method for `in`. *)
+  assert_type_errors
+    {|
+      class Equal:
+        def __eq__(self, other: object) -> typing.List[int]:
+          ...
+      class GetItem:
+        def __getitem__(self, x: int) -> Equal:
+          ...
+      class Contains:
+        def __contains__(self, a: object) -> bool:
+          ...
+      def foo(a: typing.Union[GetItem, Contains]) -> None:
+        5 in a
+    |}
+    ["Undefined attribute [16]: `Contains` has no attribute `__getitem__`."];
+  (* Don't crash when filtering on returning a bad type *)
+  assert_type_errors
+    ~debug:false
+    {|
+      def foo(a: gurbage) -> None:
+        return a
+    |}
+    [
+      "Undefined type [11]: Type `gurbage` is not defined.";
+      "Incompatible return type [7]: Expected `None` but got `gurbage`.";
+    ]
 
 
 let test_check_assign _ =
@@ -1889,7 +2261,9 @@ let test_check_assign _ =
         x: int = 1
         x = 'string'
     |}
-    ["Incompatible variable type [9]: x is declared to have type `int` but is used as type `str`."];
+    [
+      "Incompatible variable type [9]: x is declared to have type `int` but is used as type `str`."
+    ];
 
   assert_type_errors
     {|
@@ -1903,7 +2277,7 @@ let test_check_assign _ =
       def foo(input: int) -> None:
         x, y = input
     |}
-    ["Unable to unpack [23]: Unable to unpack single value, 2 were expected."];
+    ["Unable to unpack [23]: Unable to unpack `int` into 2 values."];
 
 
   assert_type_errors
@@ -1925,7 +2299,45 @@ let test_check_assign _ =
         x = 1
         x += 'asdf'
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."]
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `int.__add__` but got `str`."];
+
+  assert_type_errors
+    {|
+      def foo(x: typing.Dict[str, int]) -> None:
+        x["foo"] = "bar"
+    |}
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 2nd anonymous parameter to call `dict.__setitem__` but got `str`."];
+
+  assert_type_errors
+    {|
+      class A:
+        pass
+      def foo(x: typing.Dict[str, int], y: A) -> None:
+        x["foo"] = y["bar"] = "baz"
+    |}
+    [
+      "Undefined attribute [16]: `A` has no attribute `__setitem__`.";
+      "Incompatible parameter type [6]: " ^
+      "Expected `int` for 2nd anonymous parameter to call `dict.__setitem__` but got `str`.";
+    ];
+
+  assert_type_errors
+    {|
+      def foo(x: typing.Dict[str, typing.Dict[str, int]]) -> None:
+        x["foo"]["bar"] = "baz"
+    |}
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 2nd anonymous parameter to call `dict.__setitem__` but got `str`."];
+
+  assert_type_errors
+    {|
+      def foo(x: typing.Dict[str, int]) -> None:
+        x[7] = 7
+    |}
+    ["Incompatible parameter type [6]: " ^
+     "Expected `str` for 1st anonymous parameter to call `dict.__setitem__` but got `int`."]
 
 
 let test_check_coverage _ =
@@ -2022,7 +2434,8 @@ let test_check_coverage _ =
 
   (* Boolean operator. *)
   assert_covered "ERROR or False";
-  assert_covered "True or ERROR";
+  (* True or UNDEFINED evaluates to True in python. *)
+  assert_not_covered "True or ERROR";
   assert_covered "ERROR and False";
   assert_covered "True and ERROR";
 
@@ -2077,22 +2490,22 @@ let test_check_coverage _ =
 let test_check_comprehensions _ =
   assert_type_errors
     {|
-    def foo(input: typing.List[str]) -> typing.List[str]:
-      return [a for a in input]
+      def foo(input: typing.List[str]) -> typing.List[str]:
+        return [a for a in input]
     |}
     [];
 
   assert_type_errors
     {|
-    def foo(input: typing.List[str]) -> typing.List[str]:
-      return [a for a in input if len(a) < 5]
+      def foo(input: typing.List[str]) -> typing.List[str]:
+        return [a for a in input if len(a) < 5]
     |}
     [];
 
   assert_type_errors
     {|
-    def foo(input: str) -> typing.List[int]:
-      return [a for a in input]
+      def foo(input: str) -> typing.List[int]:
+        return [a for a in input]
     |}
     ["Incompatible return type [7]: Expected `typing.List[int]` but got `typing.List[str]`."];
 
@@ -2132,8 +2545,8 @@ let test_check_comprehensions _ =
     |}
     [
       "Incompatible return type [7]: Expected `typing.Dict[int, str]` but got " ^
-      "`typing.Dict[unknown, unknown]`.";
-      "Unable to unpack [23]: Unable to unpack single value, 2 were expected.";
+      "`typing.Dict[]`.";
+      "Unable to unpack [23]: Unable to unpack `int` into 2 values.";
     ];
 
   assert_type_errors
@@ -2145,32 +2558,32 @@ let test_check_comprehensions _ =
 
   assert_type_errors
     {|
-    def foo(input: typing.List[str]) -> typing.List[str]:
-      return [a.lower() for a in input]
+      def foo(input: typing.List[str]) -> typing.List[str]:
+        return [a.lower() for a in input]
     |}
     [];
   assert_type_errors
     {|
-    def foo(input: typing.List[str]) -> typing.List[int]:
-      return [str_to_int(a) for a in input]
+      def foo(input: typing.List[str]) -> typing.List[int]:
+        return [str_to_int(a) for a in input]
     |}
     [];
   assert_type_errors
     {|
-    def foo(input: typing.Set[str]) -> typing.Set[str]:
-      return {a for a in input}
+      def foo(input: typing.Set[str]) -> typing.Set[str]:
+        return {a for a in input}
     |}
     [];
   assert_type_errors
     {|
-    def foo(input: typing.Set[str]) -> typing.Set[str]:
-      return {a.lower() for a in input}
+      def foo(input: typing.Set[str]) -> typing.Set[str]:
+        return {a.lower() for a in input}
     |}
     [];
   assert_type_errors
     {|
-    def foo(a: typing.List[str], b: typing.List[str]) -> int:
-      return {x + y for x in a for y in b}
+      def foo(a: typing.List[str], b: typing.List[str]) -> int:
+        return {x + y for x in a for y in b}
     |}
     ["Incompatible return type [7]: Expected `int` but got `typing.Set[str]`."];
 
@@ -2229,8 +2642,8 @@ let test_check_comprehensions _ =
         return { x: y for (x, y) in a.items() }
     |}
     [
-      "Incompatible return type [7]: Expected `typing.Dict[str, int]` but got" ^
-      " `typing.Dict[str, typing.Optional[int]]`.";
+      "Incompatible return type [7]: Expected `typing.Dict[str, int]` but got \
+       `typing.Dict[str, typing.Optional[int]]`.";
     ];
 
   assert_type_errors
@@ -2288,7 +2701,7 @@ let test_check_optional _ =
   assert_type_errors
     {|
       def foo() -> typing.Any:
-        if True:
+        if condition():
           return 1
     |}
     [
@@ -2304,7 +2717,9 @@ let test_check_optional _ =
     [
       "Missing return annotation [3]: Returning `typing.Union[bool, int]` " ^
       "but type `Any` is specified.";
-      "Incompatible parameter type [6]: Expected `int` but got `typing.Optional[int]`.";
+      "Incompatible parameter type [6]: " ^
+      "Expected `int` for 1st anonymous parameter to call `int_to_bool` but got " ^
+      "`typing.Optional[int]`.";
     ];
 
   assert_type_errors
@@ -2315,6 +2730,122 @@ let test_check_optional _ =
     [
       "Missing return annotation [3]: Returning `typing.Optional[bool]` but " ^
       "type `Any` is specified.";
+    ]
+
+
+let test_check_function_overloads _ =
+  assert_type_errors
+    {|
+      class Foo:
+        @overload
+        def derp(self, x: int) -> int:
+          pass
+        @overload
+        def derp(self, x: str) -> str:
+          pass
+        def derp(self, x: typing.Union[int, str]) -> typing.Union[int, str]:
+          if isinstance(x, int):
+            return 0
+          else:
+            return ""
+
+      def herp(x: Foo) -> int:
+        return x.derp(5)
+    |}
+    [];
+
+  (* Technically invalid; all @overload stubs must be followed by implementation *)
+  assert_type_errors
+    {|
+      class Foo:
+        @overload
+        def derp(self, x: int) -> int:
+          pass
+        @overload
+        def derp(self, x: str) -> str:
+          pass
+
+      def herp(x: Foo) -> int:
+        return x.derp(5)
+    |}
+    [];
+
+  (* Technically invalid; @overload stubs must comprehensively cover implementation *)
+  assert_type_errors
+    {|
+      class Foo:
+        @overload
+        def derp(self, x: int) -> int:
+          pass
+        def derp(self, x: typing.Union[int, str]) -> typing.Union[int, str]:
+          if isinstance(x, int):
+            return 0
+          else:
+            return ""
+
+      def herp(x: Foo) -> int:
+        return x.derp(5)
+    |}
+    [];
+
+  assert_type_errors
+    {|
+      @overload
+      def derp(x: int) -> int: ...
+      @overload
+      def derp(x: str) -> str: ...
+      def derp(x: int) -> int: ...
+      def derp(x: str) -> str: ...
+
+      reveal_type(derp)
+    |}
+    [
+      "Revealed type [-1]: Revealed type for `derp` is " ^
+      "`typing.Callable(derp)[[Named(x, str)], str][[[Named(x, int)], int][[Named(x, str)], str]]`."
+    ];
+
+  assert_type_errors
+    {|
+      @overload
+      def derp(x: int) -> int: ...
+      @overload
+      def derp(x: str) -> str: ...
+
+      reveal_type(derp)
+    |}
+    [
+      "Revealed type [-1]: Revealed type for `derp` is " ^
+      "`typing.Callable(derp)[..., unknown][[[Named(x, int)], int][[Named(x, str)], str]]`."
+    ];
+
+  (* The overloaded stub will override the implementation *)
+  assert_type_errors
+    {|
+      @overload
+      def derp(x: int) -> int: ...
+      def derp(x: str) -> str: ...
+      @overload
+      def derp(x: str) -> str: ...
+
+      reveal_type(derp)
+    |}
+    [
+      "Revealed type [-1]: Revealed type for `derp` is " ^
+      "`typing.Callable(derp)[..., unknown][[[Named(x, int)], int][[Named(x, str)], str]]`."
+    ];
+
+  assert_type_errors
+    {|
+      @overload
+      def derp(x: int) -> int: ...
+      def derp(x: str) -> str: ...
+      def derp(): ...
+
+      reveal_type(derp)
+    |}
+    [
+      "Revealed type [-1]: Revealed type for `derp` is " ^
+      "`typing.Callable(derp)[[], unknown][[[Named(x, int)], int]]`."
     ]
 
 
@@ -2332,7 +2863,8 @@ let test_check_function_parameters _ =
         int_to_int(1.0)
     |}
     [
-      "Incompatible parameter type [6]: Expected `int` but got `float`.";
+      "Incompatible parameter type [6]: " ^
+      "Expected `int` for 1st anonymous parameter to call `int_to_int` but got `float`.";
     ];
   assert_type_errors
     {|
@@ -2342,7 +2874,8 @@ let test_check_function_parameters _ =
         preprocessed(1.0)
     |}
     [
-      "Incompatible parameter type [6]: Expected `str` but got `float`.";
+      "Incompatible parameter type [6]: " ^
+      "Expected `str` for 1st anonymous parameter to call `preprocessed` but got `float`.";
     ];
 
   assert_type_errors
@@ -2351,7 +2884,8 @@ let test_check_function_parameters _ =
         return int_to_int(1.0)
     |}
     [
-      "Incompatible parameter type [6]: Expected `int` but got `float`.";
+      "Incompatible parameter type [6]: " ^
+      "Expected `int` for 1st anonymous parameter to call `int_to_int` but got `float`.";
     ];
 
   assert_type_errors
@@ -2359,7 +2893,24 @@ let test_check_function_parameters _ =
       def foo(i) -> None:
         int_to_int(i)
     |}
-    [];
+    ["Missing parameter annotation [2]: Parameter `i` has no type specified."];
+
+  assert_type_errors
+    {|
+      def foo(i: int, *, j: int) -> None:
+        pass
+    |}
+    ["Missing parameter annotation [2]: Parameter `*` has no type specified."];
+
+  assert_type_errors
+    {|
+      def foo( *args, **kwargs) -> None:
+        pass
+    |}
+    [
+      "Missing parameter annotation [2]: Parameter `*args` has no type specified.";
+      "Missing parameter annotation [2]: Parameter `**kwargs` has no type specified.";
+    ];
 
   assert_type_errors
     {|
@@ -2368,6 +2919,17 @@ let test_check_function_parameters _ =
           int_to_int(self.attribute)
     |}
     ["Undefined attribute [16]: `A` has no attribute `attribute`."];
+  assert_type_errors
+    {|
+      class C:
+       attribute: int = 1
+      try:
+        x = C()
+      except:
+        pass
+      x.attribute
+    |}
+    ["Undefined name [18]: Global name `x` is undefined."];
 
   assert_type_errors
     {|
@@ -2378,18 +2940,28 @@ let test_check_function_parameters _ =
 
   assert_type_errors
     {|
-     def foo(a: typing.Optional[int]) -> int:
-      return to_int(a and int_to_str(a))
+      def foo(a: typing.Union[str, None, typing.Tuple[int, str]]) -> None:
+        pass
+      foo(None)
     |}
     [];
 
   assert_type_errors
     {|
-     def foo(a: typing.Optional[int]) -> int:
-      return to_int(a or int_to_str(a))
+      def foo(a: typing.Optional[int]) -> int:
+        return to_int(a and int_to_str(a))
+    |}
+    [];
+
+  assert_type_errors
+    {|
+      def foo(a: typing.Optional[int]) -> int:
+        return to_int(a or int_to_str(a))
     |}
     [
-      "Incompatible parameter type [6]: Expected `int` but got `typing.Optional[int]`.";
+      "Incompatible parameter type [6]: " ^
+      "Expected `int` for 1st anonymous parameter to call `int_to_str` but got " ^
+      "`typing.Optional[int]`.";
     ];
 
   assert_type_errors
@@ -2452,7 +3024,7 @@ let test_check_function_parameters _ =
       def foo(x) -> None:
         takes_iterable(x)
     |}
-    [];
+    ["Missing parameter annotation [2]: Parameter `x` has no type specified."];
   assert_type_errors
     {|
       def foo(a):  # type: (typing.Optional[int]) -> None
@@ -2466,7 +3038,8 @@ let test_check_function_parameters _ =
         pass
       foo("hello")
     |}
-    ["Incompatible parameter type [6]: Expected `typing.Optional[int]` but got `str`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `typing.Optional[int]` for 1st anonymous parameter to call `foo` but got `str`."];
   assert_type_errors
     {|
       def foo(a):
@@ -2474,7 +3047,8 @@ let test_check_function_parameters _ =
         pass
       foo("hello")
     |}
-    ["Incompatible parameter type [6]: Expected `typing.Optional[int]` but got `str`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `typing.Optional[int]` for 1st anonymous parameter to call `foo` but got `str`."];
   assert_type_errors
     {|
       def foo(a, b):
@@ -2490,7 +3064,8 @@ let test_check_function_parameters _ =
         pass
       foo(1, 1)
     |}
-    ["Incompatible parameter type [6]: Expected `str` but got `int`."]
+    ["Incompatible parameter type [6]: " ^
+     "Expected `str` for 2nd anonymous parameter to call `foo` but got `int`."]
 
 
 let test_check_function_parameters_with_backups _ =
@@ -2503,7 +3078,7 @@ let test_check_function_parameter_errors _ =
   assert_type_errors
     {|
       class Foo:
-        attribute: str
+        attribute: str = ""
       def foo(input: Foo) -> None:
         str_float_to_int(input.attribute, input.undefined)
     |}
@@ -2511,7 +3086,7 @@ let test_check_function_parameter_errors _ =
   assert_type_errors
     {|
       class Foo:
-        attribute: str
+        attribute: str = ""
       def foo(input: Foo) -> None:
         str_float_to_int(input.undefined, input.undefined)
     |}
@@ -2523,22 +3098,38 @@ let test_check_function_parameter_errors _ =
   assert_type_errors
     {|
       class Foo:
-        attribute: int
+        attribute: int = 1
       def foo(input: typing.Optional[Foo]) -> None:
         optional_str_to_int(input and input.attribute)
     |}
-    ["Incompatible parameter type [6]: Expected `typing.Optional[str]` but got `unknown`."];
+    [
+      "Incompatible parameter type [6]: " ^
+      "Expected `typing.Optional[str]` for 1st anonymous parameter to call `optional_str_to_int` " ^
+      "but got `typing.Optional[int]`.";
+    ];
   assert_type_errors
     {|
       class Foo:
-        attribute: int
+        attribute: int = 1
       def foo(input: typing.Optional[Foo]) -> None:
         optional_str_to_int(input and input.undefined)
     |}
     [
-      "Incompatible parameter type [6]: Expected `typing.Optional[str]` but got `unknown`.";
+      "Incompatible parameter type [6]: " ^
+      "Expected `typing.Optional[str]` for 1st anonymous parameter to call `optional_str_to_int` " ^
+      "but got `unknown`.";
       "Undefined attribute [16]: `Foo` has no attribute `undefined`.";
-    ]
+    ];
+  assert_type_errors
+    {|
+      class attribute:
+        ...
+      class other:
+        attribute: int = 1
+      def foo(o: other) -> str:
+        return o.attribute
+    |}
+    ["Incompatible return type [7]: Expected `str` but got `int`."]
 
 
 let test_check_function_redirects _ =
@@ -2559,18 +3150,24 @@ let test_check_variable_arguments _ =
         return foo ( *b )
     |}
     [
+      "Missing parameter annotation [2]: Parameter `b` has no type specified.";
       "Incompatible return type [7]: Expected `str` but got `int`.";
-      "Incompatible parameter type [6]: Expected `int` but got `unknown`.";
+      "Incompatible parameter type [6]: " ^
+      "Expected `int` for 1st anonymous parameter to call `foo` but got `unknown`.";
     ];
 
   assert_type_errors
     {|
       def foo(a: int, b: int) -> int:
         return 1
-      def bar(b) -> int:
+      def bar(b: typing.Any) -> int:
         return foo ( *b )
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `unknown`."];
+    [
+      "Missing parameter annotation [2]: Parameter `b` must have a type other than `Any`.";
+      "Incompatible parameter type [6]: " ^
+      "Expected `int` for 1st anonymous parameter to call `foo` but got `unknown`.";
+    ];
 
   assert_type_errors
     {|
@@ -2579,7 +3176,8 @@ let test_check_variable_arguments _ =
       def bar(b: typing.List[str]) -> int:
         return foo ( *b )
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `foo` but got `str`.";];
 
   assert_type_errors
     {|
@@ -2588,7 +3186,8 @@ let test_check_variable_arguments _ =
       def bar(b: typing.List[str]) -> None:
         foo('asdf', *b)
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 2nd anonymous parameter to call `foo` but got `str`.";];
 
   assert_type_errors
     {|
@@ -2598,7 +3197,7 @@ let test_check_variable_arguments _ =
         foo ( *b, 'asdf' )
     |}
     [
-      "Too many arguments [19]: Call `foo` expects 2 positional arguments, 3 were provided.";
+      "Too many arguments [19]: Call `foo` expects 2 arguments, 3 were provided.";
     ];
 
   assert_type_errors
@@ -2608,7 +3207,7 @@ let test_check_variable_arguments _ =
       def bar(b: typing.List[str]) -> None:
         foo ( *b, 1, 'asdf' )
     |}
-    ["Too many arguments [19]: Call `foo` expects 2 positional arguments, 4 were provided."];
+    ["Too many arguments [19]: Call `foo` expects 2 arguments, 4 were provided."];
 
   assert_type_errors
     {|
@@ -2617,7 +3216,7 @@ let test_check_variable_arguments _ =
       def bar(b: typing.List[int]) -> None:
         foo ( *b, 'asdf' )
     |}
-    ["Too many arguments [19]: Call `foo` expects 2 positional arguments, 3 were provided."];
+    ["Too many arguments [19]: Call `foo` expects 2 arguments, 3 were provided."];
 
   assert_type_errors
     {|
@@ -2627,7 +3226,7 @@ let test_check_variable_arguments _ =
         durp( *b, 1.0 )
     |}
     [
-      "Too many arguments [19]: Call `durp` expects 2 positional arguments, 3 were provided.";
+      "Too many arguments [19]: Call `durp` expects 2 arguments, 3 were provided.";
     ];
 
   assert_type_errors
@@ -2637,9 +3236,8 @@ let test_check_variable_arguments _ =
       def bar(b: typing.List[str]) -> int:
         return foo('asdf', *b)
     |}
-    [
-      "Incompatible parameter type [6]: Expected `int` but got `str`.";
-    ]
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 2nd anonymous parameter to call `foo` but got `str`.";]
 
 
 let test_check_method_returns _ =
@@ -2679,7 +3277,8 @@ let test_check_method_parameters _ =
         input.substr('asdf')
     |}
     [
-      "Incompatible parameter type [6]: Expected `int` but got `str`.";
+      "Incompatible parameter type [6]: " ^
+      "Expected `int` for 1st anonymous parameter to call `str.substr` but got `str`.";
     ];
 
   assert_type_errors
@@ -2690,7 +3289,8 @@ let test_check_method_parameters _ =
         foo(1, 2)
     |}
     [
-      "Incompatible parameter type [6]: Expected `str` but got `int`.";
+      "Incompatible parameter type [6]: " ^
+      "Expected `str` for 2nd anonymous parameter to call `foo` but got `int`.";
     ];
 
   assert_type_errors
@@ -2699,7 +3299,8 @@ let test_check_method_parameters _ =
         return input.substr('asdf')
     |}
     [
-      "Incompatible parameter type [6]: Expected `int` but got `str`.";
+      "Incompatible parameter type [6]: " ^
+      "Expected `int` for 1st anonymous parameter to call `str.substr` but got `str`.";
     ];
 
   assert_type_errors
@@ -2708,7 +3309,8 @@ let test_check_method_parameters _ =
         input.substr('asdf').substr('asdf')
     |}
     [
-      "Incompatible parameter type [6]: Expected `int` but got `str`.";
+      "Incompatible parameter type [6]: " ^
+      "Expected `int` for 1st anonymous parameter to call `str.substr` but got `str`.";
     ];
 
   assert_type_errors
@@ -2716,11 +3318,12 @@ let test_check_method_parameters _ =
       def foo(input: str) -> None:
         input + 1
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `int.__radd__` but got `str`."];
 
   assert_type_errors
     {|
-      def foo(input: typing.Any) -> str:
+      def foo(input: str) -> str:
         return input.__sizeof__()
     |}
     ["Incompatible return type [7]: Expected `str` but got `int`."];
@@ -2740,7 +3343,10 @@ let test_check_method_parameters _ =
         def bar(x: int) -> int:
           return x
     |}
-    ["Incompatible return type [7]: Expected `int` but got `Foo`."]
+    [
+      "Incompatible variable type [9]: x is declared to have type `int` but is used as type `Foo`.";
+      "Incompatible return type [7]: Expected `int` but got `Foo`.";
+    ]
 
 
 let test_check_method_resolution _ =
@@ -2805,7 +3411,25 @@ let test_check_self _ =
           def two(self: Other) -> None:
               pass
     |}
-    ["Incompatible parameter type [6]: Expected `Other` but got `Some`."]
+    [
+      "Incompatible variable type [9]: self is declared to have type `Other` but is used as type \
+       `Some`.";
+    ];
+
+  assert_type_errors
+    {|
+      T = typing.TypeVar('T')
+      class C:
+        def f(self: T, x: int) -> T:
+          return self
+      class Subclass(C):
+        pass
+      def f() -> C:
+        a = Subclass()
+        b = a.f
+        return b(1)
+    |}
+    []
 
 
 let test_check_static _ =
@@ -2838,7 +3462,9 @@ let test_check_static _ =
       def foo() -> None:
         Foo.foo('asdf')
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `Foo.foo` but got `str`."];
+
   assert_type_errors
     {|
       class Foo:
@@ -2850,7 +3476,8 @@ let test_check_static _ =
           self.foo('asdf')
 
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `Foo.foo` but got `str`."];
 
   (* Class method calls are properly resolved. *)
   assert_type_errors
@@ -2863,7 +3490,10 @@ let test_check_static _ =
       def foo() -> None:
         Foo.foo('asdf')
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."];
+    [
+      "Incompatible parameter type [6]: Expected `int` for 1st anonymous parameter to call \
+       `Foo.foo` but got `str`.";
+    ];
 
   assert_type_errors
     {|
@@ -2881,7 +3511,9 @@ let test_check_static _ =
         def classmethod(cls, i: int) -> None:
           cls.classmethod('1234')
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `Foo.classmethod` but got `str`."];
+
   assert_type_errors
     {|
       class Foo:
@@ -2892,7 +3524,9 @@ let test_check_static _ =
         def classmethod(cls, i: int) -> None:
           cls.staticmethod('1234')
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `Foo.staticmethod` but got `str`."];
+
   assert_type_errors
     {|
       class Foo:
@@ -2902,16 +3536,41 @@ let test_check_static _ =
         def classmethod(cls, i: int) -> None:
           cls.instancemethod(Foo(), '1234')
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."]
+    [
+      "Incompatible parameter type [6]: Expected `int` for 2nd anonymous parameter to call \
+       `Foo.instancemethod` but got `str`.";
+    ];
+
+  (* Special classmethods are treated properly without a decorator. *)
+  assert_type_errors
+    {|
+      class Foo:
+        def __init_subclass__(cls) -> typing.Type[Foo]:
+          return cls
+        def __new__(cls) -> typing.Type[Foo]:
+          return cls
+        def __class_getitem__(cls, key: int) -> typing.Type[Foo]:
+          return cls
+    |}
+    []
 
 
 let test_check_init _ =
   assert_type_errors
     {|
-    class Foo:
-      attribute: int
-      def __init__(self) -> None:
-        pass
+      class Foo:
+        attribute: int
+        def __init__(self) -> None:
+          pass
+    |}
+    [
+      "Uninitialized attribute [13]: Attribute `attribute` is declared in class `Foo` to have " ^
+      "non-optional type `int` but is never initialized.";
+    ];
+  assert_type_errors
+    {|
+      class Foo:
+        attribute: int
     |}
     [
       "Uninitialized attribute [13]: Attribute `attribute` is declared in class `Foo` to have " ^
@@ -2929,28 +3588,39 @@ let test_check_init _ =
 
   assert_type_errors
     {|
-    class Foo:
-      def __init__(self) -> None:
-        self.attribute: bool = False
+      class Foo:
+        def __init__(renamed_self) -> None:
+          renamed_self.attribute = 0
+    |}
+    [
+      "Missing attribute annotation [4]: Attribute `attribute` of class `Foo` has type `int` but \
+       no type is specified.";
+    ];
+
+  assert_type_errors
+    {|
+      class Foo:
+        def __init__(self) -> None:
+          self.attribute: bool = False
     |}
     [];
 
   assert_type_errors
     {|
-    class Foo:
-      attribute: int = 1
-      def __init__(self) -> None:
-        pass
+      class Foo:
+        attribute: int = 1
+        def __init__(self) -> None:
+          pass
     |}
     [];
 
   assert_type_errors
     {|
-    class Foo:
-      attribute: int
-      attribute_two: str
-      def __init__(self) -> None:
-        pass
+      class Foo:
+        attribute: int
+        attribute_two: str
+        def __init__(self) -> None:
+          pass
     |}
     [
       "Uninitialized attribute [13]: Attribute `attribute` is declared in class `Foo` to have " ^
@@ -2961,10 +3631,18 @@ let test_check_init _ =
 
   assert_type_errors
     {|
-    class Foo:
-      attribute: int
-      def __init__(self) -> None:
-        self.attribute = 0
+      class Foo:
+        attribute: int
+        def __init__(self) -> None:
+          self.attribute = 0
+    |}
+    [];
+  assert_type_errors
+    {|
+      class Foo:
+        attribute: int
+        def __enter__(self) -> None:
+          self.attribute = 0
     |}
     [];
 
@@ -2982,7 +3660,7 @@ let test_check_init _ =
       class Foo:
         attribute: int
         def __init__(self) -> None:
-          if True:
+          if condition():
             self.attribute = 0
           else:
             self.attribute = 1
@@ -3005,7 +3683,7 @@ let test_check_init _ =
       class Foo:
         attribute: int
         def __init__(self) -> None:
-          if True:
+          if condition():
             raise
           self.attribute = 1
     |}
@@ -3016,7 +3694,7 @@ let test_check_init _ =
       class Foo:
         attribute: int
         def __init__(self) -> None:
-          self.attribute = unknown if True else unknown2
+          self.attribute = unknown if condition() else unknown2
     |}
     [
       "Incompatible attribute type [8]: Attribute `attribute` declared in class `Foo` " ^
@@ -3028,21 +3706,21 @@ let test_check_init _ =
   (* No need to initialize properties. *)
   assert_type_errors
     {|
-    class Foo:
-      def __init__(sefl) -> None:
-        pass
-      @property
-      def foo() -> str:
-        return "asdf"
+      class Foo:
+        def __init__(sefl) -> None:
+          pass
+        @property
+        def foo() -> str:
+          return "asdf"
     |}
     [];
 
   assert_type_errors
     {|
-    class Foo:
-      attribute: int
-      def __init__(self) -> None:
-        attribute = 0
+      class Foo:
+        attribute: int
+        def __init__(self) -> None:
+          attribute = 0
     |}
     [
       "Uninitialized attribute [13]: Attribute `attribute` is declared in class `Foo` to have " ^
@@ -3071,10 +3749,10 @@ let test_check_init _ =
 
   assert_type_errors
     {|
-    class Foo:
-      attribute: int
-      def __init__(self) -> None:
-        self.attribute = ""
+      class Foo:
+        attribute: int
+        def __init__(self) -> None:
+          self.attribute = ""
     |}
     [
       "Incompatible attribute type [8]: Attribute `attribute` declared in class `Foo` has type " ^
@@ -3083,16 +3761,23 @@ let test_check_init _ =
 
   assert_type_errors
     {|
-    class Foo:
-      def __init__(self, x:int) -> None:
-        pass
-    a = Foo("")
+      class Foo:
+        def __init__(self, x:int) -> None:
+          pass
+      a = Foo("")
     |}
     [
       "Missing global annotation [5]: Globally accessible variable `a` has type `Foo` " ^
       "but no type is specified.";
-      "Incompatible parameter type [6]: Expected `int` but got `str`.";
+      "Incompatible parameter type [6]: " ^
+      "Expected `int` for 1st anonymous parameter to call `Foo.__init__` but got `str`.";
     ];
+
+  assert_type_errors
+    {|
+       alias = int
+    |}
+    [];
 
   assert_type_errors
     {|
@@ -3101,7 +3786,8 @@ let test_check_init _ =
           pass
       a: Foo = Foo("")
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `Foo.__new__` but got `str`."];
 
   (* Prefer init over new if both exist. *)
   assert_type_errors
@@ -3124,7 +3810,8 @@ let test_check_init _ =
         pass
       c: C = C("")
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `Super.__new__` but got `str`."];
 
   (* We look at both __init__ and __new__ in the inheritance structure. *)
   assert_type_errors
@@ -3137,8 +3824,9 @@ let test_check_init _ =
         pass
       c: C = C("")
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."];
-
+    [
+      "Incompatible parameter type [6]: Expected `int` for 1st anonymous parameter to call \
+       `Super.__new__` but got `str`."];
   assert_type_errors
     {|
       class SuperSuper:
@@ -3149,7 +3837,8 @@ let test_check_init _ =
         pass
       c: C = C("")
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."]
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `Super.__init__` but got `str`."]
 
 let test_check_attributes _ =
   assert_type_errors
@@ -3165,7 +3854,7 @@ let test_check_attributes _ =
   assert_type_errors
     {|
       class Foo:
-        bar: int
+        bar: int = 1
         def foo(self) -> int:
           return self.bar
     |}
@@ -3181,7 +3870,7 @@ let test_check_attributes _ =
   assert_type_errors
     {|
       class Bar:
-        bar: int
+        bar: int = 1
       class Foo(Bar):
         def foo(self) -> int:
           return self.bar
@@ -3190,7 +3879,7 @@ let test_check_attributes _ =
   assert_type_errors
     {|
       class Foo:
-        bar = ... # type: int
+        bar = 1 # type: int
         def foo(self) -> int:
           return self.bar
     |}
@@ -3228,8 +3917,6 @@ let test_check_attributes _ =
       b = 1
     |}
     [
-      "Missing global annotation [5]: Globally accessible variable `a` has type " ^
-      "`typing.Type[str]` but no type is specified.";
       "Missing global annotation [5]: Globally accessible variable `b` has type `int` but no " ^
       "type is specified.";
     ];
@@ -3239,7 +3926,7 @@ let test_check_attributes _ =
     {|
       class Bar:
         bar: int = 1
-      def foo(self) -> int:
+      def foo() -> int:
         return Bar.bar
     |}
     [];
@@ -3249,7 +3936,7 @@ let test_check_attributes _ =
     {|
       class Bar:
         bar: int = 1
-      def foo(self) -> int:
+      def foo() -> int:
         x = Bar()
         return x.baz
     |}
@@ -3262,7 +3949,7 @@ let test_check_attributes _ =
   assert_type_errors
     {|
       class Bar:
-        bar: int
+        bar: int = 1
       class Foo:
         def foo(self, other: Bar) -> int:
           return other.bar
@@ -3294,13 +3981,15 @@ let test_check_attributes _ =
     [
       "Missing attribute annotation [4]: Attribute `bar` of class `Foo` has type `str` but type " ^
       "`Any` is specified.";
+      "Uninitialized attribute [13]: Attribute `bar` is declared in class `Foo` to have " ^
+      "non-optional type `typing.Any` but is never initialized.";
       "Incompatible return type [7]: Expected `int` but got `str`."
     ];
 
   assert_type_errors
     {|
       class Foo:
-        bar: int
+        bar: int = 1
         def foo(self) -> int:
           self.bar = 'foo'
           return self.bar
@@ -3312,8 +4001,19 @@ let test_check_attributes _ =
 
   assert_type_errors
     {|
+          class Foo:
+            a: str = ""
+          Foo.a = 1
+    |}
+    [
+      "Incompatible attribute type [8]: Attribute `a` declared in class `Foo` has type `str` " ^
+      "but is used as type `int`."
+    ];
+
+  assert_type_errors
+    {|
       class Foo:
-        bar: int
+        bar: int = 1
       def foo(param: Foo) -> int:
         param.bar = 'foo'
         return param.bar
@@ -3325,7 +4025,7 @@ let test_check_attributes _ =
 
   assert_type_errors
     {|
-      bar: int
+      bar: int = 1
       def foo() -> int:
         bar = 'foo'
         return bar
@@ -3349,7 +4049,7 @@ let test_check_attributes _ =
   assert_type_errors
     {|
       class Foo:
-        bar: int
+        bar: int = 1
       def foo() -> int:
         foo_obj = Foo()
         foo_obj.bar = "foo"
@@ -3363,7 +4063,7 @@ let test_check_attributes _ =
   assert_type_errors
     {|
       class Foo:
-        bar: int
+        bar: int = 1
       class Bar(Foo):
         def foo(self) -> int:
           self.bar = "foo"
@@ -3457,11 +4157,11 @@ let test_check_attributes _ =
   assert_type_errors
     {|
       class Foo:
-          def foo(self, bar: typing.Optional[int]) -> int:
-              self.baz = bar
-              if self.baz is None:
-                  self.baz = 5
-              return self.baz
+        def foo(self, bar: typing.Optional[int]) -> int:
+          self.baz = bar
+          if self.baz is None:
+            self.baz = 5
+          return self.baz
     |}
     [
       "Missing attribute annotation [4]: Attribute `baz` of class `Foo` has type " ^
@@ -3475,7 +4175,7 @@ let test_check_attributes _ =
   assert_type_errors
     {|
       class Foo:
-        bar: typing.ClassVar[int]
+        bar: typing.ClassVar[int] = 1
       def foo() -> int:
         Foo.bar = "foo"
         return Foo.bar
@@ -3494,6 +4194,8 @@ let test_check_attributes _ =
           return self.bar
     |}
     [
+      "Uninitialized attribute [13]: Attribute `bar` is declared in class `Foo` to have " ^
+      "non-optional type `typing.Generic[Variable[_T]]` but is never initialized.";
       "Incompatible attribute type [8]: Attribute `bar` declared in class `Foo` has type " ^
       "`typing.Generic[Variable[_T]]` but is used as type `int`.";
       "Incompatible return type [7]: Expected `int` but got `typing.Generic[Variable[_T]]`.";
@@ -3591,7 +4293,18 @@ let test_check_attributes _ =
     |}
     [];
 
-  (* Any has all attributes. *)
+  (* Any has all attributes in default mode, but not strict mode. *)
+  assert_type_errors
+    ~debug:false
+    ~strict:true
+    {|
+      def foo(any: typing.Any) -> int:
+        return any.attribute
+    |}
+    [
+      "Missing parameter annotation [2]: Parameter `any` must have a type other than `Any`.";
+      "Incompatible return type [7]: Expected `int` but got `unknown`.";
+    ];
   assert_type_errors
     ~debug:false
     {|
@@ -3633,7 +4346,10 @@ let test_check_attributes _ =
       def bar(wrapper: Wrapper[int]) -> int:
         return wrapper.value
     |}
-    [];
+    [
+      "Uninitialized attribute [13]: Attribute `value` is declared in class `Wrapper` to have " ^
+      "non-optional type `Variable[_VALUE]` but is never initialized.";
+    ];
   assert_type_errors
     {|
       _VALUE = typing.TypeVar('_VALUE')
@@ -3646,7 +4362,30 @@ let test_check_attributes _ =
       def bar(wrapper: WrapperSubclass) -> int:
         return wrapper.value
     |}
+    [
+      "Uninitialized attribute [13]: Attribute `value` is declared in class `Wrapper` to have " ^
+      "non-optional type `Variable[_VALUE]` but is never initialized.";
+    ];
+  assert_type_errors
+    {|
+      _T = typing.TypeVar('_T')
+      class ReturnSelf(typing.Generic[_T]):
+        def f(self) -> ReturnSelf[_T]:
+          return self
+    |}
     [];
+  assert_type_errors
+    {|
+      _T = typing.TypeVar('_T')
+      class ReturnClass(typing.Generic[_T]):
+        @classmethod
+        def f(cls) -> ReturnClass[_T]:
+          return cls
+    |}
+    [
+      "Incompatible return type [7]: Expected `ReturnClass[Variable[_T]]` but got \
+       `typing.Type[ReturnClass[Variable[_T]]]`.";
+    ];
   assert_type_errors
     {|
       _T = typing.TypeVar('_T')
@@ -3718,7 +4457,7 @@ let test_check_attributes _ =
 
   assert_type_errors
     {|
-      x: Optional[int]
+      x: typing.Optional[int]
       class Foo:
         @property
         def x(self) -> int: ...
@@ -3734,14 +4473,16 @@ let test_check_attributes _ =
         foo.x = "string"
     |}
     [
-      "Incompatible attribute type [8]: Attribute `x` declared in class `Foo` " ^
-      "has type `typing.Optional[int]` but is used as type `str`.";
+      "Incompatible attribute type [8]: Attribute `x` declared in class `Foo` has type `int` but \
+       is used as type `None`.";
+      "Incompatible attribute type [8]: Attribute `x` declared in class `Foo` has type `int` but \
+       is used as type `str`.";
     ];
 
   assert_type_errors
     {|
       __property__: typing.Any = ...
-      x: Optional[int]
+      x: typing.Optional[int]
       class Foo:
         @__property__
         def x(self) -> int: ...
@@ -3789,7 +4530,7 @@ let test_check_attributes _ =
     [
       "Missing attribute annotation [4]: Attribute `x` of class `D` has type `C` but no type is" ^
       " specified.";
-      "Too many arguments [19]: Call `object.__init__` expects 1 positional argument, 5 were" ^
+      "Too many arguments [19]: Call `object.__init__` expects 0 arguments, 4 were" ^
       " provided.";
       "Incompatible return type [7]: Expected `int` but got `C`."]
 
@@ -3830,29 +4571,65 @@ let test_check_immutables _ =
     ];
 
   assert_type_errors
+    ~debug:false
     {|
-    constant: int
-    def foo() -> None:
-      constant = "hi"
+      def expects_str(x: str) -> None:
+        pass
+
+      def foo(x: int, y: typing.Any) -> None:
+        x = y
+        expects_str(x)
+    |}
+    [
+      "Incompatible variable type [9]: x is declared to have type `int` but is used as " ^
+      "type `typing.Any`.";
+      "Incompatible parameter type [6]: " ^
+      "Expected `str` for 1st anonymous parameter to call `expects_str` but got `int`."
+    ];
+
+  assert_type_errors
+    {|
+      def foo(x: str = 1) -> str:
+        return x
+    |}
+    [
+      "Incompatible variable type [9]: x is declared to have type `str` but is used as " ^
+      "type `int`."
+    ];
+
+  assert_type_errors
+    {|
+      def bar() -> typing.Any:
+        ...
+      def foo(x: str = bar()) -> str:
+        return x
     |}
     [];
 
   assert_type_errors
     {|
-    constant: int
-    def foo() -> None:
-      global constant
-      constant: str
-      constant = "hi"
+      constant: int
+      def foo() -> None:
+        constant = "hi"
     |}
     [];
 
   assert_type_errors
     {|
-    constant: typing.Union[int, str]
-    def foo() -> None:
-      global constant
-      constant = 1
+      constant: int
+      def foo() -> None:
+        global constant
+        constant: str
+        constant = "hi"
+    |}
+    [];
+
+  assert_type_errors
+    {|
+      constant: typing.Union[int, str]
+      def foo() -> None:
+        global constant
+        constant = 1
     |}
     [];
 
@@ -3878,20 +4655,20 @@ let test_check_immutables _ =
 
   assert_type_errors
     {|
-    constant: typing.Optional[int]
-    def foo() -> int:
-      if constant is not None:
-        return 0
-      return constant
-  |}
+      constant: typing.Optional[int]
+      def foo() -> int:
+        if constant is not None:
+          return 0
+        return constant
+    |}
     ["Incompatible return type [7]: Expected `int` but got `None`."];
 
   assert_type_errors
     {|
-    constant
-    def foo() -> None:
-      global constant
-      constant = 1
+      constant
+      def foo() -> None:
+        global constant
+        constant = 1
     |}
     [
       "Undefined name [18]: Global name `constant` is undefined.";
@@ -3901,20 +4678,20 @@ let test_check_immutables _ =
 
   assert_type_errors
     {|
-    constant: typing.Any
-    def foo() -> None:
-      global constant
-      constant = 1
+      constant: typing.Any
+      def foo() -> None:
+        global constant
+        constant = 1
     |}
     [];
 
   assert_type_errors
     {|
-    constant
-    def foo() -> int:
-      global constant
-      constant = 1
-      return constant
+      constant
+      def foo() -> int:
+        global constant
+        constant = 1
+        return constant
     |}
     [
       "Undefined name [18]: Global name `constant` is undefined.";
@@ -3924,12 +4701,12 @@ let test_check_immutables _ =
 
   assert_type_errors
     {|
-    constant: int
-    def foo(x) -> str:
-      if x > 10:
-        global constant
-        constant: str
-      return constant
+      constant: int
+      def foo(x: int) -> str:
+        if x > 10:
+          global constant
+          constant: str
+        return constant
     |}
     [
       "Incompatible return type [7]: Expected `str` but got `typing.Union[int, str]`."
@@ -3937,56 +4714,62 @@ let test_check_immutables _ =
 
   assert_type_errors
     {|
-    def foo(x: int) -> None:
-      x = "hi"
+      def foo(x: int) -> None:
+        x = "hi"
     |}
-    ["Incompatible variable type [9]: x is declared to have type `int` but is used as type `str`."];
+    [
+      "Incompatible variable type [9]: x is declared to have type `int` but is used as " ^
+      "type `str`."
+    ];
 
   assert_type_errors
     {|
-    def foo(x: typing.Optional[int]) -> None:
-      x = 1
-    |}
-    [];
-
-  assert_type_errors
-    {|
-    def foo(x: int) -> None:
-      x: str
-      x = "hi"
+      def foo(x: typing.Optional[int]) -> None:
+        x = 1
     |}
     [];
 
   assert_type_errors
     {|
-    def foo() -> None:
-      x = 1
-      y: str
-      y = x
-      x = y
+      def foo(x: int) -> None:
+        x: str
+        x = "hi"
     |}
-    ["Incompatible variable type [9]: y is declared to have type `str` but is used as type `int`."];
+    [];
 
   assert_type_errors
     {|
-    def foo(x) -> None:
-      if x > 10:
-        y: int
-      else:
+      def foo() -> None:
+        x = 1
         y: str
+        y = x
+        x = y
+    |}
+    [
+      "Incompatible variable type [9]: y is declared to have type `str` but is used as " ^
+      "type `int`."
+    ];
 
-      y = "hi"
+  assert_type_errors
+    {|
+      def foo(x: int) -> None:
+        if x > 10:
+          y: int
+        else:
+          y: str
+
+        y = "hi"
     |}
     [];
 
   assert_type_errors
     {|
-    def foo(x) -> None:
-      if x > 10:
-        y: int
-      else:
-        y: str
-      y = 1
+      def foo(x: int) -> None:
+        if x > 10:
+          y: int
+        else:
+          y: str
+        y = 1
     |}
     [];
 
@@ -4034,20 +4817,6 @@ let test_check_immutables _ =
         constant = 1
     |}
     [];
-
-  assert_type_errors
-    ~debug:false
-    ~infer:true
-    {|
-      constant
-      def foo() -> None:
-        global constant
-        constant = 1
-    |}
-    [
-      "Missing global annotation [5]: Globally accessible variable `constant` has type `int` but " ^
-      "no type is specified."
-    ];
 
   (* TODO(T25072735): error on typing.Any (incompatible usage) rather than suggest it *)
   assert_type_errors
@@ -4219,9 +4988,54 @@ let test_check_named_arguments _ =
         return str_float_to_int(f="No",i="Hi")
     |}
     [
-      "Incompatible parameter type [6]: Expected `str` but got `float`.";
-      "Incompatible parameter type [6]: Expected `float` but got `str`.";
+      "Incompatible parameter type [6]: " ^
+      "Expected `str` for 1st parameter `i` to call `str_float_to_int` but got `float`.";
+      "Incompatible parameter type [6]: " ^
+      "Expected `float` for 1st parameter `f` to call `str_float_to_int` but got `str`.";
     ]
+
+
+let test_check_missing_parameter _ =
+  assert_type_errors
+    ~debug:false
+    ~strict:false
+    {|
+      def foo(x):
+        return 1
+    |}
+    [];
+  assert_type_errors
+    ~debug:false
+    ~strict:true
+    {|
+      def foo(x) -> int:
+        return 1
+    |}
+    ["Missing parameter annotation [2]: Parameter `x` has no type specified."];
+  assert_type_errors
+    ~debug:false
+    ~strict:true
+    {|
+      def foo(x = 1) -> int:
+        return 1
+    |}
+    ["Missing parameter annotation [2]: Parameter `x` has type `int` but no type is specified."];
+  assert_type_errors
+    ~debug:false
+    ~strict:true
+    {|
+      def foo(x: typing.Any) -> int:
+        return 1
+    |}
+    ["Missing parameter annotation [2]: Parameter `x` must have a type other than `Any`."];
+  assert_type_errors
+    ~debug:false
+    ~strict:true
+    {|
+      def foo(x: typing.Any = unknown) -> int:
+        return 1
+    |}
+    ["Missing parameter annotation [2]: Parameter `x` must have a type other than `Any`."]
 
 
 let test_check_missing_return _ =
@@ -4269,7 +5083,7 @@ let test_check_missing_return _ =
 
   assert_type_errors
     {|
-      def foo(a):
+      def foo(a: int):
         if a > 10:
           return None
         else:
@@ -4293,6 +5107,49 @@ let test_check_missing_return _ =
       "Incompatible return type [7]: Expected `None` but got `int`."
     ];
 
+  assert_type_errors
+    {|
+      def foo(x) -> typing.Any:
+        return x
+    |}
+    [
+      "Missing return annotation [3]: Return type must be specified as type other than `Any`.";
+      "Missing parameter annotation [2]: Parameter `x` has no type specified.";
+    ];
+
+  assert_type_errors
+    {|
+      def foo(x):
+        return x
+    |}
+    [
+      "Missing return annotation [3]: Return type is not specified.";
+      "Missing parameter annotation [2]: Parameter `x` has no type specified.";
+    ];
+
+  assert_type_errors
+    {|
+      def unknown_call():
+        pass
+      def foo():
+        x = unknown_call()
+        return x
+    |}
+    [
+      "Missing return annotation [3]: Returning `None` but no return type is specified.";
+      "Missing return annotation [3]: Return type is not specified.";
+    ];
+
+  assert_type_errors
+    {|
+       def foo(x: typing.Any) -> typing.Any:
+         return x
+     |}
+    [
+      "Missing return annotation [3]: Return type must be specified as type other than `Any`.";
+      "Missing parameter annotation [2]: Parameter `x` must have a type other than `Any`."
+    ];
+
   (* Don't report in non-debug mode. *)
   assert_type_errors
     ~debug:false
@@ -4311,9 +5168,117 @@ let test_check_missing_return _ =
   assert_type_errors
     ~debug:false
     {|
+      def foo(x):
+        return x
+    |}
+    [];
+  assert_type_errors
+    ~debug:false
+    {|
       1 + 'asdf'  # report in top-level function
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."]
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `int.__add__` but got `str`."]
+
+
+let test_check_missing_attribute _ =
+  assert_type_errors
+    {|
+      class Foo:
+        a = unknown
+      Foo.a = 1
+    |}
+    [
+      "Missing attribute annotation [4]: Attribute `a` of class `Foo` has type `int` " ^
+      "but no type is specified.";
+      "Undefined name [18]: Global name `unknown` is undefined.";
+    ];
+  assert_type_errors
+    {|
+      class Foo:
+        def __init__(self) -> None:
+          self.a = 1
+    |}
+    [
+      "Missing attribute annotation [4]: Attribute `a` of class `Foo` has type `int` " ^
+      "but no type is specified."
+    ];
+  assert_type_errors
+    {|
+      class Foo:
+        def __init__(self, a) -> None:
+          self.a = a
+    |}
+    [
+      "Missing parameter annotation [2]: Parameter `a` has no type specified.";
+      "Missing attribute annotation [4]: Attribute `a` of class `Foo` has no type specified.";
+    ];
+
+  assert_type_errors
+    {|
+      class Foo:
+        a = unknown
+    |}
+    [
+      "Undefined name [18]: Global name `unknown` is undefined.";
+    ];
+
+  assert_type_errors
+    {|
+        class Foo:
+          a: typing.Any
+        Foo.a = 1
+    |}
+    [
+      "Missing attribute annotation [4]: Attribute `a` of class `Foo` has type `int` " ^
+      "but type `Any` is specified.";
+      "Uninitialized attribute [13]: Attribute `a` is declared in class `Foo` to have " ^
+      "non-optional type `typing.Any` but is never initialized."
+    ];
+
+  assert_type_errors
+    {|
+        class Foo:
+          def __init__(self, a: typing.Any) -> None:
+            self.a = a
+    |}
+    [
+      "Missing parameter annotation [2]: Parameter `a` must have a type other than `Any`.";
+      "Missing attribute annotation [4]: Attribute `a` of class `Foo` has no type specified.";
+    ];
+
+  assert_type_errors
+    {|
+      class Foo:
+        def __init__(self) -> None:
+          self.a: typing.Any
+      Foo().a = 1
+      def foo() -> bool:
+        return Foo().a
+    |}
+    [
+      "Missing attribute annotation [4]: Attribute `a` of class `Foo` has type `int` " ^
+      "but type `Any` is specified.";
+      "Incompatible return type [7]: Expected `bool` but got `int`."
+    ];
+
+  (* Don't report in non-debug mode. *)
+  assert_type_errors
+    ~debug:false
+    {|
+      class Foo:
+        def __init__(self) -> None:
+          self.a = 1
+    |}
+    [];
+  assert_type_errors
+    ~debug:false
+    {|
+      class Foo:
+        a: typing.Any
+      Foo.a = 1
+    |}
+    []
 
 
 let test_check_yield _ =
@@ -4489,12 +5454,6 @@ let test_check_ternary _ =
       def f(s: str) -> None:
         pass
 
-      def pick_alternative(s: typing.Optional[str]) -> None:
-        f("foo" if s is None else s)
-
-      def pick_alternative2(s: typing.Optional[str]) -> None:
-        f("foo" if not s else s)
-
       def pick_alternative3(s: typing.Optional[str]) -> None:
         x = "foo" if s is None else s
         f(x)
@@ -4508,6 +5467,13 @@ let test_check_ternary _ =
       def pick_target3(s: typing.Optional[str]) -> None:
         x = s if s is not None else "foo"
         f(x)
+    |}
+    [];
+  assert_type_errors
+    {|
+      def foo(x: typing.Optional[bytes]) -> None: ...
+      a: typing.Union[int, bytes]
+      foo(x=a if isinstance(a, bytes) else None)
     |}
     []
 
@@ -4523,7 +5489,7 @@ let test_check_union _ =
   assert_type_errors
     {|
       def foo() -> typing.Union[str, int]:
-        if True:
+        if condition():
           return 1
         else:
           return 'foo'
@@ -4572,14 +5538,26 @@ let test_check_union _ =
           return None
       variable = ret_opt_int()
     |}
-    []
+    [];
+
+  assert_type_errors
+    {|
+      def foo(x: typing.Union[int, Undefined]) -> None:
+        pass
+      foo(1)
+    |}
+    [
+      "Undefined type [11]: Type `Undefined` is not defined.";
+      "Incompatible parameter type [6]: Expected `typing.Union[Undefined, int]` " ^
+      "for 1st anonymous parameter to call `foo` but got `int`.";
+    ]
 
 
 let test_check_return_joining _ =
   assert_type_errors
     {|
       def foo():
-        if True:
+        if condition():
           return 1
         else:
           return 'asdf'
@@ -4591,7 +5569,7 @@ let test_check_return_joining _ =
   assert_type_errors
     {|
       def foo():
-        if True:
+        if condition():
           return 1
         else:
           return 2.0
@@ -4600,7 +5578,7 @@ let test_check_return_joining _ =
   assert_type_errors
     {|
       def foo():
-        if True:
+        if condition():
           return None
         else:
           return 'asdf'
@@ -4612,7 +5590,7 @@ let test_check_return_joining _ =
   assert_type_errors
     {|
       def foo():
-        if True:
+        if condition():
           return A()
         else:
           return B()
@@ -4629,8 +5607,10 @@ let test_check_nested _ =
         int_to_int(1.0)
     |}
     [
-      "Incompatible parameter type [6]: Expected `int` but got `float`.";
-      "Incompatible parameter type [6]: Expected `int` but got `float`.";
+      "Incompatible parameter type [6]: " ^
+      "Expected `int` for 1st anonymous parameter to call `int_to_int` but got `float`.";
+      "Incompatible parameter type [6]: " ^
+      "Expected `int` for 1st anonymous parameter to call `int_to_int` but got `float`.";
     ];
 
   assert_type_errors
@@ -4642,6 +5622,14 @@ let test_check_nested _ =
     |}
     [];
 
+  assert_type_errors
+    {|
+      class Derp:
+          Word = collections.namedtuple("word", ("verb", "noun"))
+      def foo() -> Derp.Word: pass
+    |}
+    ["Incompatible return type [7]: Expected `Derp.Word` but got implicit return value of `None`."];
+
   (* Nesting behaves differently for the toplevel function. *)
   assert_type_errors
     ~qualifier:(Access.create "shadowing")
@@ -4649,7 +5637,21 @@ let test_check_nested _ =
       def shadowing(i: int) -> None: ...
       shadowing('asdf')  # `shadowing` is not replaced with a dummy entry in the globals map.
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."]
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `shadowing.shadowing` but got `str`."];
+
+  assert_type_errors
+    {|
+      def can_fail() -> None:
+        try:
+          x = 3
+        except:
+          pass
+        always_declared = 4
+        def bar() -> int:
+          return always_declared
+  |}
+    []
 
 
 let test_check_invalid_constructor _ =
@@ -4671,6 +5673,34 @@ let test_check_invalid_constructor _ =
       "Incompatible constructor annotation [17]: `__init__` is annotated as " ^
       "returning `int`, but it should return `None`.";
     ]
+
+
+let test_check_unbounded_variables _ =
+  assert_type_errors
+    {|
+      T = typing.TypeVar('T')
+      def expects_any(input) -> None: ...
+      def expects_string(inut: str) -> None: ...
+      def foo(input: T) -> None:
+        expects_any(input)
+        expects_string(input)
+    |}
+    ["Incompatible parameter type [6]: " ^
+     "Expected `str` for 1st anonymous parameter to call `expects_string` but got `Variable[T]`."];
+  assert_type_errors
+    {|
+      T = typing.TypeVar('T')
+      def foo(input: T) -> typing.Any:
+        return input
+    |}
+    ["Missing return annotation [3]: Returning `Variable[T]` but type `Any` is specified."];
+  assert_type_errors
+    {|
+      T = typing.TypeVar('T')
+      def foo(input: T) -> int:
+        return input
+    |}
+    ["Incompatible return type [7]: Expected `int` but got `Variable[T]`."]
 
 
 let test_check_variable_restrictions _ =
@@ -4710,25 +5740,47 @@ let test_check_variable_bindings _ =
       def foo(t: T) -> None:
         str_to_int(t)
     |}
-    ["Incompatible parameter type [6]: Expected `str` but got `Variable[T (bound to int)]`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `str` for 1st anonymous parameter to call `str_to_int` but got " ^
+     "`Variable[T (bound to int)]`."];
   assert_type_errors
     {|
       T = typing.TypeVar('T', bound=int)
       def foo() -> T:
         return 1.0
     |}
-    ["Incompatible return type [7]: Expected `Variable[T (bound to int)]` but got `float`."]
+    ["Incompatible return type [7]: Expected `Variable[T (bound to int)]` but got `float`."];
+  assert_type_errors
+    {|
+      T = typing.TypeVar('T', bound=int)
+      def foo(t: T) -> None:
+        int_to_str(t)
+      def bar(x: str) -> None:
+        foo(x)
+    |}
+    ["Incompatible parameter type [6]: Expected `Variable[T (bound to int)]` for 1st anonymous " ^
+     "parameter to call `foo` but got `str`."];
+  assert_type_errors
+    {|
+      class C():
+        def baz(self) -> int:
+          return 7
+      T = typing.TypeVar('T', bound=C)
+      def foo(t: T) -> int:
+        return t.baz()
+    |}
+    []
 
 
 let test_check_refinement _ =
   assert_type_errors
     {|
-    def takes_int(a: int) -> None: pass
-    def foo() -> None:
-      x: float
-      x = 1
-      takes_int(x)
-      x = 1.0
+      def takes_int(a: int) -> None: pass
+      def foo() -> None:
+        x: float
+        x = 1
+        takes_int(x)
+        x = 1.0
     |}
     [];
 
@@ -4739,7 +5791,8 @@ let test_check_refinement _ =
         l = [1]
         l.append('asdf')
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `list.append` but got `str`."];
 
   assert_type_errors
     {|
@@ -4747,7 +5800,8 @@ let test_check_refinement _ =
         l: typing.List[int] = []
         l.append('a')
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `list.append` but got `str`."];
 
   assert_type_errors
     {|
@@ -4755,7 +5809,8 @@ let test_check_refinement _ =
         l: typing.List[int] = None
         l.append('a')
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `list.append` but got `str`."];
 
   assert_type_errors
     {|
@@ -4874,7 +5929,8 @@ let test_check_refinement _ =
 let test_check_toplevel _ =
   assert_type_errors
     "int_to_int(1.0)"
-    ["Incompatible parameter type [6]: Expected `int` but got `float`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `int_to_int` but got `float`."];
 
   assert_type_errors
     {|
@@ -4891,7 +5947,8 @@ let test_check_tuple _ =
       def foo(a: typing.Tuple[int, int]) -> None:
         a.tuple_method(1.0)
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `float`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `tuple.tuple_method` but got `float`."];
   assert_type_errors
     {|
       def foo() -> typing.Tuple[int, ...]:
@@ -4900,11 +5957,11 @@ let test_check_tuple _ =
     [];
   assert_type_errors
     {|
-      def foo() -> typing.Tuple[int, string]:
+      def foo() -> typing.Tuple[int, str]:
         return (1, "string", 3)
     |}
     [
-      "Incompatible return type [7]: Expected `typing.Tuple[int, string]` but got " ^
+      "Incompatible return type [7]: Expected `typing.Tuple[int, str]` but got " ^
       "`typing.Tuple[int, str, int]`.";
     ];
   assert_type_errors
@@ -4932,6 +5989,31 @@ let test_check_tuple _ =
       "Incompatible return type [7]: Expected `typing.Tuple[int, ...]` but got " ^
       "`typing.Tuple[str, ...]`.";
     ];
+
+  assert_type_errors
+    {|
+      def foo() -> typing.Tuple[float, ...]:
+        return tuple([1])
+    |}
+    [];
+  assert_type_errors
+    {|
+      def foo() -> typing.Tuple[float, ...]:
+        return (1, 2)
+    |}
+    [];
+  assert_type_errors
+    {|
+      def foo() -> typing.Tuple[float, ...]:
+        return (1.0, 2.0)
+    |}
+    [];
+  assert_type_errors
+    {|
+      def foo() -> typing.Tuple[float, ...]:
+        return (1.0, 2)
+    |}
+    [];
 
   assert_type_errors
     {|
@@ -5009,7 +6091,7 @@ let test_check_tuple _ =
 let test_check_meta _ =
   assert_type_errors
     {|
-      def foo(input) -> typing.List[int]:
+      def foo(input: str) -> typing.List[int]:
         return typing.cast(typing.List[float], input)
     |}
     ["Incompatible return type [7]: Expected `typing.List[int]` but got `typing.List[float]`."];
@@ -5018,16 +6100,20 @@ let test_check_meta _ =
       def foo(input) -> typing.List[int]:
         return typing.cast(typing.List[unknown], input)
     |}
-    ["Undefined type [11]: Type `unknown` is not defined."];
+    [
+      "Missing parameter annotation [2]: Parameter `input` has no type specified.";
+      "Undefined type [11]: Type `unknown` is not defined.";
+    ];
   assert_type_errors
+    ~debug:false
     {|
       T = typing.TypeVar('T')
       S = typing.TypeVar('S')
       class C(typing.Generic[T]): pass
-      def foo(input) -> None:
+      def foo(input: typing.Any) -> None:
         typing.cast(C[int], input)
       class D(typing.Generic[T, S]): pass
-      def foo(input) -> None:
+      def foo(input: typing.Any) -> None:
         typing.cast(D[int, float], input)
     |}
     [];
@@ -5057,7 +6143,7 @@ let test_check_meta _ =
           ...
       class Subclass(C):
         ...
-      def foo()-> C:
+      def foo() -> C:
         return Subclass.__construct__()
     |}
     [];
@@ -5075,6 +6161,35 @@ let test_check_meta _ =
         return C.__construct__()
     |}
     ["Incompatible return type [7]: Expected `Subclass` but got `C`."];
+
+  assert_type_errors
+    {|
+      T = typing.TypeVar('T')
+      class C:
+        def f(self: T) -> T:
+          ...
+      class Subclass(C):
+        ...
+      def foo(s: Subclass) -> Subclass:
+        to_call = s.f
+        return to_call()
+    |}
+    [];
+
+  assert_type_errors
+    {|
+      T = typing.TypeVar('T')
+      class C:
+        def f(self: T) -> T:
+          ...
+      class Subclass(C):
+        ...
+      def foo(c: C)-> Subclass:
+        to_call = c.f
+        return to_call()
+    |}
+    ["Incompatible return type [7]: Expected `Subclass` but got `C`."];
+
 
   assert_type_errors
     {|
@@ -5123,8 +6238,9 @@ let test_check_redundant_cast _ =
     |}
     [];
   assert_type_errors
+    ~debug:false
     {|
-      def foo(x) -> None:
+      def foo(x: typing.Any) -> None:
         typing.cast(int, x)
     |}
     [];
@@ -5149,7 +6265,9 @@ let test_check_assert _ =
         if optional or len(optional) > 0:
           pass
     |}
-    ["Incompatible parameter type [6]: Expected `typing.Sized` but got `typing.Optional[str]`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `typing.Sized` for 1st anonymous parameter to call `len` but got " ^
+     "`typing.Optional[str]`."];
   assert_type_errors
     {|
       def foo(optional: typing.Optional[str]) -> None:
@@ -5162,6 +6280,45 @@ let test_check_assert _ =
       def foo(optional: typing.Optional[str]) -> None:
         if optional and len(optional) > 0:
           pass
+    |}
+    [];
+  assert_type_errors
+    {|
+      def foo() -> int:
+        if 1 > 2:
+          x = 2
+        else:
+          assert False
+        return int_to_int(x)
+    |}
+    [];
+  assert_type_errors
+    {|
+      def foo() -> int:
+        if 1 > 2:
+          x = 2
+        else:
+          assert False, "unreachable, surely"
+        return int_to_int(x)
+    |}
+    [];
+  assert_type_errors
+    {|
+      def foo() -> int:
+        if 1 > 2:
+          x = 2
+        else:
+          assert not True
+        return int_to_int(x)
+    |}
+    ["Undefined name [18]: Global name `x` is undefined."];
+  assert_type_errors
+    {|
+      def foo() -> int:
+        if True:
+          return 0
+        else:
+          return int_to_int("monkey news")
     |}
     []
 
@@ -5221,7 +6378,10 @@ let test_check_async _ =
       def foo(c: C) -> int:
         return (await c)
     |}
-    ["Incompatible return type [7]: Expected `int` but got `unknown`."];
+    [
+      "Missing type parameters [24]: Generic type `C` expects 1 type parameters.";
+      "Incompatible return type [7]: Expected `int` but got `unknown`.";
+    ];
 
   assert_type_errors
     {|
@@ -5260,14 +6420,24 @@ let test_check_async _ =
     [];
 
   assert_type_errors
-  {|
-    def takes_int(x: int) -> int:
-      return x
-    async def loop(g: typing.AsyncGenerator[str, None]) -> typing.AsyncGenerator[int, None]:
-      async for item in g:
-        yield takes_int(item)
-  |}
-  []
+    {|
+      def takes_int(x: int) -> int:
+        return x
+      async def loop(g: typing.AsyncGenerator[str, None]) -> typing.AsyncGenerator[int, None]:
+        async for item in g:
+          yield takes_int(item)
+    |}
+    [
+      "Incompatible parameter type [6]: Expected `int` for 1st anonymous parameter to call \
+       `takes_int` but got `str`.";
+    ];
+
+  assert_type_errors
+    {|
+      async def read(file: typing.AsyncIterable[str]) -> typing.List[str]:
+        return [data async for data in file]
+    |}
+    []
 
 
 let test_check_behavioral_subtyping _ =
@@ -5280,7 +6450,7 @@ let test_check_behavioral_subtyping _ =
         def foo() -> float: return 1.0
     |}
     [
-      "Inconsistent override [15]: `Bar.foo` overloads method defined in `Foo` inconsistently. " ^
+      "Inconsistent override [15]: `Bar.foo` overrides method defined in `Foo` inconsistently. " ^
       "Returned type `float` is not a subtype of the overridden return `int`."
     ];
 
@@ -5300,9 +6470,53 @@ let test_check_behavioral_subtyping _ =
         def foo() -> None: pass
     |}
     [
-      "Inconsistent override [15]: `Bar.foo` overloads method defined in `Foo` inconsistently. " ^
+      "Inconsistent override [15]: `Bar.foo` overrides method defined in `Foo` inconsistently. " ^
       "Returned type `None` is not a subtype of the overridden return `int`."
     ];
+  assert_type_errors
+    {|
+      _T = typing.TypeVar('_T')
+      class Foo(Generic[_T]):
+        def foo() -> _T: ...
+      class Bar(Foo[float]):
+        def foo() -> str: return ""
+    |}
+    [
+      "Inconsistent override [15]: `Bar.foo` overrides method defined in `Foo` inconsistently. " ^
+      "Returned type `str` is not a subtype of the overridden return `float`."
+    ];
+  assert_type_errors
+    {|
+      _T = typing.TypeVar('_T')
+      class Foo(Generic[_T]):
+        def foo() -> _T: ...
+      class Bar(Foo[float]):
+        def foo() -> int: return 1
+    |}
+    [];
+  assert_type_errors
+    {|
+      _T = typing.TypeVar('_T')
+      class Foo(Generic[_T]):
+        def foo() -> _T: ...
+      class Passthrough(Foo[_T]): ...
+      class Bar(Passthrough[float]):
+        def foo() -> str: return ""
+    |}
+    [
+      "Inconsistent override [15]: `Bar.foo` overrides method defined in `Foo` inconsistently. " ^
+      "Returned type `str` is not a subtype of the overridden return `float`."
+    ];
+  assert_type_errors
+    {|
+      _T = typing.TypeVar('_T')
+      class Foo(Generic[_T]):
+        def foo() -> _T: ...
+      class Passthrough(Foo[_T]): ...
+      class Bar(Passthrough[float]):
+        def foo() -> int: return 1
+    |}
+    [];
 
   (* Missing annotations. *)
   assert_type_errors
@@ -5315,9 +6529,30 @@ let test_check_behavioral_subtyping _ =
         def foo(): pass
     |}
     [
-      "Inconsistent override [15]: `Bar.foo` overloads method defined in `Foo` inconsistently. " ^
+      "Inconsistent override [15]: `Bar.foo` overrides method defined in `Foo` inconsistently. " ^
       "The overriding method is not annotated but should return a subtype of `int`.";
     ];
+
+  (* Starred arguments. *)
+  assert_type_errors
+    {|
+      class C:
+        def f(self, *args: int) -> None: ...
+      class D(C):
+        def f(self, *args: int) -> None: ...
+    |}
+    [];
+
+  (* Keyword arguments. *)
+  assert_type_errors
+    {|
+      class C:
+        def f(self, **kwargs: str) -> None: ...
+      class D(C):
+        def f(self, **kwargs: str) -> None: ...
+    |}
+    [];
+
   (* TODO(T29679691): We should also warn when parameter annotations are missing. *)
   assert_type_errors
     ~strict:false
@@ -5340,7 +6575,7 @@ let test_check_behavioral_subtyping _ =
           return x
     |}
     [
-      "Inconsistent override [14]: `Bar.foo` overloads method defined in `Foo` inconsistently. " ^
+      "Inconsistent override [14]: `Bar.foo` overrides method defined in `Foo` inconsistently. " ^
       "Parameter of type `str` is not a supertype of the overridden parameter " ^
       "`Variable[T (bound to int)]`.";
     ];
@@ -5353,106 +6588,217 @@ let test_check_behavioral_subtyping _ =
       class Bar(Foo[int]):
         def foo(self) -> int:
           return 1
-      class Bar(Foo[None]):
+      class BarTwo(Foo[None]):
         def foo(self) -> None:
           pass
     |}
-    ["Undefined type [11]: Type `Variable[T]` is not defined."];
+    [];
 
   assert_type_errors ~show_error_traces:true
     {|
       class Foo():
-        def bar(x: int) -> int:
+        def bar(self, x: int) -> int:
           return 1
       class Bar(Foo):
-        def bar(x: int) -> typing.Union[str, int]:
+        def bar(self, x: int) -> typing.Union[str, int]:
           return 1
     |}
     [
-      "Inconsistent override [15]: `Bar.bar` overloads method defined in `Foo` " ^
+      "Inconsistent override [15]: `Bar.bar` overrides method defined in `Foo` " ^
       "inconsistently. Returned type `typing.Union[int, str]` is not a subtype " ^
       "of the overridden return `int`."
     ];
+
+  (* Decorators are applied. *)
+  assert_type_errors
+    {|
+      class Foo():
+        @contextlib.contextmanager
+        def foo() -> typing.Generator[int, None, None]: ...
+      class Bar():
+        @contextlib.contextmanager
+        def foo() -> typing.Generator[int, None, None]: ...
+    |}
+    [];
 
   (* Weakened precondition. *)
   assert_type_errors
     {|
       class Foo():
-        def foo(a: float) -> None: ...
+        def foo(self, a: float) -> None: ...
       class Bar(Foo):
-        def foo(a: int) -> None: pass
+        def foo(self, a: int) -> None: pass
     |}
     [
-      "Inconsistent override [14]: `Bar.foo` overloads method defined in `Foo` inconsistently. " ^
+      "Inconsistent override [14]: `Bar.foo` overrides method defined in `Foo` inconsistently. " ^
       "Parameter of type `int` is not a supertype of the overridden parameter `float`."
     ];
   assert_type_errors
     {|
       class Foo():
-        def foo(a) -> None: ...
+        def foo(self, a) -> None: ...
       class Bar(Foo):
-        def foo() -> None: pass
+        def foo(self, ) -> None: pass
     |}
     [
-      "Inconsistent override [14]: `Bar.foo` overloads method defined in `Foo` inconsistently. " ^
+      "Inconsistent override [14]: `Bar.foo` overrides method defined in `Foo` inconsistently. " ^
       "Could not find parameter `a` in overriding signature."
     ];
   assert_type_errors
     {|
       class Foo():
-        def foo(a: int) -> None: ...
+        def foo(self, a: int) -> None: ...
       class Bar(Foo):
-        def foo(a) -> None: pass  # TODO(T23629633): we should warn on this too.
+        def foo(self, a) -> None: pass
+    |}
+    ["Missing parameter annotation [2]: Parameter `a` has no type specified."];
+  assert_type_errors
+    {|
+      class Foo():
+        def foo(self, ) -> None: ...
+      class Bar(Foo):
+        def foo(self, a) -> None: pass
+    |}
+    ["Missing parameter annotation [2]: Parameter `a` has no type specified."];
+  assert_type_errors
+    {|
+      class Foo():
+        def foo(self, a) -> None: ...
+      class Bar(Foo):
+        def foo(self, a: int) -> None: pass
     |}
     [];
   assert_type_errors
     {|
       class Foo():
-        def foo() -> None: ...
+        def foo(self, a: int) -> None: pass
       class Bar(Foo):
-        def foo(a) -> None: pass
-    |}
-    [];
-  assert_type_errors
-    {|
-    class Foo():
-      def foo(a) -> None: ...
-    class Bar(Foo):
-      def foo(a: int) -> None: pass
-    |}
-    [];
-  assert_type_errors
-    {|
-    class Foo():
-      def foo(a: int) -> None: pass
-    class Bar(Foo):
-      def foo(b: int) -> None: pass
+        def foo(self, b: int) -> None: pass
     |}
     [
-      "Inconsistent override [14]: `Bar.foo` overloads method defined in `Foo` inconsistently. " ^
+      "Inconsistent override [14]: `Bar.foo` overrides method defined in `Foo` inconsistently. " ^
       "Could not find parameter `a` in overriding signature."
     ];
   assert_type_errors
     {|
-    class Foo():
-      def foo(a: int) -> None: pass
-    class Bar(Foo):
-      def foo(_a: int) -> None: pass
+      class Foo():
+        def foo(self, a: int) -> None: pass
+      class Bar(Foo):
+        def foo(self, _a: int) -> None: pass
     |}
     [];
   assert_type_errors ~show_error_traces:true
     {|
       class Foo():
-        def bar(x: typing.Union[str, int]) -> None:
+        def bar(self, x: typing.Union[str, int]) -> None:
           pass
       class Bar(Foo):
-        def bar(x: int) -> None:
+        def bar(self, x: int) -> None:
           pass
     |}
     [
-      "Inconsistent override [14]: `Bar.bar` overloads method defined in `Foo` " ^
+      "Inconsistent override [14]: `Bar.bar` overrides method defined in `Foo` " ^
       "inconsistently. Parameter of type `int` is not a " ^
       "supertype of the overridden parameter `typing.Union[int, str]`."
+    ];
+  assert_type_errors
+    {|
+      _T = typing.TypeVar('_T')
+      class Foo(Generic[_T]):
+        def bar(self, x: typing.Union[str, _T]) -> None:
+          pass
+      class Bar(Foo[float]):
+        def bar(self, x: typing.Union[str, int]) -> None:
+          pass
+    |}
+    [
+      "Inconsistent override [14]: `Bar.bar` overrides method defined in `Foo` inconsistently. " ^
+      "Parameter of type `typing.Union[int, str]` is not a supertype " ^
+      "of the overridden parameter `typing.Union[float, str]`."
+    ];
+  assert_type_errors
+    {|
+      _T = typing.TypeVar('_T')
+      class Foo(Generic[_T]):
+        def bar(self, x: typing.Union[str, _T]) -> None:
+          pass
+      class Bar(Foo[int]):
+        def bar(self, x: typing.Union[str, float]) -> None:
+          pass
+    |}
+    [];
+  assert_type_errors
+    {|
+      _T = typing.TypeVar('_T')
+      class Foo(Generic[_T]):
+        def bar(self, x: typing.Union[str, _T]) -> None:
+          pass
+      class Passthrough(Foo[_T]): ...
+      class Bar(Passthrough[float]):
+        def bar(self, x: typing.Union[str, int]) -> None:
+          pass
+    |}
+    [
+      "Inconsistent override [14]: `Bar.bar` overrides method defined in `Foo` inconsistently. " ^
+      "Parameter of type `typing.Union[int, str]` is not a supertype " ^
+      "of the overridden parameter `typing.Union[float, str]`."
+    ];
+  assert_type_errors
+    {|
+      _T = typing.TypeVar('_T')
+      class Foo(Generic[_T]):
+        def bar(self, x: typing.Union[str, _T]) -> None:
+          pass
+      class Passthrough(Foo[_T]): ...
+      class Bar(Passthrough[int]):
+        def bar(self, x: typing.Union[str, float]) -> None:
+          pass
+    |}
+    [];
+
+  (* A leading underscore indicates parameters are unused; they should still be recognized *)
+  assert_type_errors
+    {|
+      class Foo:
+          def bar(self, _x: int) -> str:
+              return ""
+      class Bar(Foo):
+          def bar(self, x: int) -> str:
+              return ""
+    |}
+    [];
+  assert_type_errors
+    {|
+      class Foo:
+          def bar(self, _x: int) -> str:
+              return ""
+      class Baz(Foo):
+          def bar(self, _x: int) -> str:
+              return ""
+    |}
+    [];
+  assert_type_errors
+    {|
+      class Foo:
+          def bar(self, x: int) -> str:
+              return ""
+      class Bar(Foo):
+          def bar(self, _x: int) -> str:
+              return ""
+    |}
+    [];
+  assert_type_errors
+    {|
+      class Foo:
+          def bar(self, _y: int) -> str:
+              return ""
+      class Bar(Foo):
+          def bar(self, x: int) -> str:
+              return ""
+    |}
+    [
+      "Inconsistent override [14]: `Bar.bar` overrides method defined in `Foo` " ^
+      "inconsistently. Could not find parameter `y` in overriding signature."
     ];
 
   (* Don't warn on constructors or class methods. *)
@@ -5494,7 +6840,7 @@ let test_check_behavioral_subtyping _ =
         def __f(self, a: int) -> None: pass
     |}
     [
-      "Inconsistent override [14]: `Bar.__f` overloads method defined in `Foo` inconsistently. " ^
+      "Inconsistent override [14]: `Bar.__f` overrides method defined in `Foo` inconsistently. " ^
       "Parameter of type `int` is not a supertype of the overridden parameter `float`.";
     ];
 
@@ -5531,33 +6877,36 @@ let test_check_behavioral_subtyping _ =
 
   (* Overrides when both *args and **kwargs exist are not inconsistent. *)
   assert_type_errors
+    ~debug:false
     {|
       class Foo():
         def f(self, a: float) -> None: ...
       class Bar(Foo):
-        def f(self, *args) -> None: pass
+        def f(self, *args: typing.Any) -> None: pass
     |}
     [
-      "Inconsistent override [14]: `Bar.f` overloads method defined in `Foo` inconsistently. " ^
+      "Inconsistent override [14]: `Bar.f` overrides method defined in `Foo` inconsistently. " ^
       "Could not find parameter `a` in overriding signature.";
     ];
   assert_type_errors
+    ~debug:false
     {|
       class Foo():
         def f(self, b: int) -> None: ...
       class Bar(Foo):
-        def f(self, **kwargs) -> None: pass
+        def f(self, **kwargs: typing.Any) -> None: pass
     |}
     [
-      "Inconsistent override [14]: `Bar.f` overloads method defined in `Foo` inconsistently. " ^
+      "Inconsistent override [14]: `Bar.f` overrides method defined in `Foo` inconsistently. " ^
       "Could not find parameter `b` in overriding signature.";
     ];
   assert_type_errors
+    ~debug:false
     {|
       class Foo():
         def f(self, c: str) -> None: ...
       class Bar(Foo):
-        def f(self, *args, **kwargs) -> None: pass
+        def f(self, *args: typing.Any, **kwargs: typing.Any) -> None: pass
     |}
     []
 
@@ -5610,9 +6959,8 @@ let test_check_constructors _ =
       def foo() -> Foo:
         return Foo('asdf')
     |}
-    [
-      "Incompatible parameter type [6]: Expected `int` but got `str`.";
-    ];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `Foo.__init__` but got `str`."];
   assert_type_errors
     {|
       class Foo:
@@ -5623,8 +6971,11 @@ let test_check_constructors _ =
         Foo(1, 2)
     |}
     [
-      "Incompatible parameter type [6]: Expected `int` but got `str`.";
-      "Incompatible parameter type [6]: Expected `typing.Optional[str]` but got `int`.";
+      "Incompatible parameter type [6]: " ^
+      "Expected `int` for 1st anonymous parameter to call `Foo.__init__` but got `str`.";
+      "Incompatible parameter type [6]: " ^
+      "Expected `typing.Optional[str]` for 2nd anonymous parameter to call `Foo.__init__` " ^
+      "but got `int`.";
     ];
 
   (* Explicit call. *)
@@ -5636,7 +6987,10 @@ let test_check_constructors _ =
         def foo(self) -> None:
           Foo.__init__(self, 'asdf')
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."];
+    [
+      "Incompatible parameter type [6]: Expected `int` for 2nd anonymous parameter to call \
+       `Foo.__init__` but got `str`.";
+    ];
 
   (* Super calls. *)
   assert_type_errors
@@ -5648,7 +7002,8 @@ let test_check_constructors _ =
         def foo(self, i: int) -> None:
           super().foo('asdf')
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `Super.foo` but got `str`."];
   assert_type_errors
     {|
       class Super:
@@ -5658,7 +7013,8 @@ let test_check_constructors _ =
         def __init__(self, i: int) -> None:
           super().__init__('asdf')
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `Super.__init__` but got `str`."];
 
   (* The MRO of inheriting both a class and its direct parent will result in super() evaluating
      to the subclass, regardless of order. *)
@@ -5678,12 +7034,35 @@ let test_check_constructors _ =
       class Class:
         @overload
         def __init__(self, i: int) -> None: ...
+        @overload
         def __init__(self, s: str) -> None: ...
       def construct() -> None:
         Class(1)
         Class('asdf')
     |}
-    []
+    [];
+
+  assert_type_errors
+    {|
+      class Class:
+        def __init__(self, i: int) -> None: ...
+      def foo(x: typing.Type[Class]) -> Class:
+        return x(7)
+    |}
+    [];
+
+  assert_type_errors
+    {|
+      class Class:
+        def __init__(self, i: int) -> None: ...
+      def foo(x: typing.Type[Clss]) -> Class:
+        return x(7)
+    |}
+    [
+      "Undefined type [11]: Type `Clss` is not defined.";
+      "Incompatible return type [7]: Expected `Class` but got `unknown`.";
+      "Call error [29]: `typing.Type[Clss]` is not a function.";
+    ]
 
 
 let test_check_explicit_method_call _ =
@@ -5711,7 +7090,7 @@ let test_check_meta_annotations _ =
 let test_check_unbound_variables _ =
   assert_type_errors
     {|
-      def foo(flag) -> int:
+      def foo(flag: bool) -> int:
         if flag:
           result = 1
         else:
@@ -5719,8 +7098,39 @@ let test_check_unbound_variables _ =
         return result
     |}
     [
-      "Incompatible return type [7]: Expected `int` but got `typing.Union[int, typing.Undeclared]`."
+      "Incompatible return type [7]: Expected `int` but got " ^
+      "`typing.Union[int, typing.Undeclared]`.";
+      "Undefined name [18]: Global name `result` is undefined.";
     ];
+  assert_type_errors
+    {|
+      def foo(flag: bool) -> int:
+        if flag:
+          result = narnia()
+        return result
+    |}
+    [
+      "Undefined name [18]: Global name `narnia` is undefined.";
+      "Incompatible return type [7]: Expected `int` but got " ^
+      "`typing.Union[typing.Undeclared, unknown]`.";
+      "Undefined name [18]: Global name `result` is undefined.";
+    ];
+  assert_type_errors
+    {|
+      def foo(flag: bool) -> int:
+        if flag:
+          result = narnia()
+        else:
+          other = 1
+        return result
+    |}
+    [
+      "Undefined name [18]: Global name `narnia` is undefined.";
+      "Incompatible return type [7]: Expected `int` but got " ^
+      "`typing.Union[typing.Undeclared, unknown]`.";
+      "Undefined name [18]: Global name `result` is undefined.";
+    ];
+
   assert_type_errors
     {|
       def foo() -> int:
@@ -5734,7 +7144,7 @@ let test_check_unbound_variables _ =
   assert_type_errors
     {|
       class Foo:
-        attribute: bool
+        attribute: bool = False
         def foo(self) -> int:
           if not self.attribute:
             self.attribute = True
@@ -5777,7 +7187,7 @@ let test_check_noreturn _ =
   assert_type_errors
     {|
       def may_not_return() -> str:
-        if True:
+        if condition():
           sys.exit(0)
         else:
           return ""
@@ -5787,7 +7197,7 @@ let test_check_noreturn _ =
   assert_type_errors
     {|
       def no_return() -> int:
-        if True:
+        if condition():
           return 1
         else:
           sys.exit(0)
@@ -5875,6 +7285,32 @@ let test_check_callables _ =
 
   assert_type_errors
     {|
+      class Call:
+        def not_call(self) -> int: ...
+      def foo(call: Call) -> int:
+        return call()
+    |}
+    [
+      "Incompatible return type [7]: Expected `int` but got `unknown`.";
+      "Call error [29]: `Call` is not a function.";
+    ];
+
+  (* Test for terminating fixpoint *)
+  assert_type_errors
+    {|
+      class Call:
+        def not_call(self) -> int: ...
+      def foo(x: int, call: Call) -> int:
+        for x in range(0, 7):
+          call()
+        return 7
+    |}
+    [
+      "Call error [29]: `Call` is not a function.";
+    ];
+
+  assert_type_errors
+    {|
       class patch:
         def __call__(self) -> int: ...
 
@@ -5902,12 +7338,30 @@ let test_check_callables _ =
 
   assert_type_errors
     {|
+      class Foo:
+        @classmethod
+        def bar(self, x: int) -> str:
+          return ""
+
+      def bar() -> None:
+        return Foo.bar
+    |}
+    [
+      "Incompatible return type [7]: Expected `None` but got " ^
+      "`typing.Callable(Foo.bar)[[Named(x, int)], str]`.";
+    ];
+
+  assert_type_errors
+    {|
       class Call:
         def __call__(self, x: int) -> int: ...
       def foo(call: Call) -> int:
         return call("")
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."];
+    [
+      "Incompatible parameter type [6]: Expected `int` for 1st anonymous parameter to call \
+       `Call.__call__` but got `str`.";
+    ];
 
   (* Callable parameter checks. *)
   assert_type_errors
@@ -5915,17 +7369,171 @@ let test_check_callables _ =
       def foo(callable: typing.Callable[[str], None]) -> None:
         callable(1)
     |}
-    ["Incompatible parameter type [6]: Expected `str` but got `int`."]
+    ["Incompatible parameter type [6]: " ^
+     "Expected `str` for 1st anonymous parameter to anoynmous call but got `int`."];
+
+  (* Type variables & callables. *)
+  assert_type_errors
+    {|
+      T = typing.TypeVar('T')
+      def foo(x: str) -> int:
+        return 0
+      def takes_parameter(f: typing.Callable[[T], int]) -> T:
+        ...
+      def takes_return(f: typing.Callable[[str], T]) -> T:
+        ...
+      def f() -> str:
+        return takes_parameter(foo)
+      def g() -> int:
+        return takes_return(foo)
+    |}
+    [];
+
+  assert_type_errors
+    {|
+      def foo(f: typing.Callable[..., int]) -> None:
+        ...
+      def i2i(x: int) -> int:
+        return x
+      foo(i2i)
+    |}
+    [];
+  assert_type_errors
+    {|
+      def foo(f: typing.Callable[..., int]) -> None:
+        ...
+      def i2s(x: int) -> str:
+        return ""
+      foo(i2s)
+    |}
+    [
+      "Incompatible parameter type [6]: " ^
+      "Expected `typing.Callable[..., int]` for 1st anonymous parameter to call `foo` but got " ^
+      "`typing.Callable(i2s)[[Named(x, int)], str]`.";
+    ];
+
+  (* Classes with __call__ are callables. *)
+  assert_type_errors
+    {|
+      class CallMe:
+        def __call__(self, x:int) -> str:
+          ...
+      class CallMeToo(CallMe):
+        pass
+
+      def map(f: typing.Callable[[int], str], l: typing.List[int]) -> typing.List[str]:
+        ...
+      def apply(x: CallMe, y: CallMeToo) -> None:
+        map(x, [])
+        map(y, [])
+    |}
+    [];
+  assert_type_errors
+    {|
+      class CallMe:
+        def __call__(self, x: str) -> str:
+          ...
+      class CallMeToo(CallMe):
+        pass
+
+      def map(f: typing.Callable[[int], str], l: typing.List[int]) -> typing.List[str]:
+        ...
+      def apply(x: CallMe, y: CallMeToo) -> None:
+        map(x, [])
+        map(y, [])
+    |}
+    [
+      "Incompatible parameter type [6]: " ^
+      "Expected `typing.Callable[[int], str]` for 1st anonymous parameter to call `map` but got " ^
+      "`CallMe`.";
+      "Incompatible parameter type [6]: " ^
+      "Expected `typing.Callable[[int], str]` for 1st anonymous parameter to call `map` but got " ^
+      "`CallMeToo`.";
+    ];
+
+  (* Sanity check: Callables do not subclass classes. *)
+  assert_type_errors
+    {|
+      class CallMe:
+        def __call__(self, x: int) -> str:
+          ...
+      def map(callable_object: CallMe, x: int) -> None:
+         callable_object(x)
+      def apply(f: typing.Callable[[int], str]) -> None:
+        map(f, 1)
+    |}
+    ["Incompatible parameter type [6]: " ^
+     "Expected `CallMe` for 1st anonymous parameter to call `map` but got " ^
+     "`typing.Callable[[int], str]`."];
+
+  (* The annotation for callable gets expanded automatically. *)
+  assert_type_errors
+    {|
+      def i2i(x: int) -> int:
+        return 0
+      def hof(c: typing.Callable) -> None:
+        return
+      hof(i2i)
+      hof(1)
+    |}
+    ["Incompatible parameter type [6]: " ^
+     "Expected `typing.Callable[..., unknown]` for 1st anonymous parameter to call `hof` but got " ^
+     "`int`."];
+
+  (* Lambdas. *)
+  assert_type_errors
+    {|
+      def takes_callable(f: typing.Callable[[Named(x, typing.Any)], int]) -> int:
+        return 0
+      takes_callable(lambda y: 0)
+    |}
+    [
+      "Incompatible parameter type [6]: " ^
+      "Expected `typing.Callable[[Named(x, typing.Any)], int]` for 1st anonymous parameter " ^
+      "to call `takes_callable` but got `typing.Callable[[Named(y, typing.Any)], int]`.";
+    ];
+  assert_type_errors
+    {|
+      def takes_callable(f: typing.Callable[[Named(x, typing.Any)], int]) -> int:
+        return 0
+      takes_callable(lambda y: "")
+    |}
+    [
+      "Incompatible parameter type [6]: " ^
+      "Expected `typing.Callable[[Named(x, typing.Any)], int]` for 1st anonymous parameter " ^
+      "to call `takes_callable` but got `typing.Callable[[Named(y, typing.Any)], str]`.";
+    ];
+
+  assert_type_errors
+    ~debug:false
+    {|
+      def exec(f: typing.Callable[[], int]) -> int:
+        return f()
+      def with_default(x: int = 0) -> int:
+        return x
+      def with_kwargs( **kwargs: int) -> int:
+        return 0
+      def with_varargs( *varargs: int) -> int:
+        return 0
+      def with_everything( *varargs: int, **kwargs: int) -> int:
+        return 0
+      exec(with_default)
+      exec(with_kwargs)
+      exec(with_varargs)
+      exec(with_everything)
+    |}
+    []
 
 
 let test_check_assert_functions _ =
   assert_type_errors
+    ~debug:false
     {|
       class One:
           a: int
 
       # The actual content of this function does not really matter.
-      def pyretestassert(x) -> None:
+      def pyretestassert(x: typing.Any) -> None:
           pass
 
       def f(o: typing.Optional[One]) -> int:
@@ -5938,14 +7546,29 @@ let test_check_assert_functions _ =
     |}
     [];
   assert_type_errors
+    ~debug:false
     ~qualifier:(Access.create "foo")
     {|
       class One:
           a: int
 
       # The actual content of this function does not really matter.
-      def pyretestassert(x) -> None:
+      def pyretestassert(x: typing.Any) -> None:
           pass
+
+      def f(o: typing.Optional[One]) -> int:
+          assert o
+          return o.a
+
+      def f2(o: typing.Optional[One]) -> int:
+          pyretestassert(o)
+          return o.a
+    |}
+    [];
+  assert_type_errors
+    {|
+      class One:
+          a: int = 1
 
       def f(o: typing.Optional[One]) -> int:
           assert o
@@ -5959,29 +7582,153 @@ let test_check_assert_functions _ =
 
 
 let test_check_undefined_type _ =
+  assert_type_errors
+    ~debug:false
+    {|
+      def foo(x: Derp) -> Herp:
+        pass
+    |}
+    [
+      "Undefined type [11]: Type `Derp` is not defined.";
+      "Undefined type [11]: Type `Herp` is not defined.";
+    ];
+  assert_type_errors
+    ~debug:false
+    {|
+      def foo(x: Derp, y: Herp) -> None:
+        pass
+    |}
+    [
+      "Undefined type [11]: Type `Derp` is not defined.";
+      "Undefined type [11]: Type `Herp` is not defined.";
+    ];
+  assert_type_errors
+    ~debug:false
+    {|
+      def foo(x: int) -> Herp:
+        return x
+    |}
+    ["Undefined type [11]: Type `Herp` is not defined."];
+  assert_type_errors
+    ~debug:false
+    {|
+      def foo(x: typing.Union[Derp, Herp]) -> typing.List[Herp]:
+        pass
+    |}
+    [
+      "Undefined type [11]: Type `Derp` is not defined.";
+      "Undefined type [11]: Type `Herp` is not defined.";
+    ];
+  assert_type_errors
+    ~debug:false
+    {|
+      def foo(x: Derp[int]) -> None:
+        pass
+    |}
+    ["Undefined type [11]: Type `Derp` is not defined."];
+  assert_type_errors
+    ~debug:false
+    {|
+      def foo(x: Optional) -> None:
+        pass
+    |}
+    ["Undefined type [11]: Type `Optional` is not defined."];
+
+  assert_type_errors
+    ~debug:false
+    {|
+      def foo() -> None:
+        x: undefined = 1
+        return
+    |}
+    ["Undefined type [11]: Type `undefined` is not defined."];
+  assert_type_errors
+    ~debug:false
+    {|
+      def foo(x: Derp) -> None:
+        y: undefined = 1
+        return
+    |}
+    [
+      "Undefined type [11]: Type `Derp` is not defined.";
+      "Undefined type [11]: Type `undefined` is not defined.";
+    ];
+
+  assert_type_errors
+    {|
+      T = typing.TypeVar('T')
+      def foo(x: T) -> typing.Union[str, T]:
+        return x
+    |}
+    [];
+
   (* Ensure other errors are not missed when undefined type is thrown. *)
   assert_type_errors
     {|
-        class Bar:
-            async def undefined(self, x: Derp) -> Derp:
-                return x
-        class Foo(Bar):
-            def error(self) -> int:
-                return None
-            async def undefined(self, x: Herp) -> Herp:
-                return x
-      |}
+      class Bar:
+          async def undefined(self, x: Derp) -> Derp:
+              return x
+      class Foo(Bar):
+          def error(self) -> int:
+              return None
+          async def undefined(self, x: Herp) -> Herp:
+              return x
+    |}
     [
+      "Undefined type [11]: Type `Derp` is not defined.";
+      "Undefined type [11]: Type `Derp` is not defined.";
       "Incompatible return type [7]: Expected `int` but got `None`.";
-      "Undefined type [11]: Type `Herp` is not defined."
+      "Undefined type [11]: Type `Herp` is not defined.";
+      "Undefined type [11]: Type `Herp` is not defined.";
     ]
+
+
+let test_check_analysis_failure _ =
+  assert_type_errors
+    {|
+      def foo() -> Derp:
+        pass
+
+      def bar(x: int = foo()) -> int:
+        return x
+    |}
+    ["Analysis failure [30]: Terminating analysis because type `Derp` is not defined."]
+
+
+let test_check_missing_type_parameters _ =
+  assert_type_errors
+    {|
+      T = typing.TypeVar("_T")
+      class C(typing.Generic[T]): ...
+      def f(c: C) -> None:
+        return None
+    |}
+    ["Missing type parameters [24]: Generic type `C` expects 1 type parameters."];
+  assert_type_errors
+    {|
+      T = typing.TypeVar("_T")
+      class C(typing.Generic[T]): ...
+      def f(c: typing.List[C]) -> None:
+        return None
+    |}
+    ["Missing type parameters [24]: Generic type `C` expects 1 type parameters."];
+  assert_type_errors
+    {|
+      T = typing.TypeVar("_T")
+      class C(typing.Generic[T]): ...
+      def f() -> typing.List[C]:
+        return []
+    |}
+    ["Missing type parameters [24]: Generic type `C` expects 1 type parameters."]
 
 
 let test_environment _ =
   (* Type aliases in signatures are resolved. *)
   assert_type_errors
     "hashlib.md5(1.0)"
-    ["Incompatible parameter type [6]: Expected `typing.Union[int, str]` but got `float`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `typing.Union[int, str]` for 1st anonymous parameter to call `hashlib.md5` " ^
+     "but got `float`."];
 
   (* Type aliases in the class hierarchy are resolved. I.e. we follow the conditional `Collection`
      indirection in typeshed. *)
@@ -5997,7 +7744,8 @@ let test_scheduling _ =
   (* Top-level is scheduled. *)
   assert_type_errors
     "'string' + 1"
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `int.__radd__` but got `str`."];
 
   (* Functions are scheduled. *)
   assert_type_errors
@@ -6006,7 +7754,8 @@ let test_scheduling _ =
       def foo() -> None:
         'string' + 1
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `int.__radd__` but got `str`."];
 
   assert_type_errors
     {|
@@ -6014,7 +7763,8 @@ let test_scheduling _ =
         def foo() -> None:
           'string' + 1
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `int.__radd__` but got `str`."];
 
   (* Class bodies are scheduled. *)
   assert_type_errors
@@ -6022,7 +7772,8 @@ let test_scheduling _ =
       class Foo:
         'string' + 1
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `int.__radd__` but got `str`."];
 
   (* Methods are scheduled. *)
   assert_type_errors
@@ -6031,7 +7782,8 @@ let test_scheduling _ =
         def foo(self) -> None:
           'string' + 1
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `int.__radd__` but got `str`."];
 
   (* Entry states are propagated. *)
   assert_type_errors
@@ -6047,10 +7799,41 @@ let test_scheduling _ =
         return variable
     |}
     [
-      "Incompatible return type [7]: Expected `int` but got `str`.";
+      "Incompatible return type [7]: Expected `str` but got `int`.";
       "Missing global annotation [5]: Globally accessible variable `variable` has type " ^
       "`typing.Union[int, str]` but no type is specified.";
-    ]
+    ];
+
+  (* Functions defined after try/except blocks are typechecked. *)
+  assert_type_errors
+    {|
+      class Exception: pass
+      try:
+        pass
+      except Exception:
+        pass
+
+      def expect_string(a: str) -> None:
+        pass
+      def foo() -> None:
+        expect_string(1)
+    |}
+    ["Incompatible parameter type [6]: " ^
+     "Expected `str` for 1st anonymous parameter to call `expect_string` but got `int`."];
+  assert_type_errors
+    {|
+      try:
+        pass
+      finally:
+        pass
+
+      def expect_string(a: str) -> None:
+        pass
+      def foo() -> None:
+        expect_string(1)
+    |}
+    ["Incompatible parameter type [6]: " ^
+     "Expected `str` for 1st anonymous parameter to call `expect_string` but got `int`."]
 
 
 let test_format_string _ =
@@ -6065,14 +7848,16 @@ let test_format_string _ =
       def foo() -> None:
         f'foo{1 + "x"}'
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `int.__add__` but got `str`."];
   assert_type_errors
     {|
       global_number: int = 1
       def foo() -> None:
         f'foo{global_number + "x"}'
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `int.__add__` but got `str`."];
   assert_type_errors
     {|
       global_number: int = 1
@@ -6088,7 +7873,8 @@ let test_format_string _ =
       def foo() -> None:
         f'{boo() + "x"}'
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."]
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `int.__add__` but got `str`."]
 
 
 let test_check_data_class _ =
@@ -6100,7 +7886,8 @@ let test_check_data_class _ =
       def boo() -> None:
           b = Foo('a')
     |}
-    ["Incompatible parameter type [6]: Expected `int` but got `str`."];
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `Foo.__init__` but got `str`."];
   assert_type_errors
     {|
       @dataclass
@@ -6109,8 +7896,8 @@ let test_check_data_class _ =
       def boo() -> None:
           b = Foo(4,5)
     |}
-    ["Too many arguments [19]: Call `Foo.__init__` expects 2 positional arguments, " ^
-     "3 were provided."];
+    ["Too many arguments [19]: Call `Foo.__init__` expects 1 argument, " ^
+     "2 were provided."];
   assert_type_errors
     {|
       @dataclasses.dataclass
@@ -6119,8 +7906,8 @@ let test_check_data_class _ =
       def boo() -> None:
           b = Foo(4,5)
     |}
-    ["Too many arguments [19]: Call `Foo.__init__` expects 2 positional arguments, " ^
-     "3 were provided."];
+    ["Too many arguments [19]: Call `Foo.__init__` expects 1 argument, " ^
+     "2 were provided."];
   assert_type_errors
     {|
       @dataclass
@@ -6132,8 +7919,8 @@ let test_check_data_class _ =
     [
       "Missing attribute annotation [4]: Attribute `x` of class `Foo` has type `int` but " ^
       "no type is specified.";
-      "Too many arguments [19]: Call `Foo.__init__` expects 1 positional argument," ^
-      " 2 were provided.";
+      "Too many arguments [19]: Call `Foo.__init__` expects 0 arguments, 1 was" ^
+      " provided.";
     ];
   assert_type_errors
     {|
@@ -6144,6 +7931,636 @@ let test_check_data_class _ =
           b = Foo()
     |}
     []
+
+
+let test_check_typed_dictionaries _ =
+  let assert_test_typed_dictionary source =
+    let typing_stub =
+      {
+        qualifier = Access.create "typing";
+        handle = "typing.pyi";
+        source =
+          {|
+            Any = object()
+            class _SpecialForm:
+                def __getitem__(self, typeargs: Any) -> Any: ...
+          |};
+      }
+    in
+    let mypy_extensions_stub =
+      {
+        qualifier = Access.create "mypy_extensions";
+        handle = "mypy_extensions.pyi";
+        source =
+          "def TypedDict(typename: str, fields: Dict[str, Type[_T]], total: bool = ...) -> \
+           Type[dict]: ..."
+      }
+    in
+    let typed_dictionary_for_import =
+      {
+        qualifier = Access.create "foo.bar.baz";
+        handle = "foo/bar/baz.py";
+        source =
+          {|
+            from mypy_extensions import TypedDict
+            class ClassBasedTypedDictGreekLetters(TypedDict):
+              alpha: int
+              beta: str
+              gamma: bool
+          |}
+      }
+    in
+    assert_type_errors
+      ~update_environment_with:[
+        typing_stub;
+        mypy_extensions_stub;
+        typed_dictionary_for_import;
+      ]
+      source
+  in
+
+  assert_test_typed_dictionary
+    {|
+      Movie = mypy_extensions.TypedDict('Movie', {'name': str, 'year': 'int'})
+      def foo(x: int) -> str:
+        return ""
+      def f() -> None:
+        movie: Movie
+        a = foo(movie['year'])
+    |}
+    [];
+
+  assert_test_typed_dictionary
+    {|
+      Movie = mypy_extensions.TypedDict('Movie', {'name': str, 'year': 'int'})
+      def foo(x: int) -> str:
+        return ""
+      def f() -> None:
+        movie: Movie
+        a = foo(movie['name'])
+    |}
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `foo` but got `str`."];
+
+  assert_test_typed_dictionary
+    {|
+      Movie = mypy_extensions.TypedDict('Movie', {'name': str, 'year': 'int'})
+      def foo(x: int) -> str:
+        return ""
+      def f() -> None:
+        movie: Movie
+        a = foo(movie['yar'])
+    |}
+    ["TypedDict accessed with a missing key [27]: TypedDict `Movie` has no key `yar`."];
+
+  assert_test_typed_dictionary
+    {|
+      Movie = mypy_extensions.TypedDict('Movie', {'name': str, 'year': 'int'})
+      def foo(x: int) -> str:
+        return ""
+      def f() -> None:
+        movie: Movie
+        key = "year"
+        a = foo(movie[key])
+    |}
+    [
+      "TypedDict accessed with a non-literal [26]: TypedDict key must be a string literal; " ^
+      "expected one of ('name', 'year')."
+    ];
+
+  assert_test_typed_dictionary
+    {|
+      Movie = mypy_extensions.TypedDict('Movie', {'name': str, 'year': 'int'})
+      Film = mypy_extensions.TypedDict('Film', {'name': str, 'year': 'int', 'director': str})
+      def foo(movie: Movie) -> str:
+        return movie["name"]
+      def f() -> None:
+        movie: Film
+        a = foo(movie)
+    |}
+    [];
+
+  assert_test_typed_dictionary
+    {|
+      Movie = mypy_extensions.TypedDict('Movie', {'name': str, 'year': 'int'})
+      Actor = mypy_extensions.TypedDict('Actor', {'name': str, 'birthyear': 'int'})
+      def foo(movie: Movie) -> str:
+        return movie["name"]
+      def f() -> None:
+        actor: Actor
+        a = foo(actor)
+    |}
+    [
+      "Incompatible parameter type [6]: Expected `TypedDict `Movie` with " ^
+      "fields (name: str, year: int)` for 1st anonymous parameter to call `foo` " ^
+      "but got `TypedDict `Actor` with fields (name: str, birthyear: int)`."
+    ];
+
+  assert_test_typed_dictionary
+    {|
+      from mypy_extensions import TypedDict
+      Movie = TypedDict('Movie', {'name': str, 'year': int})
+      Cat = TypedDict('Cat', {'name': str, 'breed': str})
+      Named = TypedDict('Named', {'name': str})
+
+      def foo(x: int, a: Movie, b: Cat) -> Named:
+        if x == 7:
+            q = a
+        else:
+            q = b
+        return q
+    |}
+    [];
+
+  assert_test_typed_dictionary
+    {|
+      from mypy_extensions import TypedDict
+      Movie = TypedDict('Movie', {'name': str, 'year': int})
+      Cat = TypedDict('Cat', {'name': str, 'breed': str})
+
+      def foo(x: int, a: Movie, b: Cat) -> int:
+          if x == 7:
+              q = a
+          else:
+              q = b
+          return q["year"]
+    |}
+    [
+      "Incompatible return type [7]: Expected `int` but got `unknown`.";
+      "TypedDict accessed with a missing key [27]: TypedDict has no key `year`.";
+    ];
+
+  assert_test_typed_dictionary
+    {|
+      from typing import Mapping
+      Baz = mypy_extensions.TypedDict('Baz', {'foo': int, 'bar': str})
+      def foo(dictionary: Mapping[str, typing.Any]) -> None:
+        pass
+      def f() -> None:
+        baz: Baz
+        a = foo(baz)
+    |}
+    [];
+
+  assert_test_typed_dictionary
+    {|
+      from typing import Mapping
+      class A:
+        pass
+      class B(A):
+        pass
+      Baz = mypy_extensions.TypedDict('Baz', {'foo': A, 'bar': B})
+      def foo(dictionary: Mapping[str, A]) -> A:
+        return dictionary["foo"]
+      def f() -> None:
+        baz: Baz
+        a = foo(baz)
+    |}
+    [
+      "Incompatible parameter type [6]: " ^
+      "Expected `Mapping[str, A]` for 1st anonymous parameter to call `foo` but got " ^
+      "`TypedDict `Baz` with fields (foo: A, bar: B)`."
+    ];
+
+  assert_test_typed_dictionary
+    {|
+      from typing import Mapping
+      class A:
+        pass
+      class B(A):
+        pass
+      class C(A):
+        pass
+      Baz = mypy_extensions.TypedDict('Baz', {'foo': A, 'bar': B})
+      def foo(x: int, a: Baz, b: Mapping[str, C]) -> Mapping[str, A]:
+        if x == 7:
+            q = a
+        else:
+            q = b
+        return q
+    |}
+    [
+      "Incompatible return type [7]: Expected `Mapping[str, A]` but got `Mapping[str, typing.Any]`."
+    ];
+
+  assert_test_typed_dictionary
+    {|
+      Baz = mypy_extensions.TypedDict('Baz', {'foo': int, 'bar': int})
+      def foo(x: int, a: Baz) -> int:
+        if x == 7:
+            q = a["fou"]
+        else:
+            q = a["bar"]
+        return q
+    |}
+    [
+      "TypedDict accessed with a missing key [27]: TypedDict `Baz` has no key `fou`.";
+      "Incompatible return type [7]: Expected `int` but got `unknown`.";
+    ];
+
+  assert_test_typed_dictionary
+    {|
+      Baz = mypy_extensions.TypedDict('Baz', {'foo': int, 'bar': int})
+      def foo(x: int, a: Baz) -> int:
+        if x == 7:
+            k = "foo"
+            q = a[k]
+        else:
+            q = a["bar"]
+        return q
+    |}
+    [
+      "TypedDict accessed with a non-literal [26]: " ^
+      "TypedDict key must be a string literal; expected one of ('foo', 'bar').";
+      "Incompatible return type [7]: Expected `int` but got `unknown`.";
+    ];
+
+  assert_test_typed_dictionary
+    {|
+      Movie = mypy_extensions.TypedDict('Movie', {'name': str, 'year': int})
+      def foo() -> int:
+        movie = Movie(name='Blade Runner', year=1982)
+        return movie['year']
+    |}
+    [];
+
+  assert_test_typed_dictionary
+    {|
+      Movie = mypy_extensions.TypedDict('Movie', {'name': str, 'year': int})
+      def foo() -> int:
+        movie = Movie(year=1982, name='Blade Runner')
+        return movie['year']
+    |}
+    [];
+
+  assert_test_typed_dictionary
+    {|
+      Movie = mypy_extensions.TypedDict('Movie', {'name': str, 'year': int})
+      def foo() -> int:
+        movie = Movie(name=1982, year='Blade Runner')
+        return movie['year']
+    |}
+    ["Incompatible parameter type [6]: Expected `int` for 2nd parameter `year` to call `__init__` but got `str`."];
+
+  assert_test_typed_dictionary
+    {|
+      Movie = mypy_extensions.TypedDict('Movie', {'name': str, 'year': int})
+      def foo() -> int:
+        movie = Movie('Blade Runner', 1982)
+        return movie['year']
+    |}
+    ["Too many arguments [19]: Call `__init__` expects 3 arguments, 5 were provided."];
+
+  assert_test_typed_dictionary
+    {|
+      Movie = mypy_extensions.TypedDict('Movie', {'name': str, 'year': int})
+      def foo() -> int:
+        movie = Movie(name='Blade Runner', year=1982, extra=42)
+        return movie['year']
+    |}
+    ["Unexpected keyword [28]: Unexpected keyword argument `extra` to call `__init__`."];
+
+  assert_test_typed_dictionary
+    {|
+      Movie = mypy_extensions.TypedDict('Movie', {'name': str, 'year': 'int'})
+      def f() -> None:
+        movie: Movie
+        movie['name'] = 'new name'
+    |}
+    [];
+
+  assert_test_typed_dictionary
+    {|
+      Movie = mypy_extensions.TypedDict('Movie', {'name': str, 'year': 'int'})
+      def f() -> None:
+        movie: Movie
+        movie['name'] = 7
+    |}
+    ["Incompatible parameter type [6]: " ^
+     "Expected `str` for 2nd anonymous parameter to call `TypedDictionary.__setitem__` but got " ^
+     "`int`."];
+
+  assert_test_typed_dictionary
+    {|
+      Movie = mypy_extensions.TypedDict('Movie', {'name': str, 'year': 'int'})
+      def f() -> None:
+        movie: Movie
+        movie['nme'] = 'new name'
+    |}
+    ["TypedDict accessed with a missing key [27]: TypedDict `Movie` has no key `nme`."];
+
+  assert_test_typed_dictionary
+    {|
+      class A():
+        pass
+      class B(A):
+        pass
+      Movie = mypy_extensions.TypedDict('Movie', {'name': str, 'something': A})
+      def f() -> None:
+        movie: Movie
+        movie['something'] = B()
+    |}
+    [];
+
+  assert_test_typed_dictionary
+    {|
+      class A():
+        pass
+      class B(A):
+        pass
+      Movie = mypy_extensions.TypedDict('Movie', {'name': str, 'something': B})
+      def f() -> None:
+        movie: Movie
+        movie['something'] = A()
+    |}
+    ["Incompatible parameter type [6]: " ^
+     "Expected `B` for 2nd anonymous parameter to call `TypedDictionary.__setitem__` but got `A`."];
+
+  assert_test_typed_dictionary
+    {|
+      Movie = mypy_extensions.TypedDict('Movie', {'name': str, 'year': 'int'})
+      def f() -> None:
+        movie: Movie
+        movie['year'] += 7
+    |}
+    [];
+
+  assert_test_typed_dictionary
+    {|
+      Movie = mypy_extensions.TypedDict('Movie', {'name': str, 'year': 'int'})
+      def f() -> None:
+        movie: Movie
+        movie['name'] += 7
+    |}
+    ["Incompatible parameter type [6]: " ^
+     "Expected `int` for 1st anonymous parameter to call `int.__radd__` but got " ^
+     "`unknown`."];
+
+  assert_test_typed_dictionary
+    {|
+      from foo.bar.baz import ClassBasedTypedDictGreekLetters
+      def f() -> int:
+        baz = ClassBasedTypedDictGreekLetters(alpha = 7, beta = "a", gamma = True)
+        return baz['alpha']
+    |}
+    [];
+
+  (* TODO T37629490 Better error messages for typeddict declaration errors *)
+  assert_test_typed_dictionary
+    {|
+      NamelessTypedDict = mypy_extensions.TypedDict({'name': str, 'year': int})
+      def foo(x: int) -> str:
+        return ""
+      def f() -> None:
+        movie: NamelessTypedDict
+        a = foo(movie['year'])
+    |}
+    [
+      "Missing global annotation [5]: Globally accessible variable `NamelessTypedDict` has type " ^
+      "`Type[typing.Dict[typing.Any, typing.Any]]` but no type is specified.";
+      "Missing argument [20]: Call `mypy_extensions.TypedDict` expects argument `fields`.";
+      "Undefined type [11]: Type `NamelessTypedDict` is not defined.";
+      "Incompatible parameter type [6]: Expected `int` for 1st anonymous parameter to call `foo` " ^
+      "but got `unknown`.";
+    ]
+
+
+let test_check_getattr _ =
+  let assert_test_getattr source =
+    let getattr_stub =
+      {
+        qualifier = Access.create "has_getattr";
+        handle = "has_getattr.pyi";
+        source =
+          {|
+            from typing import Any
+            def __getattr__(name: str) -> Any: ...
+          |};
+      }
+    in
+    let getattr_stub_str =
+      {
+        qualifier = Access.create "has_getattr_str";
+        handle = "has_getattr_str.pyi";
+        source =
+          {|
+            def __getattr__(name: str) -> str: ...
+          |};
+      }
+    in
+    let getattr_stub_untyped =
+      {
+        qualifier = Access.create "has_getattr_untyped";
+        handle = "has_getattr_untyped.pyi";
+        source =
+          {|
+            def __getattr__(name): ...
+          |};
+      }
+    in
+    let getattr_stub_invalid_arity =
+      {
+        qualifier = Access.create "has_getattr_invalid_arity";
+        handle = "has_getattr_invalid_arity.pyi";
+        source =
+          {|
+            def __getattr__(x: int, y: str) -> str: ...
+          |};
+      }
+    in
+    let getattr_stub_not_callable =
+      {
+        qualifier = Access.create "has_getattr_not_callable";
+        handle = "has_getattr_not_callable.pyi";
+        source =
+          {|
+            __getattr__ = 3
+          |};
+      }
+    in
+    assert_type_errors
+      ~update_environment_with:[
+        getattr_stub;
+        getattr_stub_str;
+        getattr_stub_untyped;
+        getattr_stub_invalid_arity;
+        getattr_stub_not_callable;
+      ]
+      source
+  in
+  assert_test_getattr
+    {|
+      import has_getattr
+      def foo() -> None:
+        has_getattr.any_attribute
+    |}
+    [];
+  assert_test_getattr
+    {|
+      import has_getattr_str
+      def foo() -> str:
+        return has_getattr_str.any_attribute
+    |}
+    [];
+  assert_test_getattr
+    {|
+      import has_getattr_untyped
+      def foo() -> None:
+        has_getattr_untyped.any_attribute
+    |}
+    [];
+  assert_test_getattr
+    {|
+      from has_getattr import any_attribute
+      def foo() -> None:
+        any_attribute
+    |}
+    [];
+  assert_test_getattr
+    {|
+      from has_getattr_str import any_attribute
+      def foo() -> str:
+        return any_attribute
+    |}
+    [];
+  assert_test_getattr
+    {|
+      import has_getattr_invalid_arity
+      def foo() -> None:
+         has_getattr_invalid_arity.any_attribute
+    |}
+    [
+      "Undefined attribute [16]: Module `has_getattr_invalid_arity` " ^
+      "has no attribute `any_attribute`."
+    ];
+  assert_test_getattr
+    {|
+      import has_getattr_not_callable
+      def foo() -> None:
+         has_getattr_not_callable.any_attribute
+    |}
+    [
+      "Undefined attribute [16]: Module `has_getattr_not_callable` " ^
+      "has no attribute `any_attribute`."
+    ]
+
+
+let test_check_literal_variance _ =
+  (* We special case literal lists and dicts for convenience, as they can never escape scope. *)
+  assert_type_errors
+    {|
+      x: typing.List[float] = []
+      x = [1]
+    |}
+    [];
+  assert_type_errors
+    {|
+      x: typing.List[float] = []
+      x = [y for y in [1,2,3,4]]
+    |}
+    [];
+  (* Mutable default arguments may escape scope, and we shouldn't allow subtyping. *)
+  assert_type_errors
+    {|
+      def foo(x: typing.List[float] = [1]) -> typing.List[float]:
+        return x
+    |}
+    [
+      "Incompatible variable type [9]: x is declared to have type `typing.List[float]` but is " ^
+      "used as type `typing.List[int]`.";
+    ];
+  assert_type_errors
+    {|
+      x: typing.List[float] = []
+      y: typing.List[int] = [1]
+      x = y
+    |}
+    [
+      "Incompatible variable type [9]: x is declared to have type `typing.List[float]` but is " ^
+      "used as type `typing.List[int]`.";
+    ];
+  assert_type_errors
+    {|
+      x: typing.Dict[str, float] = {}
+      x = { "s": 1 }
+    |}
+    [];
+  assert_type_errors
+    {|
+      x: typing.Dict[str, float] = {}
+      x = { "s": value for value in [1,2,3] }
+    |}
+    [];
+  assert_type_errors
+    {|
+      x: typing.Dict[str, float] = {}
+      x = { "s": "" }
+    |}
+    [
+      "Incompatible variable type [9]: x is declared to have type `typing.Dict[str, float]` but " ^
+      "is used as type `typing.Dict[str, str]`.";
+    ];
+  assert_type_errors
+    {|
+      x: typing.Dict[str, float] = { "s": 1 }
+      y: typing.Dict[str, int] = { "s": 1 }
+      x = y
+    |}
+    [
+      "Incompatible variable type [9]: x is declared to have type `typing.Dict[str, float]` but " ^
+      "is used as type `typing.Dict[str, int]`.";
+    ];
+
+  (* Returns. *)
+  assert_type_errors
+    {|
+      def foo() -> typing.List[float]:
+        return [1]
+    |}
+    [];
+  assert_type_errors
+    {|
+      def foo() -> typing.List[float]:
+        a = [1]
+        return a
+    |}
+    ["Incompatible return type [7]: Expected `typing.List[float]` but got `typing.List[int]`."];
+  assert_type_errors
+    {|
+      def foo() -> typing.Dict[float, float]:
+        return {1: 1}
+    |}
+    [];
+  assert_type_errors
+    {|
+      def foo() -> typing.Dict[float, float]:
+        a = {1: 1}
+        return a
+    |}
+    [
+      "Incompatible return type [7]: Expected `typing.Dict[float, float]` but got \
+       `typing.Dict[int, int]`.";
+    ];
+  assert_type_errors
+    {|
+      def foo() -> typing.Set[float]:
+        return {1}
+    |}
+    [];
+  assert_type_errors
+    {|
+      def foo() -> typing.Set[float]:
+        return {x for x in [1,2,3]}
+    |}
+    [];
+  assert_type_errors
+    {|
+      def foo() -> typing.Set[float]:
+        a = {1}
+        return a
+    |}
+    ["Incompatible return type [7]: Expected `typing.Set[float]` but got `typing.Set[int]`."]
+
 
 
 let () =
@@ -6164,6 +8581,7 @@ let () =
     "check_coverage">::test_check_coverage;
     "check_comprehensions">::test_check_comprehensions;
     "check_optional">::test_check_optional;
+    "check_function_overloads">::test_check_function_overloads;
     "check_function_parameters">::test_check_function_parameters;
     "check_function_parameters_with_backups">::test_check_function_parameters_with_backups;
     "check_function_parameter_errors">::test_check_function_parameter_errors;
@@ -6181,12 +8599,15 @@ let () =
     "check_immutables">::test_check_immutables;
     "check_imports">::test_check_imports;
     "check_named_arguments">::test_check_named_arguments;
+    "check_missing_parameter">::test_check_missing_parameter;
     "check_missing_return">::test_check_missing_return;
+    "check_missing_attribute">::test_check_missing_attribute;
     "check_yield">::test_check_yield;
     "check_ternary">::test_check_ternary;
     "check_union">::test_check_union;
     "check_return_joining">::test_check_return_joining;
     "check_nested">::test_check_nested;
+    "check_unbounded_variables">::test_check_unbounded_variables;
     "check_variable_restrictions">::test_check_variable_restrictions;
     "check_variable_bindings">::test_check_variable_bindings;
     "check_refinement">::test_check_refinement;
@@ -6208,9 +8629,14 @@ let () =
     "check_callables">::test_check_callables;
     "check_assert_functions">::test_check_assert_functions;
     "check_undefined_type">::test_check_undefined_type;
+    "check_analysis_failure">::test_check_analysis_failure;
+    "check_missing_type_parameters">::test_check_missing_type_parameters;
     "environment">::test_environment;
     "scheduling">::test_scheduling;
     "check_format_string">::test_format_string;
     "check_dataclass">::test_check_data_class;
+    "check_getattr">::test_check_getattr;
+    "check_typed_dictionarys">::test_check_typed_dictionaries;
+    "check_literal_variance">::test_check_literal_variance;
   ]
-  |> run_test_tt_main
+  |> Test.run

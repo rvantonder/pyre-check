@@ -21,11 +21,11 @@ class Initialize(Command):
     NAME = "initialize"
 
     def __init__(self, arguments, configuration, analysis_directory) -> None:
-        self._local: bool = arguments.local
+        self._local = arguments.local  # type: bool
         super(Initialize, self).__init__(arguments, configuration, analysis_directory)
 
     def _get_configuration(self) -> Dict[str, Any]:
-        configuration: Dict[str, Any] = {}
+        configuration = {}  # type: Dict[str, Any]
 
         watchman_configuration_path = os.path.abspath(".watchmanconfig")
         if shutil.which("watchman") is not None and log.get_yes_no_input(
@@ -68,7 +68,7 @@ class Initialize(Command):
             "Which directory should pyre be initialized in?", "."
         )
 
-        configuration["analysis_directories"] = [analysis_directory]
+        configuration["source_directories"] = [analysis_directory]
         return configuration
 
     def _get_local_configuration(self) -> Dict[str, Any]:

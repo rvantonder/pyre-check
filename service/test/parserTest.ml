@@ -11,11 +11,12 @@ open Ast
 open Expression
 
 open Pyre
+open Path.AppendOperator
 
 
 let test_parse_stubs_modules_list _ =
   let root = Path.current_working_directory () in
-  let configuration = Configuration.create ~local_root:root () in
+  let configuration = Configuration.Analysis.create ~local_root:root () in
   let files =
     let create_stub_with_relative relative =
       File.create ~content:"def f()->int: ...\n" (Path.create_relative ~root ~relative)
@@ -34,9 +35,9 @@ let test_parse_stubs_modules_list _ =
       create_module_with_relative "2and3/modd.py";
     ]
   in
-  let handles =
+  let { Service.Parser.parsed = handles; _ } =
     Service.Parser.parse_sources
-      ~configuration:(Configuration.create ())
+      ~configuration:(Configuration.Analysis.create ())
       ~scheduler:(Scheduler.mock ())
       ~files
   in
@@ -90,6 +91,8 @@ let test_find_stubs context =
   let handles =
     let local_root = Path.create_absolute (bracket_tmpdir context) in
     let module_root = Path.create_absolute (bracket_tmpdir context) in
+    let virtual_root = Path.create_absolute (bracket_tmpdir context) in
+    Sys_utils.mkdir_no_fail (Path.absolute virtual_root ^ "/package");
     let write_file root relative =
       File.create ~content:"def foo() -> int: ..." (Path.create_relative ~root ~relative)
       |> File.write
@@ -99,18 +102,37 @@ let test_find_stubs context =
     write_file module_root "a.pyi";
     write_file module_root "b.pyi";
     write_file module_root "c.py";
+
     write_file local_root "ttypes.py";
     write_file local_root "ttypes.pyi";
+    write_file local_root "dir/legit.pyi";
+    write_file local_root "excluded.pyi";
+    write_file local_root "nested/excluded.pyi";
 
+    write_file (virtual_root ^| "package") "virtual.py";
+    write_file (virtual_root ^| "external") "other.py";
+
+    let configuration =
+      Configuration.Analysis.create
+        ~local_root
+        ~excludes:["this/matches/nothing"; ".*/dir"; ".*/excluded.pyi"]
+        ~search_path:[
+          Path.SearchPath.Root module_root;
+          Path.SearchPath.Subdirectory { root = virtual_root; subdirectory = "package" };
+        ]
+        ()
+    in
     Service.Parser.find_stubs
-      ~configuration:(Configuration.create ~local_root ~search_path:[module_root] ())
-    |> List.filter_map ~f:Path.relative
+      ~configuration
+    |> List.map ~f:File.create
+    |> List.map ~f:(File.handle ~configuration)
+    |> List.map ~f:File.Handle.show
     |> List.sort ~compare:String.compare
   in
   assert_equal
     ~cmp:(List.equal ~equal:String.equal)
     ~printer:(String.concat ~sep:", ")
-    ["a.pyi"; "b.pyi"; "c.py"; "ttypes.pyi"]
+    ["a.pyi"; "b.pyi"; "c.py"; "package/virtual.py"; "ttypes.pyi"]
     handles
 
 
@@ -122,14 +144,14 @@ let test_parse_typeshed context =
       File.create ~content:"def foo() -> int: ..." (Path.create_relative ~root ~relative)
       |> File.write
     in
-    write_file typeshed_root "folder/a.pyi";
-    write_file typeshed_root "valid/b.pyi";
-    write_file typeshed_root "test/c.pyi";
+    write_file typeshed_root "stdlib/a.pyi";
+    write_file typeshed_root "stdlib/b.pyi";
+    write_file typeshed_root "third_party/c.pyi";
     write_file typeshed_root "tests/d.pyi";
     write_file typeshed_root ".skipme/e.pyi";
 
     Service.Parser.find_stubs
-      ~configuration:(Configuration.create ~local_root ~typeshed:typeshed_root ())
+      ~configuration:(Configuration.Analysis.create ~local_root ~typeshed:typeshed_root ())
     |> List.filter_map ~f:Path.relative
     |> List.sort ~compare:String.compare
   in
@@ -142,15 +164,16 @@ let test_parse_typeshed context =
 
 let test_parse_source _ =
   let root = Path.current_working_directory () in
-  let configuration = Configuration.create ~local_root:root () in
+  let configuration = Configuration.Analysis.create ~local_root:root () in
   let file =
     File.create
       ~content:"def foo()->int:\n    return 1\n"
       (Path.create_relative ~root ~relative:"a.py")
   in
-  let handles =
+  let { Service.Parser.parsed = handles; _ } =
     Service.Parser.parse_sources
-      ~configuration:(Configuration.create ~local_root:(Path.current_working_directory ()) ())
+      ~configuration:(
+        Configuration.Analysis.create ~local_root:(Path.current_working_directory ()) ())
       ~scheduler:(Scheduler.mock ())
       ~files:[file]
   in
@@ -196,6 +219,7 @@ let test_parse_sources context =
     write_file local_root "b.py";
 
     write_file local_root "c.py";
+    write_file local_root ".pyre/resource_cache/typeshed/ignoreme.py";
 
     write_file link_root "link.py";
     write_file link_root "seemingly_unrelated.pyi";
@@ -207,7 +231,12 @@ let test_parse_sources context =
       ~src:((Path.absolute link_root) ^/ "seemingly_unrelated.pyi")
       ~dst:((Path.absolute local_root) ^/ "d.pyi");
 
-    let configuration = Configuration.create ~local_root ~search_path:[module_root] () in
+    let configuration =
+      Configuration.Analysis.create
+        ~local_root
+        ~search_path:[Path.SearchPath.Root module_root]
+        ()
+    in
     let { Service.Parser.stubs; sources } = Service.Parser.parse_all scheduler ~configuration in
     let stubs =
       stubs
@@ -234,8 +263,12 @@ let test_parse_sources context =
   let local_root = Path.create_absolute (bracket_tmpdir context) in
   let stub_root = Path.create_relative ~root:local_root ~relative:"stubs" in
   let stub_handles, source_handles =
-    let configuration = Configuration.create ~local_root ~search_path:[stub_root] () in
-
+    let configuration =
+      Configuration.Analysis.create
+        ~local_root
+        ~search_path:[Path.SearchPath.Root stub_root]
+        ()
+    in
     let write_file root relative =
       File.create ~content:"def foo() -> int: ..." (Path.create_relative ~root ~relative)
       |> File.write
@@ -250,19 +283,10 @@ let test_parse_sources context =
   (* Note that the stub gets parsed twice due to appearing both in the local root and stubs, but
      consistently gets mapped to the correct handle. *)
   assert_equal
+    ~printer:(List.to_string ~f:File.Handle.show)
     stub_handles
-    [File.Handle.create "stub.pyi"; File.Handle.create "stub.pyi"];
+    [File.Handle.create "stub.pyi"];
   assert_equal source_handles [File.Handle.create "a.py"];
-
-  let assert_handle_path ~handle ~path =
-    let handle = File.Handle.create handle in
-    let { Source.path = actual; _ } = Option.value_exn (Ast.SharedMemory.Sources.get handle) in
-    assert_equal ~cmp:(Option.equal Path.equal) (Some path) actual
-  in
-  assert_handle_path
-    ~handle:"stub.pyi"
-    ~path:(Path.create_relative ~root:stub_root ~relative:"stub.pyi");
-  assert_handle_path ~handle:"a.py" ~path:(Path.create_relative ~root:local_root ~relative:"a.py");
   begin
     match Ast.SharedMemory.Sources.get (File.Handle.create "c.py") with
     | Some { Source.hash; _ } ->
@@ -273,7 +297,9 @@ let test_parse_sources context =
 
 
 let test_register_modules _ =
-  let configuration = Configuration.create ~local_root:(Path.current_working_directory ()) () in
+  let configuration =
+    Configuration.Analysis.create ~local_root:(Path.current_working_directory ()) ()
+  in
   let assert_module_exports raw_source expected_exports =
     let get_qualifier file =
       File.handle ~configuration file
@@ -285,16 +311,26 @@ let test_register_modules _ =
         ~content:(trim_extra_indentation raw_source)
         (Path.create_relative ~root:(Path.current_working_directory ()) ~relative:"a.py")
     in
+    (* Use a "canary" to inspect the exports of a.py between its
+       module parsing stage and source parsing stage. *)
+    let import_non_toplevel =
+      File.create
+        ~content:"from .a import *"
+        (Path.create_relative ~root:(Path.current_working_directory ()) ~relative:"canary.py")
+    in
+    let files = [file; import_non_toplevel] in
 
     (* Build environment. *)
-    Ast.SharedMemory.Modules.remove ~qualifiers:(List.filter_map ~f:get_qualifier [file]);
-    Ast.SharedMemory.Sources.remove ~handles:(List.map ~f:(File.handle ~configuration) [file]);
-    let configuration = Configuration.create ~local_root:(Path.current_working_directory ()) () in
-    let sources =
+    Ast.SharedMemory.Modules.remove ~qualifiers:(List.filter_map ~f:get_qualifier files);
+    Ast.SharedMemory.Sources.remove ~handles:(List.map ~f:(File.handle ~configuration) files);
+    let configuration =
+      Configuration.Analysis.create ~local_root:(Path.current_working_directory ()) ()
+    in
+    let { Service.Parser.parsed = sources; _ } =
       Service.Parser.parse_sources
         ~configuration
         ~scheduler:(Scheduler.mock ())
-        ~files:[file]
+        ~files
     in
     (* Check specific file. *)
     let qualifier = Option.value_exn (get_qualifier file) in
@@ -303,13 +339,18 @@ let test_register_modules _ =
     Service.Environment.populate_shared_memory ~configuration ~stubs:[] ~sources;
     assert_is_some (Ast.SharedMemory.Modules.get ~qualifier);
 
-    assert_equal
-      ~cmp:(List.equal ~equal:Access.equal)
-      ~printer:(fun expression_list ->
-          List.map ~f:(Access.show) expression_list
-          |> String.concat ~sep:", ")
-      (List.map ~f:Access.create expected_exports)
-      (Option.value_exn (Ast.SharedMemory.Modules.get_exports ~qualifier))
+    let assert_exports ~qualifier =
+      assert_equal
+        ~cmp:(List.equal ~equal:Access.equal)
+        ~printer:(fun expression_list ->
+            List.map ~f:(Access.show) expression_list
+            |> String.concat ~sep:", ")
+        (List.map ~f:Access.create expected_exports)
+        (Option.value_exn (Ast.SharedMemory.Modules.get_exports ~qualifier))
+    in
+
+    assert_exports ~qualifier;
+    assert_exports ~qualifier:(Option.value_exn (get_qualifier import_non_toplevel))
   in
   assert_module_exports
     {|
@@ -343,7 +384,15 @@ let test_register_modules _ =
       from x import y as z
       def fuzz() -> int: pass
     |}
-    ["b"]
+    ["b"];
+  assert_module_exports
+    {|
+      if sys.version_info >= (3, 7):
+        def foo() -> int: pass
+      if sys.platform != "win32":
+        def fooz() -> int: pass
+    |}
+    ["foo"; "fooz"]
 
 
 let () =
@@ -355,4 +404,4 @@ let () =
     "parse_sources">::test_parse_sources;
     "register_modules">::test_register_modules;
   ]
-  |> run_test_tt_main
+  |> Test.run

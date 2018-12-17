@@ -6,7 +6,6 @@
 import errno
 import fcntl
 import functools
-import json
 import logging
 import os
 import shutil
@@ -23,11 +22,15 @@ LOG = logging.getLogger(__name__)
 
 
 class AnalysisDirectory:
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, filter_paths: Optional[List[str]] = None) -> None:
         self._path = path
+        self._filter_paths = filter_paths
 
     def get_root(self) -> str:
         return self._path
+
+    def get_filter_root(self) -> List[str]:
+        return self._filter_paths or [self.get_root()]
 
     def prepare(self) -> None:
         pass
@@ -36,12 +39,14 @@ class AnalysisDirectory:
 class SharedAnalysisDirectory(AnalysisDirectory):
     def __init__(
         self,
-        analysis_directories,
-        local_root: Optional[str] = None,
+        source_directories,
+        filter_paths: Optional[List[str]] = None,
+        local_configuration_root: Optional[str] = None,
         isolate: bool = False,
     ):
-        self._analysis_directories = set(analysis_directories)
-        self._local_root = local_root
+        self._source_directories = set(source_directories)
+        self._filter_paths = filter_paths
+        self._local_configuration_root = local_configuration_root
         self._isolate = isolate
 
     def get_scratch_directory(self) -> str:
@@ -56,7 +61,7 @@ class SharedAnalysisDirectory(AnalysisDirectory):
 
     @functools.lru_cache(1)
     def get_root(self) -> str:
-        path_to_root = self._local_root or "shared_analysis_directory"
+        path_to_root = self._local_configuration_root or "shared_analysis_directory"
         suffix = "_{}".format(str(os.getpid())) if self._isolate else ""
         return os.path.join(
             self.get_scratch_directory(), "{}{}".format(path_to_root, suffix)
@@ -100,8 +105,8 @@ class SharedAnalysisDirectory(AnalysisDirectory):
         root = self.get_root()
 
         all_paths = {}
-        for analysis_directory in self._analysis_directories:
-            self._merge_analysis_directory(analysis_directory, all_paths)
+        for source_directory in self._source_directories:
+            self._merge_into_paths(source_directory, all_paths)
         for relative, original in all_paths.items():
             merged = os.path.join(root, relative)
             directory = os.path.dirname(merged)
@@ -119,12 +124,12 @@ class SharedAnalysisDirectory(AnalysisDirectory):
                     LOG.error(str(error))
 
     # Exposed for testing.
-    def _merge_analysis_directory(
-        self, analysis_directory: str, all_paths: Dict[str, str]
+    def _merge_into_paths(
+        self, source_directory: str, all_paths: Dict[str, str]
     ) -> None:
-        paths = _find_python_paths(root=analysis_directory)
+        paths = _find_python_paths(root=source_directory)
         for path in paths:
-            relative = os.path.relpath(path, analysis_directory)
+            relative = os.path.relpath(path, source_directory)
             if not path:
                 continue
             # don't bother stat'ing paths that are already in the analysis directory.
@@ -179,7 +184,7 @@ def _find_python_paths(root: str) -> List[str]:
         return output.split("\n")
     except subprocess.CalledProcessError:
         raise EnvironmentException(
-            "pyre was unable to locate a analysis directory. "
+            "Pyre was unable to locate an analysis directory. "
             "Ensure that your project is built and re-run pyre."
         )
 
@@ -223,8 +228,10 @@ def acquire_lock(path: str, blocking: bool) -> Generator[Optional[int], None, No
 class Filesystem:
     def list(self, root: str, pattern: str) -> List[str]:
         return (
-            subprocess.check_output(["find", root, "-name", "*{}".format(pattern)])
-            .decode("utf-8")
+            subprocess.run(
+                ["find", root, "-name", "*{}".format(pattern)], stdout=subprocess.PIPE
+            )
+            .stdout.decode("utf-8")
             .split()
         )
 
@@ -233,23 +240,14 @@ class MercurialBackedFilesystem(Filesystem):
     def list(self, root: str, pattern: str) -> List[str]:
         try:
             return (
-                subprocess.check_output(
+                subprocess.run(
                     ["hg", "files", "--include", "**{}".format(pattern)],
+                    stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
                 )
-                .decode("utf-8")
+                .stdout.decode("utf-8")
                 .split()
             )
-        except subprocess.CalledProcessError as exception:
-            if exception.returncode == 1:
-                # hg files exits with 1 when no matches were found.
-                return []
-            else:
-                raise EnvironmentException(
-                    "Unexpected return code {} from call to `hg files`.".format(
-                        exception.returncode
-                    )
-                )
         except FileNotFoundError:
             raise EnvironmentException("hg executable not found.")
 

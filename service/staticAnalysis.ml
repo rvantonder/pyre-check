@@ -7,78 +7,75 @@ open Core
 
 open Analysis
 open Ast
+open Interprocedural
 open Statement
 open Pyre
 
 
-let overrides_of_source ~environment ~source =
-  let open Annotated in
-  let resolution = Environment.resolution environment () in
-  let filter_overrides child_method =
-    Method.overrides child_method ~resolution
-    >>| fun ancestor_method -> (Method.name ancestor_method, Method.name child_method)
-  in
-  let record_overrides map (ancestor_method, child_method) =
-    let update_children = function
-      | Some children -> child_method :: children
-      | None -> [child_method]
-    in
-    Statement.Access.Map.update map ancestor_method ~f:update_children
-  in
-  Preprocessing.classes source
-  |> List.concat_map ~f:(Fn.compose Class.methods Class.create)
-  |> List.filter_map ~f:filter_overrides
-  |> List.fold ~init:Statement.Access.Map.empty ~f:record_overrides
-
-
-let record_and_merge_call_graph ~environment ~call_graph ~path ~source =
-  let record_and_merge_call_graph path map call_graph =
-    CallGraphSharedMemory.add_callers ~path (Access.Map.keys call_graph);
-    let add_call_graph ~key:caller ~data:callees =
-      CallGraphSharedMemory.add_call_edges ~caller ~callees
-    in
-    Access.Map.iteri call_graph ~f:add_call_graph;
+let record_and_merge_call_graph ~environment ~call_graph ~path:_ ~source =
+  let record_and_merge_call_graph map call_graph =
     Map.merge_skewed map call_graph ~combine:(fun ~key:_ left _ -> left)
   in
-  Analysis.CallGraph.create ~environment ~source
-  |> record_and_merge_call_graph path call_graph
+  DependencyGraph.create_callgraph ~environment ~source
+  |> record_and_merge_call_graph call_graph
 
 
-let record_overrides ~environment ~source =
-  let record_overrides overrides_map =
-    let record_override_edge ~key:ancestor ~data:children =
-      CallGraphSharedMemory.add_overrides ~ancestor ~children
-    in
-    Access.Map.iteri overrides_map ~f:record_override_edge
+let record_overrides overrides =
+  let record_override_edge ~key:member ~data:subtypes =
+    DependencyGraphSharedMemory.add_overriding_types ~member ~subtypes
   in
-  overrides_of_source ~environment ~source
-  |> record_overrides
+  Access.Map.iteri overrides ~f:record_override_edge
 
 
 let record_path_of_definitions ~path ~source =
-  let defines = Preprocessing.defines source in
-  let record_definition definition =
-    let open Interprocedural.Callable in
-    add_definition (make definition) path
+  let defines = Preprocessing.defines ~include_stubs:true source in
+  let record_classes { Node.value = class_node; _ } =
+    Callable.add_class_definition class_node.Class.name path
   in
-  List.iter ~f:record_definition defines;
-  defines
+  let record_toplevel_definition definition =
+    let name = definition.Node.value.Define.name in
+    match definition.Node.value.Define.parent with
+    | None ->
+        (* Only record top-level definitions. *)
+        let () = Callable.add_function_definition name path in
+        Callable.create_function name, definition
+    | Some _ ->
+        Callable.create_method name, definition
+  in
+  List.iter ~f:record_classes (Preprocessing.classes source);
+  List.map ~f:record_toplevel_definition defines
 
 
-let add_models ~model_source =
+let add_models ~environment ~model_source =
   let open Taint in
   let open Interprocedural in
-  let add_model_to_memory Model.{ call_target; model } =
-    Log.info "Adding taint model %S to shared memory" (Callable.target_name call_target);
+  let add_model_to_memory Model.{ call_target; model; _ } =
+    Log.info "Adding taint model %S to shared memory" (Callable.external_target_name call_target);
     Result.empty_model
     |> Result.with_model Taint.Result.kind model
-    |> Fixpoint.add_predefined call_target
+    |> Fixpoint.add_predefined Fixpoint.Epoch.predefined call_target
   in
-  let models = Model.create ~model_source |> Or_error.ok_exn in
+  let models =
+    Model.create
+      ~resolution:(TypeCheck.resolution environment ())
+      ~model_source
+      ()
+    |> Or_error.ok_exn
+  in
   List.iter models ~f:add_model_to_memory
 
 
-let analyze ?taint_models_directory ~scheduler ~configuration ~environment ~handles:paths () =
+let analyze
+    ?taint_models_directory
+    ~scheduler
+    ~configuration:({
+        Configuration.StaticAnalysis.configuration;
+        dump_call_graph;
+        _;
+      } as analysis_configuration)
+    ~environment
+    ~handles:paths
+    () =
   (* Add models *)
   let () =
     match taint_models_directory with
@@ -94,12 +91,13 @@ let analyze ?taint_models_directory ~scheduler ~configuration ~environment ~hand
           Path.create_absolute path
           |> File.create
           |> File.content
-          >>| (fun model_source -> add_models ~model_source)
+          >>| (fun model_source -> add_models ~environment ~model_source)
           |> ignore
         in
         let directory = Path.absolute directory in
         Sys.readdir directory
         |> Array.to_list
+        |> List.filter ~f:(String.is_suffix ~suffix:".pysa")
         |> List.map ~f:((^/) directory)
         |> List.iter ~f:add_models
     | None -> ()
@@ -107,67 +105,162 @@ let analyze ?taint_models_directory ~scheduler ~configuration ~environment ~hand
 
   Log.info "Recording overrides...";
   let timer = Timer.start () in
-  let record_overrides path =
-    Ast.SharedMemory.Sources.get path
-    >>| (fun source -> record_overrides ~environment ~source)
-    |> ignore
-  in
-  List.iter paths ~f:record_overrides;
-  Statistics.performance ~name:"Overrides recorded" ~timer ();
-
-  Log.info "Building call graph...";
-  let timer = Timer.start () in
-  let call_graph =
-    let build_call_graph map path =
+  let overrides =
+    let combine ~key:_ left right =
+      List.rev_append left right
+    in
+    let build_overrides overrides path =
       try
-        Ast.SharedMemory.Sources.get path
-        >>| (fun source -> record_and_merge_call_graph ~environment ~call_graph:map ~path ~source)
-        |> Option.value ~default:map
+        match Ast.SharedMemory.Sources.get path with
+        | None -> overrides
+        | Some source ->
+            let new_overrides = DependencyGraph.create_overrides ~environment ~source in
+            record_overrides new_overrides;
+            Map.merge_skewed overrides new_overrides ~combine
       with TypeOrder.Untracked untracked_type ->
-        Log.info "Error building call graph in path %a for untracked type %a"
+        Log.info
+          "Error building overrides in path %a for untracked type %a"
           File.Handle.pp path
           Type.pp untracked_type;
-        map
+        overrides
     in
     Scheduler.map_reduce
       scheduler
       ~configuration
-      ~initial:Access.Map.empty
-      ~map:(fun _ paths -> List.fold paths ~init:Access.Map.empty ~f:build_call_graph)
+      ~initial:DependencyGraph.empty_overrides
+      ~map:(fun _ paths -> List.fold paths ~init:DependencyGraph.empty_overrides ~f:build_overrides)
+      ~reduce:(Map.merge_skewed ~combine)
+      ~inputs:paths
+      ()
+  in
+  Statistics.performance ~name:"Overrides recorded" ~timer ();
+
+  Log.info "Building call graph...";
+  let timer = Timer.start () in
+  let callgraph =
+    let build_call_graph call_graph path =
+      try
+        Ast.SharedMemory.Sources.get path
+        >>| (fun source -> record_and_merge_call_graph ~environment ~call_graph ~path ~source)
+        |> Option.value ~default:call_graph
+      with TypeOrder.Untracked untracked_type ->
+        Log.info "Error building call graph in path %a for untracked type %a"
+          File.Handle.pp path
+          Type.pp untracked_type;
+        call_graph
+    in
+    Scheduler.map_reduce
+      scheduler
+      ~configuration
+      ~initial:Callable.RealMap.empty
+      ~map:(fun _ paths -> List.fold paths ~init:Callable.RealMap.empty ~f:build_call_graph)
       ~reduce:(Map.merge_skewed ~combine:(fun ~key:_ left _ -> left))
       ~inputs:paths
       ()
   in
   Statistics.performance ~name:"Call graph built" ~timer ();
-  Log.info "Call graph edges: %d" (Access.Map.length call_graph);
 
-  let caller_map = CallGraph.reverse call_graph in
+  Log.info "Call graph edges: %d" (Callable.RealMap.length callgraph);
+  if dump_call_graph then
+    DependencyGraph.from_callgraph callgraph
+    |> DependencyGraph.dump ~configuration;
 
-  let all_callables =
-    let make_callables path =
-      Ast.SharedMemory.Sources.get path
-      >>| fun source ->
-      record_path_of_definitions ~path ~source
-      |> List.map ~f:Interprocedural.Callable.make
+  let callables, stubs =
+    let classify_source (callables, stubs) (callable, define) =
+      if Define.is_stub define.Node.value then
+        callables, callable :: stubs
+      else
+        callable :: callables, stubs
     in
-    List.filter_map paths ~f:make_callables
-    |> List.concat
+    let make_callables result path =
+      Ast.SharedMemory.Sources.get path
+      >>|
+      (fun source ->
+         record_path_of_definitions ~path ~source
+         |> List.fold ~f:classify_source ~init:result)
+      |> Option.value ~default:result
+    in
+    List.fold paths ~f:make_callables ~init:([], [])
   in
-
+  let real_callables =
+    let skipped_definitions = ref 0 in
+    let record_initial_inferred_model callable =
+      let open Interprocedural in
+      if Fixpoint.get_meta_data callable <> None then
+        (Int.incr skipped_definitions; None)
+      else
+        let () = Fixpoint.add_predefined Fixpoint.Epoch.initial callable Result.empty_model in
+        Some callable
+    in
+    let result = List.filter_map callables ~f:record_initial_inferred_model in
+    let () =
+      Log.info
+        "Skipping %d source definitions due to initial models or duplicates."
+        !skipped_definitions
+    in
+    result
+  in
+  let () =
+    let obscure_stubs = ref 0 in
+    let record_obscure_stub_model callable =
+      let open Interprocedural in
+      if Fixpoint.get_meta_data callable = None then begin
+        Int.incr obscure_stubs;
+        Fixpoint.add_predefined Fixpoint.Epoch.predefined callable Result.obscure_model
+      end
+    in
+    List.iter stubs ~f:record_obscure_stub_model;
+    Log.info
+      "Added %d obscure models for stubs without source definition."
+      !obscure_stubs
+  in
   let analyses = [Taint.Analysis.abstract_kind] in
-
-  Log.info "Analysis fixpoint started...";
+  let override_dependencies = DependencyGraph.from_overrides overrides in
+  let dependencies =
+    DependencyGraph.from_callgraph callgraph
+    |> DependencyGraph.union override_dependencies
+    |> DependencyGraph.reverse
+  in
+  let override_targets = (Callable.Map.keys override_dependencies :> Callable.t list) in
+  let () =
+    let add_predefined callable =
+      Fixpoint.add_predefined Fixpoint.Epoch.initial callable Result.empty_model
+    in
+    List.iter override_targets ~f:add_predefined
+  in
+  let all_callables = List.rev_append override_targets real_callables in
+  Log.info
+    "Analysis fixpoint started for %d overrides %d functions..."
+    (List.length override_targets)
+    (List.length real_callables);
   let timer = Timer.start () in
-  let iterations =
-    Interprocedural.Analysis.compute_fixpoint
-      ~configuration
-      ~scheduler
+  let () =
+    try
+      let iterations =
+        Interprocedural.Analysis.compute_fixpoint
+          ~configuration
+          ~scheduler
+          ~environment
+          ~analyses
+          ~dependencies
+          ~all_callables
+          Interprocedural.Fixpoint.Epoch.initial
+      in
+      Log.info "Fixpoint iterations: %d" iterations;
+    with
+      exn ->
+        Interprocedural.Analysis.save_results
+          ~configuration:analysis_configuration
+          ~analyses
+          all_callables;
+        raise exn
+  in
+  let () =
+    Interprocedural.Analysis.save_results
+      ~configuration:analysis_configuration
       ~analyses
-      ~caller_map
-      ~all_callables
-      Interprocedural.Fixpoint.Epoch.initial
+      all_callables
   in
   let errors = Interprocedural.Analysis.extract_errors scheduler ~configuration all_callables in
   Statistics.performance ~name:"Analysis fixpoint complete" ~timer ();
-  Log.info "Fixpoint iterations: %d" iterations;
   errors

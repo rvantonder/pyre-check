@@ -40,7 +40,7 @@ class ReportingTest(unittest.TestCase):
             create_error.assert_has_calls([call(False, False)])
             create_error.reset_mock()
 
-        arguments.target = ["//f/g:target"]
+        arguments.targets = ["//f/g:target"]
         configuration.targets = []
         handler = commands.Reporting(
             arguments, configuration, AnalysisDirectory("/test/f/g")
@@ -50,8 +50,8 @@ class ReportingTest(unittest.TestCase):
             create_error.assert_has_calls([call(False, False)])
             create_error.reset_mock()
 
-        arguments.target = []
-        configuration.do_not_check = ["auto/gen"]
+        arguments.targets = []
+        configuration.ignore_all_errors = ["/test/auto/gen"]
         handler = commands.Reporting(
             arguments, configuration, AnalysisDirectory("/test/auto/gen")
         )
@@ -61,7 +61,7 @@ class ReportingTest(unittest.TestCase):
             create_error.reset_mock()
 
         arguments.original_directory = "/f/g/target"
-        arguments.target = ["//f/g:target"]
+        arguments.targets = ["//f/g:target"]
         configuration.targets = []
         handler = commands.Reporting(
             arguments, configuration, AnalysisDirectory("/test/h/i")
@@ -89,36 +89,50 @@ class ReportingTest(unittest.TestCase):
         arguments.local_configuration = None
         error_dictionary = {"path": "b/c"}
         error.__getitem__.side_effect = error_dictionary.__getitem__
-        configuration.do_not_check = ["*/b"]
+        configuration.ignore_all_errors = ["*/b"]
         handler = commands.Reporting(arguments, configuration, AnalysisDirectory("/a"))
         with patch.object(json, "loads", return_value=[error]):
             handler._get_errors(result)
             create_error.assert_has_calls([call(True, False)])
             create_error.reset_mock()
 
-    @patch.object(subprocess, "check_output")
-    def test_get_directories_to_analyze(self, check_output) -> None:
+    @patch.object(subprocess, "run")
+    def test_get_directories_to_analyze(self, run) -> None:
         arguments = mock_arguments()
         arguments.current_directory = "base"
-        arguments.original_directory = "base"
+        arguments.source_directories = ["base"]
         configuration = mock_configuration()
         handler = commands.Reporting(
             arguments, configuration, AnalysisDirectory("base")
         )
-        check_output.return_value = "\n".join(
-            [
-                "external/a/.pyre_configuration.local",
-                "external/b/c/.pyre_configuration.local",
-            ]
-        ).encode("utf-8")
+        run.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="\n".join(
+                [
+                    "external/a/.pyre_configuration.local",
+                    "external/b/c/.pyre_configuration.local",
+                ]
+            ).encode("utf-8"),
+        )
         with patch("builtins.open", mock_open(read_data='{"push_blocking": false}')):
             self.assertEqual(handler._get_directories_to_analyze(), {"base"})
 
         with patch("builtins.open", mock_open(read_data='{"push_blocking": true}')):
-            self.assertEqual(
-                handler._get_directories_to_analyze(),
-                {"base", "external/a", "external/b/c"},
-            )
+            self.assertEqual(handler._get_directories_to_analyze(), {"base"})
 
         with patch("builtins.open", mock_open(read_data='{"continuous": true}')):
             self.assertEqual(handler._get_directories_to_analyze(), {"base"})
+
+        configuration.local_configuration = "a/b/.pyre_configuration.local"
+        handler = commands.Reporting(
+            arguments, configuration, AnalysisDirectory("base")
+        )
+        self.assertEqual(handler._get_directories_to_analyze(), {"base"})
+
+        configuration.local_configuration = "a/b/.pyre_configuration.local"
+        arguments.source_directories = None
+        handler = commands.Reporting(
+            arguments, configuration, AnalysisDirectory("base", ["a/b"])
+        )
+        self.assertEqual(handler._get_directories_to_analyze(), {"a/b"})

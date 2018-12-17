@@ -31,7 +31,7 @@ let worker_garbage_control =
   }
 
 
-let initialize () =
+let initialize log_level =
   match !configuration with
   | None ->
       let minor_heap_size = 4 * 1024 * 1024 in (* 4 MB *)
@@ -49,10 +49,10 @@ let initialize () =
           global_size = initial_heap_size;
           heap_size = initial_heap_size;
           dep_table_pow = 19;
-          hash_table_pow = 21;
+          hash_table_pow = 22;
           shm_dirs = ["/dev/shm"; "/pyre"];
           shm_min_avail = 1024 * 1024 * 512; (* 512 MB *)
-          log_level = 0;
+          log_level;
         } in
       let heap_handle = SharedMemory.init shared_mem_config in
       configuration := Some { heap_handle; minor_heap_size };
@@ -61,14 +61,26 @@ let initialize () =
       configuration
 
 
-let get_heap_handle () =
-  let { heap_handle; _ } = initialize () in
+let get_heap_handle { Configuration.Analysis.debug; _ } =
+  let log_level =
+    if debug then
+      1
+    else
+      0
+  in
+  let { heap_handle; _ } = initialize log_level in
   heap_handle
 
 
-let save_shared_memory ~filename =
-  SharedMem.save_table filename
+let report_statistics () =
+  Measure.print_stats ();
+  Measure.print_distributions ()
 
 
-let load_shared_memory ~filename =
-  SharedMem.load_table filename
+let save_shared_memory ~path =
+  collect `aggressive;
+  SharedMem.save_table path
+
+
+let load_shared_memory ~path =
+  SharedMem.load_table path

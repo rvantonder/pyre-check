@@ -34,10 +34,15 @@ module TypeQuery: sig
     | Meet of Access.t * Access.t
     | Methods of Access.t
     | NormalizeType of Access.t
+    | SaveServerState of Pyre.Path.t
     | Signature of Access.t
     | Superclasses of Access.t
     | Type of Expression.t
-    | TypeAtLocation of Location.Instantiated.t
+    | TypeAtPosition of {
+        file: File.t;
+        position: Location.position;
+      }
+    | TypesInFile of File.t
   [@@deriving eq, show]
 
   type attribute = {
@@ -65,13 +70,22 @@ module TypeQuery: sig
   }
   [@@deriving eq, show, to_yojson]
 
+  type type_at_location = {
+    location: Location.Instantiated.t;
+    annotation: Type.t;
+  }
+  [@@deriving eq, show, to_yojson]
+
   type base_response =
     | Boolean of bool
     | FoundAttributes of attribute list
     | FoundMethods of method_representation list
     | FoundSignature of found_signature list
+    | Success of unit
     | Superclasses of Type.t list
     | Type of Type.t
+    | TypeAtLocation of type_at_location
+    | TypesAtLocations of type_at_location list
   [@@deriving eq, show, to_yojson]
 
   type response =

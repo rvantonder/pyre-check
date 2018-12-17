@@ -21,7 +21,6 @@ module Record = struct
       docstring: string option;
       return_annotation: Expression.t option;
       async: bool;
-      generated: bool;
       parent: Access.t option; (* The class owning the method. *)
     }
     [@@deriving compare, eq, sexp, show, hash]
@@ -249,7 +248,6 @@ module Define = struct
       docstring = None;
       return_annotation = None;
       async = false;
-      generated = false;
       parent = None;
     }
 
@@ -263,22 +261,7 @@ module Define = struct
       docstring = None;
       return_annotation = None;
       async = false;
-      generated = false;
-      parent = None;
-    }
-
-
-  let create_generated_constructor { Record.Class.name; docstring; _ } =
-    {
-      name = name @ (Access.create "__init__");
-      parameters = [Parameter.create ~name:(Identifier.create "self") ()];
-      body = [Node.create_with_default_location Pass];
-      decorators = [];
-      return_annotation = None;
-      async = false;
-      generated = true;
-      parent = Some name;
-      docstring;
+      parent = Some qualifier;
     }
 
 
@@ -340,8 +323,18 @@ module Define = struct
         false
 
 
-  let is_class_method define =
-    Set.exists ~f:(has_decorator define) Recognized.classmethod_decorators
+  let is_class_method ({ parent; _ } as define) =
+    Option.is_some parent &&
+    (Set.exists Recognized.classmethod_decorators ~f:(has_decorator define) ||
+     List.mem
+       ["__init_subclass__"; "__new__"; "__class_getitem__"]
+       (Access.show (unqualified_name define))
+       ~equal:String.equal)
+
+
+  let is_class_property ({ parent; _ } as define) =
+    Option.is_some parent &&
+    Set.exists Recognized.classproperty_decorators ~f:(has_decorator define)
 
 
   let is_constructor ?(in_test = false) { name; parent; _ } =
@@ -354,11 +347,12 @@ module Define = struct
       false
     else
       name = "__init__" ||
+      name = "__enter__" ||
       (in_test &&
-       List.mem ~equal:String.equal ["setUp"; "_setup"; "_async_setup"; "with_context"] name)
-
-
-  let is_generated_constructor { generated; _ } = generated
+       List.mem
+         ~equal:String.equal
+         ["async_setUp"; "setUp"; "_setup"; "_async_setup"; "with_context"]
+         name)
 
 
   let is_property_setter ({ name; _ } as define) =
@@ -578,9 +572,7 @@ module Define = struct
         ()
     in
     match String.Set.find ~f:(has_decorator define) Recognized.property_decorators with
-    | Some "util.classproperty"
-    | Some "util.etc.cached_classproperty"
-    | Some "nodeapi.fbcode_deps.lazy_classproperty" ->
+    | Some decorator when Set.mem Recognized.classproperty_decorators decorator ->
         let return_annotation =
           let open Expression in
           match return_annotation with
@@ -651,6 +643,33 @@ module Class = struct
           None
     in
     List.filter_map ~f:constructor body
+
+
+  let defines { Record.Class.body; _ } =
+    let define = function
+      | { Node.value = Define define; _ } ->
+          Some define
+      | _ ->
+          None
+    in
+    List.filter_map ~f:define body
+
+
+  let find_define { Record.Class.body; _ } ~method_name =
+    let is_define = function
+      | { Node.value = Define ({ name; _ } as define); location} ->
+          begin
+            match List.last name with
+            | Some (Access.Identifier name)
+              when Identifier.equal name method_name ->
+                Some { Node.value = define; location }
+            | _ ->
+                None
+          end
+      | _ ->
+          None
+    in
+    List.filter_map ~f:is_define body |> List.hd
 
 
   let explicitly_assigned_attributes { Record.Class.name; body; _ } =
@@ -832,12 +851,7 @@ module Class = struct
             let open Expression in
             let annotation =
               let meta_annotation =
-                let argument =
-                  {
-                    Argument.name = None;
-                    value = Node.create_with_default_location (Access name);
-                  }
-                in
+                let argument = { Argument.name = None; value = Access.expression name } in
                 Node.create
                   ~location
                   (Access [
@@ -1265,7 +1279,7 @@ module PrettyPrinter = struct
     | false -> ()
 
 
-  let rec pp_statement_t formatter { Node.value = statement ; _ } =
+  let rec pp_statement_t formatter { Node.value = statement; _ } =
     Format.fprintf formatter "%a" pp_statement statement
 
 
@@ -1283,11 +1297,11 @@ module PrettyPrinter = struct
   and pp_assign formatter { Assign.target; annotation; value; parent } =
     Format.fprintf
       formatter
-      "%a%a = %a%a"
+      "%a%a%a = %a"
       pp_access_list_option parent
       Expression.pp target
+      pp_expression_option (": ", annotation)
       Expression.pp value
-      pp_expression_option (" # ", annotation)
 
 
   and pp_class formatter { Record.Class.name; bases; body; decorators; _ } =

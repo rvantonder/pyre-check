@@ -6,168 +6,168 @@
 open Core
 open OUnit2
 
-open Ast
-open Statement
 open Taint
-open AccessPath
-open Domains
 open Model
-open Result
 
-open Interprocedural
-
-
-type parameter_taint = {
-  position: int;
-  sinks: Taint.Sinks.t list;
-}
-
-
-type model_expectation = {
-  define_name: string;
-  returns: Sources.t list;
-  taint_sink_parameters: parameter_taint list;
-  tito_parameters: int list;
-}
+open TestHelper
 
 
 let assert_model ~model_source ~expect =
-  let expect_source_taint model source =
-    let forward =
-      let source_taint =
-        ForwardState.assign_weak
-          ~root:Root.LocalResult
-          ~path:[]
-          (ForwardTaint.singleton source
-           |> ForwardState.make_leaf)
-          model.forward.source_taint
-      in
-      Taint.Result.Forward.{ source_taint }
-    in
-    { model with forward }
+  let resolution =
+    Test.resolution
+      ~sources:(Test.typeshed_stubs @ [Test.parse model_source])
+      ()
   in
-  let expect_sink_taint model { position; sinks } =
-    let taint_sink_parameters model taint_sink_kind =
-      let backward =
-        let sink_taint =
-          BackwardState.assign_weak
-            ~root:(Root.Parameter { position })
-            ~path:[]
-            (BackwardTaint.singleton taint_sink_kind
-             |> BackwardState.make_leaf)
-            model.backward.sink_taint
-        in
-        { model.backward with sink_taint }
-      in
-      { model with backward }
-    in
-    List.fold sinks ~init:model ~f:taint_sink_parameters
+  let models =
+    Test.trim_extra_indentation model_source
+    |> (fun model_source -> Model.create ~resolution ~model_source ())
+    |> Or_error.ok_exn
   in
-  let expect_taint_in_taint_out model position =
-    let backward =
-      let taint_in_taint_out =
-        BackwardState.assign_weak
-          ~root:(Root.Parameter { position })
-          ~path:[]
-          (BackwardTaint.singleton LocalReturn
-           |> BackwardState.make_leaf)
-          model.backward.taint_in_taint_out
-      in
-      { model.backward with taint_in_taint_out }
-    in
-    { model with backward }
+  let is_model callable { call_target; _ } =
+    callable = call_target
   in
-  let create_model { define_name; returns; taint_sink_parameters; tito_parameters } =
-    let call_target = Callable.make_real (Access.create define_name) in
-    Taint.Result.empty_model
-    |> (fun model -> List.fold returns ~init:model ~f:expect_source_taint)
-    |> (fun model -> List.fold taint_sink_parameters ~init:model ~f:expect_sink_taint)
-    |> (fun model -> List.fold tito_parameters ~init:model ~f:expect_taint_in_taint_out)
-    |> (fun model -> { call_target; model })
+  let get_model callable =
+    let message = Format.asprintf "Model %a missing" Interprocedural.Callable.pp callable in
+    List.find ~f:(is_model callable) models
+    |> Option.value_exn ?here:None ?error:None ~message
+    |> (fun { model; _ } -> model)
   in
-  let expect_models = List.map expect ~f:create_model in
-  let models = Model.create ~model_source |> Or_error.ok_exn in
-  assert_equal
-    ~printer:(fun models -> Sexp.to_string [%message (models: Model.t list)])
-    expect_models
-    models
-
-
-let assert_invalid_model ~model_source ~expect =
-  let error_message =
-    match Model.create ~model_source with
-    | Error error -> Base.Error.to_string_hum error
-    | _ -> failwith "Invalid model should result in error"
-  in
-  assert_equal ~printer:ident expect error_message
+  List.iter ~f:(check_expectation ~get_model) expect
 
 
 let test_source_models _ =
   assert_model
-    ~model_source:"def taint() -> TaintSource[TestSource]: ..."
+    ~model_source:"def taint() -> TaintSource[Test]: ..."
     ~expect:[
       {
+        kind = `Function;
         define_name = "taint";
-        returns = [Sources.TestSource];
-        taint_sink_parameters = [];
+        returns = [Sources.Test];
+        sink_parameters = [];
         tito_parameters = [];
+        errors = [];
+      };
+    ];
+  assert_model
+    ~model_source:"os.environ: TaintSource[Test] = ..."
+    ~expect:[
+      {
+        kind = `Object;
+        define_name = "os.environ";
+        returns = [Sources.Test];
+        sink_parameters = [];
+        tito_parameters = [];
+        errors = [];
+      };
+    ];
+  assert_model
+    ~model_source:"django.http.Request.GET: TaintSource[Test] = ..."
+    ~expect:[
+      {
+        kind = `Object;
+        define_name = "django.http.Request.GET";
+        returns = [Sources.Test];
+        sink_parameters = [];
+        tito_parameters = [];
+        errors = [];
       };
     ]
 
 
 let test_sink_models _ =
   assert_model
-    ~model_source:"def sink(parameter: TaintSink[TestSink]): ..."
+    ~model_source:
+      {|
+        def sink(parameter: TaintSink[Test]):
+          ...
+      |}
     ~expect:[
       {
+        kind = `Function;
         define_name = "sink";
         returns = [];
-        taint_sink_parameters = [
-          { position = 0; sinks = [Taint.Sinks.TestSink] }
+        errors = [];
+        sink_parameters = [
+          { name = "parameter"; sinks = [Taint.Sinks.Test] }
         ];
         tito_parameters = []
       }
     ];
 
   assert_model
-    ~model_source:"def sink(parameter0, parameter1: TaintSink[TestSink]): ..."
+    ~model_source:"def sink(parameter0, parameter1: TaintSink[Test]): ..."
     ~expect:[
       {
+        kind = `Function;
         define_name = "sink";
         returns = [];
-        taint_sink_parameters = [
-          { position = 0; sinks = [] };
-          { position = 1; sinks = [Taint.Sinks.TestSink] }
+        errors = [];
+        sink_parameters = [
+          { name = "parameter1"; sinks = [Taint.Sinks.Test] }
         ];
         tito_parameters = []
       };
     ];
 
   assert_model
-    ~model_source:"def sink(parameter0: TaintSink[TestSink], parameter1: TaintSink[TestSink]): ..."
+    ~model_source:"def sink(parameter0: TaintSink[Test], parameter1: TaintSink[Test]): ..."
     ~expect:[
       {
+        kind = `Function;
         define_name = "sink";
         returns = [];
-        taint_sink_parameters = [
-          { position = 0; sinks = [Taint.Sinks.TestSink] };
-          { position = 1; sinks = [Taint.Sinks.TestSink] }
+        errors = [];
+        sink_parameters = [
+          { name = "parameter0"; sinks = [Taint.Sinks.Test] };
+          { name = "parameter1"; sinks = [Taint.Sinks.Test] }
         ];
         tito_parameters = []
       };
     ];
 
   assert_model
-    ~model_source:"def sink(parameter0: TaintSink[TestSink], parameter1: TaintSink[TestSink]): ..."
+    ~model_source:"def sink(parameter0: TaintSink[Test], parameter1: TaintSink[Test]): ..."
     ~expect:[
       {
+        kind = `Function;
         define_name = "sink";
         returns = [];
-        taint_sink_parameters = [
-          { position = 0; sinks = [Taint.Sinks.TestSink] };
-          { position = 1; sinks = [Taint.Sinks.TestSink] }
+        errors = [];
+        sink_parameters = [
+          { name = "parameter0"; sinks = [Taint.Sinks.Test] };
+          { name = "parameter1"; sinks = [Taint.Sinks.Test] }
         ];
         tito_parameters = []
+      };
+    ];
+
+  assert_model
+    ~model_source:"def thrift(parameter0: TaintSink[Thrift]) -> TaintSource[Thrift]: ..."
+    ~expect:[
+      {
+        kind = `Function;
+        define_name = "thrift";
+        returns = [Taint.Sources.Thrift];
+        sink_parameters = [
+          { name = "parameter0"; sinks = [Taint.Sinks.Thrift] };
+        ];
+        tito_parameters = [];
+        errors = [];
+      };
+    ];
+
+  assert_model
+    ~model_source:"def xss(parameter: TaintSink[XSS]): ..."
+    ~expect:[
+      {
+        kind = `Function;
+        define_name = "xss";
+        returns = [];
+        sink_parameters = [
+          { name = "parameter"; sinks = [Taint.Sinks.XSS] };
+        ];
+        tito_parameters = [];
+        errors = [];
       };
     ]
 
@@ -177,34 +177,66 @@ let test_taint_in_taint_out_models _ =
     ~model_source:"def tito(parameter: TaintInTaintOut[LocalReturn]): ..."
     ~expect:[
       {
+        kind = `Function;
         define_name = "tito";
         returns = [];
-        taint_sink_parameters = [];
-        tito_parameters = [0]
+        errors = [];
+        sink_parameters = [];
+        tito_parameters = ["parameter"]
       };
     ]
 
 
 let test_invalid_models _ =
+  let assert_invalid_model ~model_source ~expect =
+    let resolution =
+      Test.resolution
+        ~sources:[
+          Test.parse
+            {|
+              def sink(parameter) -> None: pass
+              def source() -> None: pass
+            |};
+        ]
+        ()
+    in
+    let error_message =
+      match Model.create ~resolution ~model_source () with
+      | Error error -> Base.Error.to_string_hum error
+      | _ -> failwith "Invalid model should result in error"
+    in
+    assert_equal ~printer:ident expect error_message
+  in
+
   assert_invalid_model
     ~model_source:"def sink(parameter: TaintSink[Unsupported]): ..."
     ~expect:"Unsupported taint sink Unsupported";
 
   assert_invalid_model
-    ~model_source:"def sink(parameter: TaintSink[TestSource]): ..."
-    ~expect:"Unsupported taint sink TestSource";
+    ~model_source:"def sink(parameter: TaintSink[UserControlled]): ..."
+    ~expect:"Unsupported taint sink UserControlled";
 
   assert_invalid_model
     ~model_source:"def source() -> TaintSource[Invalid]: ..."
     ~expect:"Unsupported taint source Invalid";
 
   assert_invalid_model
-    ~model_source:"def source() -> TaintInTaintOut[TestSink]: ..."
+    ~model_source:"def source() -> TaintInTaintOut[Test]: ..."
     ~expect:{|"Unrecognized taint direction in return annotation: TaintInTaintOut"|};
 
   assert_invalid_model
-    ~model_source:"def sink(parameter: InvalidTaintDirection[TestSink]): ..."
-    ~expect:{|"Unrecognized taint direction in parameter annotation InvalidTaintDirection"|}
+    ~model_source:"def sink(parameter: InvalidTaintDirection[Test]): ..."
+    ~expect:{|"Unrecognized taint direction in parameter annotation InvalidTaintDirection"|};
+
+  assert_invalid_model
+    ~model_source:"def not_in_the_environment(parameter: InvalidTaintDirection[Test]): ..."
+    ~expect:{|Modeled entity `not_in_the_environment` is not part of the environment!|};
+
+  assert_invalid_model
+    ~model_source:"def sink(): ..."
+    ~expect:(
+      "Model signature parameters for `sink` do not match implementation " ^
+      "`typing.Callable(sink)[[Named(parameter, unknown)], None]`")
 
 
 let () =
@@ -214,4 +246,4 @@ let () =
     "taint_in_taint_out_models">::test_taint_in_taint_out_models;
     "invalid_models">::test_invalid_models;
   ]
-  |> run_test_tt_main
+  |> Test.run

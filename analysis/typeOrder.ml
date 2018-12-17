@@ -275,7 +275,7 @@ let contains (module Handler: Handler) annotation =
 
 let is_instantiated (module Handler: Handler) annotation =
   let is_invalid = function
-    | Type.Variable { Type.constraints = Type.Unconstrained; _ } -> true
+    | Type.Variable { constraints = Type.Unconstrained; _ } -> true
     | Type.Primitive name ->
         not (Handler.contains (Handler.indices ()) (Type.Primitive name))
     | _ ->
@@ -340,7 +340,7 @@ let method_resolution_order_linearize
         | _, [] ->
             annotation
         | Type.Primitive name, _ ->
-            Type.Parametric { Type.name; parameters }
+            Type.Parametric { name; parameters }
         | _ ->
             failwith (Format.asprintf "Unexpected type %a" Type.pp annotation)
       in
@@ -384,7 +384,7 @@ let breadth_first_fold
               | _, [] ->
                   annotation
               | Type.Primitive name, _ ->
-                  Type.Parametric { Type.name; parameters }
+                  Type.Parametric { name; parameters }
               | _ ->
                   failwith (Format.asprintf "Unexpected type %a" Type.pp annotation)
             in
@@ -446,11 +446,32 @@ let greatest ((module Handler: Handler) as order) ~matches =
     Type.Top
 
 
+let variables (module Handler: Handler) annotation =
+  match Type.split annotation with
+  | left, _ when String.equal (Type.show left) "type" ->
+      (* Despite what typeshed says, typing.Type is covariant:
+         https://www.python.org/dev/peps/pep-0484/#the-type-of-class-objects *)
+      Some [Type.variable ~variance:Type.Covariant "_T_meta"]
+  | left, _ when String.equal (Type.show left) "typing.Callable" ->
+      (* This is not the "real" typing.Callable. We are just
+         proxying to the Callable instance in the type order here. *)
+      Some [Type.variable ~variance:Type.Covariant "_T_meta"]
+  | _ ->
+      let primitive = Type.split annotation |> fst in
+      Handler.find (Handler.indices ()) Type.generic
+      >>= fun generic_index ->
+      Handler.find (Handler.indices ()) primitive
+      >>= fun primitive_index ->
+      Handler.find (Handler.edges ()) primitive_index
+      >>= List.find ~f:(fun { Target.target; _ } -> target = generic_index)
+      >>| fun { Target.parameters; _ } -> parameters
+
+
 let rec less_or_equal ((module Handler: Handler) as order) ~left ~right =
   Type.equal left right ||
   match left, right with
-  | _, Type.Top ->
-      true
+  | other, Type.Top ->
+      not (Type.exists other ~predicate:(fun annotation -> Type.equal annotation Type.undeclared))
   | Type.Top, _ ->
       false
 
@@ -459,6 +480,11 @@ let rec less_or_equal ((module Handler: Handler) as order) ~left ~right =
   | Type.Deleted, _ ->
       false
 
+  | _, Type.Variable { constraints = Type.Unconstrained; _ } ->
+      true
+  | Type.Variable { constraints = Type.Unconstrained; _ },
+    (Type.Primitive _ | Type.Parametric _) ->
+      false
   | _, Type.Object ->
       true
   | Type.Object, _ ->
@@ -469,32 +495,143 @@ let rec less_or_equal ((module Handler: Handler) as order) ~left ~right =
   | _, Type.Bottom ->
       false
 
-  | Type.Parametric _,
-    Type.Parametric _ ->
-      let right_primitive, right_parameters = Type.split right in
-      instantiate_parameters order ~source:left ~target:right_primitive
-      >>| (fun parameters ->
-          List.length parameters = List.length right_parameters &&
-          List.for_all2_exn
-            ~f:(fun left right -> less_or_equal order ~left ~right)
-            parameters
-            right_parameters)
-      |> Option.value ~default:false
-
-  | Type.Variable { Type.constraints = Type.Bound left; _ }, right ->
+  | Type.Variable { constraints = Type.Bound left; _ }, right ->
       less_or_equal order ~left ~right
-  | _, Type.Variable { Type.constraints = Type.Bound _; _ } ->
+  | _, Type.Variable { constraints = Type.Bound _; _ } ->
       false
-  | Type.Variable { Type.constraints = Type.Explicit left; _ }, right ->
+  | Type.Variable { constraints = Type.Explicit left; _ }, right ->
       less_or_equal order ~left:(Type.union left) ~right
-  | left, Type.Variable { Type.constraints = Type.Explicit right; _ } ->
+  | left, Type.Variable { constraints = Type.Explicit right; _ } ->
       less_or_equal order ~left ~right:(Type.union right)
+
+
+  | Type.Parametric { name = left_name; _ },
+    Type.Parametric _ ->
+      let compare_parameter left right variable =
+        match left, right, variable with
+        | Type.Bottom, _, _ ->
+            (* T[Bottom] is a subtype of T[_T2], for any _T2 and regardless of its variance. *)
+            true
+        | _ , Type.Object, _ ->
+            (* T[_T2] is a subtype of T[Any], for any _T2 and regardless of its variance. *)
+            true
+        | _ , _ , Type.Variable { variance = Covariant; _ } ->
+            less_or_equal order ~left ~right
+        | _ , _ , Type.Variable { variance = Contravariant; _ } ->
+            less_or_equal order ~left:right ~right:left
+        | _, _, Type.Variable { variance = Invariant; _ } ->
+            less_or_equal order ~left ~right &&
+            less_or_equal order ~left:right ~right:left
+        | _ ->
+            Log.warning "Cannot compare %a and %a, not a variable: %a"
+              Type.pp left Type.pp right Type.pp variable;
+            false
+      in
+
+      let left_primitive, left_parameters = Type.split left in
+      let right_primitive, right_parameters = Type.split right in
+      raise_if_untracked order left_primitive;
+      raise_if_untracked order right_primitive;
+      let generic_index = Handler.find (Handler.indices ()) Type.generic in
+      let left_variables = variables order left in
+
+      if Type.equal left_primitive right_primitive then
+        (* Left and right primitives coincide, a simple parameter comparison is enough. *)
+        let compare_parameters ~left ~right variables =
+          List.length variables = List.length left &&
+          List.length variables = List.length right &&
+          List.map3_exn ~f:compare_parameter left right variables
+          |> List.for_all ~f:Fn.id
+        in
+        left_variables
+        >>| compare_parameters ~left:left_parameters ~right:right_parameters
+        |> Option.value ~default:false
+      else
+        (* Perform one step in all appropriate directions. *)
+        let parametric ~primitive ~parameters =
+          match primitive with
+          | Type.Primitive name ->
+              Some (Type.Parametric { name; parameters })
+          | _ ->
+              None
+        in
+
+        (* 1. Go one level down in the class hierarchy and try from there. *)
+        let step_into_subclasses () =
+          let target_to_parametric { Target.target; parameters } =
+            Handler.find (Handler.annotations ()) target
+            >>= fun annotation ->
+            Type.split annotation
+            |> fst
+            |> fun primitive -> parametric ~primitive ~parameters
+          in
+          let successors =
+            let left_index = index_of order left_primitive in
+            Handler.find (Handler.edges ()) left_index
+            |> Option.value ~default:[]
+          in
+          get_instantiated_successors ~generic_index ~parameters:left_parameters successors
+          |> List.filter_map ~f:target_to_parametric
+          |> List.exists ~f:(fun left -> less_or_equal order ~left ~right)
+        in
+
+        (* 2. Try and replace all parameters, one at a time, to get closer to the destination. *)
+        let replace_parameters_with_destination left_variables =
+          (* Mapping from a variable in `left` to the target parameter (via subclass
+             substitutions) in `right`. *)
+          let variable_substitutions =
+            let right_propagated =
+              (* Create a "fake" primitive+variables type that we can propagate to the target. *)
+              parametric ~primitive:left_primitive ~parameters:left_variables
+              >>= (fun source ->
+                  instantiate_successors_parameters order ~source ~target:right_primitive)
+              |> Option.value ~default:[]
+            in
+            match
+              List.fold2 right_propagated right_parameters ~init:Type.Map.empty ~f:diff_variables
+            with
+            | Ok result -> result
+            | Unequal_lengths -> Type.Map.empty
+          in
+          let propagate_with_substitutions index variable =
+            let replace_one_parameter replacement =
+              let head, tail = List.split_n left_parameters index in
+              match List.hd tail with
+              | Some original when
+                  (* If the original and replacement do not differ, no recursion is needed. *)
+                  Type.equal original replacement or
+                  (* Cannot perform the replacement if variance does not allow it. *)
+                  not (compare_parameter original replacement variable) ->
+                  None
+              | _ ->
+                  let tail = List.tl tail |> Option.value ~default:[] in
+                  let parameters = head @ [replacement] @ tail in
+                  Some (Type.Parametric { name = left_name; parameters })
+            in
+            Map.find variable_substitutions variable
+            >>= replace_one_parameter
+            >>| (fun left -> less_or_equal order ~left ~right)
+            |> Option.value ~default:false
+          in
+          List.existsi left_variables ~f:propagate_with_substitutions
+        in
+        let step_sideways () =
+          left_variables
+          >>| (fun left_variables ->
+              (List.length left_variables == List.length left_parameters) &&
+              replace_parameters_with_destination left_variables)
+          |> Option.value ~default:false
+        in
+
+        step_into_subclasses () or
+        step_sideways ()
 
   (* \forall i \in Union[...]. A_i <= B -> Union[...] <= B. *)
   | Type.Union left, right ->
       List.fold
         ~init:true
-        ~f:(fun current left -> current && less_or_equal order ~left ~right)
+        ~f:(fun current left ->
+            current && less_or_equal order ~left ~right)
         left
   (* \exists i \in Union[...]. A <= B_i ->  A <= Union[...] *)
   | left, Type.Union right ->
@@ -515,7 +652,7 @@ let rec less_or_equal ((module Handler: Handler) as order) ~left ~right =
   | Type.Tuple (Type.Unbounded left), Type.Tuple (Type.Unbounded right) ->
       less_or_equal order ~left ~right
   | Type.Tuple (Type.Bounded (left :: tail)), Type.Tuple (Type.Unbounded right) ->
-      List.for_all ~f:(fun element -> Type.equal element left) tail &&
+      let left = List.fold tail ~init:left ~f:(join order) in
       less_or_equal order ~left ~right
   | Type.Tuple _, Type.Parametric _ ->
       (* Join parameters to handle cases like `Tuple[int, int]` <= `Iterator[int]`. *)
@@ -527,34 +664,26 @@ let rec less_or_equal ((module Handler: Handler) as order) ~left ~right =
           | Type.Primitive name -> name
           | _ -> Identifier.create "?"
         in
-        Type.Parametric {
-          Type.name;
-          parameters = [parameter];
-        }
+        Type.Parametric { name; parameters = [parameter] }
       in
       less_or_equal order ~left:parametric ~right
   | Type.Tuple (Type.Unbounded parameter), Type.Primitive _ ->
-      less_or_equal
-        order
-        ~left:(Type.Parametric { Type.name = Identifier.create "tuple"; parameters = [parameter] })
-        ~right
+      less_or_equal order ~left:(Type.parametric "tuple" [parameter]) ~right
   | Type.Tuple (Type.Bounded (left :: tail)), Type.Primitive _ ->
-      let tuple_parameter = List.fold ~f:(join order) ~init:left tail in
-      less_or_equal
-        order
-        ~left:(Type.Parametric {
-            Type.name = Identifier.create "tuple";
-            parameters = [tuple_parameter];
-          })
-        ~right
+      let parameter = List.fold ~f:(join order) ~init:left tail in
+      less_or_equal order ~left:(Type.parametric "tuple" [parameter]) ~right
   | Type.Primitive name, Type.Tuple _ ->
       Identifier.show name = "tuple"
   | Type.Tuple _, _
   | _, Type.Tuple _ ->
       false
 
-  | Type.Callable { Callable.kind = Callable.Anonymous; overloads = [left]; _ },
-    Type.Callable { Callable.kind = Callable.Anonymous; overloads = [right]; _ } ->
+  | Type.Callable { Callable.kind = Callable.Named left; _ },
+    Type.Callable { Callable.kind = Callable.Named right; _ }
+    when Expression.Access.equal left right ->
+      true
+  | Type.Callable { Callable.implementation = left; _ },
+    Type.Callable { Callable.implementation = right; _ } ->
       let open Callable in
       let parameters_less_or_equal () =
         match left.parameters, right.parameters with
@@ -563,41 +692,73 @@ let rec less_or_equal ((module Handler: Handler) as order) ~left ~right =
         | Defined left, Defined right ->
             begin
               try
-                let parameter_less_or_equal left right =
+                let rec parameters_less_or_equal left right =
                   match left, right with
-                  | Parameter.Anonymous left, Parameter.Anonymous right ->
-                      (* The inversion here follows from the substitution principle. *)
-                      less_or_equal
-                        order
-                        ~left:right.Parameter.annotation
-                        ~right:left.Parameter.annotation
-                  | Parameter.Named left, Parameter.Named right
-                  | Parameter.Keywords left, Parameter.Keywords right
-                  | Parameter.Variable left, Parameter.Variable right
-                    when Expression.Access.equal left.Parameter.name right.Parameter.name ->
-                      less_or_equal
-                        order
-                        ~left:right.Parameter.annotation
-                        ~right:left.Parameter.annotation;
+                  | Parameter.Named ({ Parameter.annotation = left_annotation; _ } as left)
+                    :: left_parameters,
+                    Parameter.Named ({ Parameter.annotation = right_annotation; _ } as right)
+                    :: right_parameters
+                  | Parameter.Keywords ({ Parameter.annotation = left_annotation; _ } as left)
+                    :: left_parameters,
+                    Parameter.Keywords ({ Parameter.annotation = right_annotation; _ } as right)
+                    :: right_parameters
+                  | Parameter.Variable ({ Parameter.annotation = left_annotation; _ } as left)
+                    :: left_parameters,
+                    Parameter.Variable ({ Parameter.annotation = right_annotation; _ } as right)
+                    :: right_parameters ->
+                      Parameter.names_compatible (Parameter.Named left) (Parameter.Named right) &&
+                      less_or_equal order ~left:right_annotation ~right:left_annotation &&
+                      parameters_less_or_equal left_parameters right_parameters
+
+
+                  | Parameter.Variable { Parameter.annotation = left_annotation; _ }
+                    :: _,
+                    (Parameter.Named { Parameter.annotation = right_annotation; _ } as right)
+                    :: right_parameters
+                    when Parameter.is_anonymous right ->
+                      less_or_equal order ~left:right_annotation ~right:left_annotation &&
+                      parameters_less_or_equal left right_parameters
+                  | Parameter.Variable _ :: left_parameters, []
+                  | Parameter.Keywords _ :: left_parameters, [] ->
+                      parameters_less_or_equal left_parameters []
+
+                  | (Parameter.Variable _ as variable) :: (Parameter.Keywords _ as keywords) :: _,
+                    (Parameter.Named _ as named) :: right ->
+                      let is_compatible =
+                        Type.equal (Parameter.annotation variable) (Parameter.annotation keywords) &&
+                        less_or_equal
+                          order
+                          ~left:(Parameter.annotation named)
+                          ~right:(Parameter.annotation keywords)
+                      in
+                      if is_compatible then
+                        parameters_less_or_equal left right
+                      else
+                        false
+
+                  | left :: left_parameters, [] ->
+                      if Parameter.default left then
+                        parameters_less_or_equal left_parameters []
+                      else
+                        false
+
+                  | [], [] ->
+                      true
+
                   | _ ->
                       false
                 in
-                List.for_all2_exn ~f:parameter_less_or_equal left right
+                parameters_less_or_equal left right
               with _ ->
                 false
             end
-        | _ ->
+        | Defined _, Undefined ->
+            true
+        | Undefined, Defined _ ->
             false
       in
       less_or_equal order ~left:left.annotation ~right:right.annotation &&
       parameters_less_or_equal ()
-  | Type.Callable { Callable.kind = Callable.Named left; _ },
-    Type.Callable { Callable.kind = Callable.Named right; _ }
-    when Expression.Access.equal left right ->
-      true
-  | Type.Callable _, _
-  | _, Type.Callable _ ->
-      false
 
   (* A[...] <= B iff A <= B. *)
   | Type.Parametric _, Type.Primitive _  ->
@@ -605,8 +766,38 @@ let rec less_or_equal ((module Handler: Handler) as order) ~left ~right =
       less_or_equal order ~left:parametric_primitive ~right
 
   | Type.Primitive name, Type.Parametric _ ->
-      let left = Type.Parametric { Type.name; parameters = [] } in
+      let left = Type.Parametric { name; parameters = [] } in
       less_or_equal order ~left ~right
+
+  | left, Type.Callable _ ->
+      let joined = join (module Handler) (Type.parametric "typing.Callable" [Type.Bottom]) left in
+      begin
+        match joined with
+        | Type.Parametric { name; parameters = [left] }
+          when Identifier.equal name (Identifier.create "typing.Callable") ->
+            less_or_equal (module Handler) ~left ~right
+        | _ ->
+            false
+      end
+
+  | Type.Callable _, _ ->
+      false
+
+  | Type.TypedDictionary left, Type.TypedDictionary right ->
+      let field_not_found field =
+        not (List.exists left.fields ~f:(Type.equal_typed_dictionary_field field))
+      in
+      not (List.exists right.fields ~f:field_not_found)
+
+  | Type.TypedDictionary _, Type.Parametric { name = mapping; parameters = [ key; value ] }
+    when Identifier.show mapping = "typing.Mapping" &&
+         Type.equal Type.string key &&
+         Type.equal Type.Object value ->
+      true
+
+  | Type.TypedDictionary _, _
+  | _, Type.TypedDictionary _ ->
+      false
 
   | _ ->
       raise_if_untracked order left;
@@ -715,7 +906,7 @@ and greatest_lower_bound ((module Handler: Handler) as order) =
   least_common_successor order ~successors:predecessors
 
 
-and join_overloads ~parameter_join ~return_join order left right =
+and join_implementations ~parameter_join ~return_join order left right =
   let open Callable in
   let parameters =
     match left.parameters, right.parameters with
@@ -728,54 +919,54 @@ and join_overloads ~parameter_join ~return_join order left right =
               match sofar with
               | Some sofar ->
                   let joined =
-                    match left, right with
-                    | Parameter.Anonymous left, Parameter.Anonymous right
-                      when left.Parameter.index = right.Parameter.index ->
-                        Some
-                          (Parameter.Anonymous {
-                              left with
-                              Parameter.annotation =
-                                parameter_join
-                                  order
-                                  left.Parameter.annotation
-                                  right.Parameter.annotation;
-                            })
-                    | Parameter.Named left, Parameter.Named right
-                      when Expression.Access.equal left.Parameter.name right.Parameter.name &&
-                           left.Parameter.default = right.Parameter.default ->
-                        Some
-                          (Parameter.Named {
-                              left with
-                              Parameter.annotation =
-                                parameter_join
-                                  order
-                                  left.Parameter.annotation
-                                  right.Parameter.annotation;
-                            })
-                    | Parameter.Variable left, Parameter.Variable right
-                      when Expression.Access.equal left.Parameter.name right.Parameter.name ->
-                        Some
-                          (Parameter.Variable {
-                              left with
-                              Parameter.annotation =
-                                parameter_join
-                                  order
-                                  left.Parameter.annotation
-                                  right.Parameter.annotation;
-                            })
-                    | Parameter.Keywords left, Parameter.Keywords right
-                      when Expression.Access.equal left.Parameter.name right.Parameter.name ->
-                        Some
-                          (Parameter.Keywords {
-                              left with
-                              Parameter.annotation =
-                                parameter_join
-                                  order
-                                  left.Parameter.annotation
-                                  right.Parameter.annotation;
-                            })
-                    | _ ->
-                        None
+                    let join_names left right =
+                      if String.is_prefix ~prefix:"$" (Expression.Access.show left) then
+                        left
+                      else if String.is_prefix ~prefix:"$" (Expression.Access.show right) then
+                        right
+                      else
+                        left
+                    in
+                    if Type.Callable.Parameter.names_compatible left right then
+                      match left, right with
+                      | Parameter.Named left, Parameter.Named right
+                        when left.Parameter.default = right.Parameter.default ->
+                          Some
+                            (Parameter.Named {
+                                left with
+                                Parameter.annotation =
+                                  parameter_join
+                                    order
+                                    left.Parameter.annotation
+                                    right.Parameter.annotation;
+                                name = join_names left.Parameter.name right.Parameter.name;
+                              })
+                      | Parameter.Variable left, Parameter.Variable right ->
+                          Some
+                            (Parameter.Variable {
+                                left with
+                                Parameter.annotation =
+                                  parameter_join
+                                    order
+                                    left.Parameter.annotation
+                                    right.Parameter.annotation;
+                                name = join_names left.Parameter.name right.Parameter.name;
+                              })
+                      | Parameter.Keywords left, Parameter.Keywords right ->
+                          Some
+                            (Parameter.Keywords {
+                                left with
+                                Parameter.annotation =
+                                  parameter_join
+                                    order
+                                    left.Parameter.annotation
+                                    right.Parameter.annotation;
+                                name = join_names left.Parameter.name right.Parameter.name;
+                              })
+                      | _ ->
+                          None
+                    else
+                      None
                   in
                   joined
                   >>| (fun joined -> joined :: sofar)
@@ -793,7 +984,7 @@ and join_overloads ~parameter_join ~return_join order left right =
   in
   parameters
   >>| fun parameters ->
-  [{ annotation = return_join order left.annotation right.annotation; parameters = parameters }]
+  { annotation = return_join order left.annotation right.annotation; parameters = parameters }
 
 
 and join ((module Handler: Handler) as order) left right =
@@ -801,6 +992,11 @@ and join ((module Handler: Handler) as order) left right =
     left
   else
     match left, right with
+    | undeclared, _ when Type.equal undeclared Type.undeclared ->
+        Type.union [left; right]
+    | _, undeclared when Type.equal undeclared Type.undeclared ->
+        Type.union [left; right]
+
     | Type.Top, _
     | _, Type.Top ->
         Type.Top
@@ -817,13 +1013,16 @@ and join ((module Handler: Handler) as order) left right =
     | other, Type.Bottom ->
         other
 
-    | Type.Variable { Type.constraints = Type.Bound left; _ }, right ->
+    | (Type.Variable { constraints = Type.Unconstrained; _ } as variable), other
+    | other, (Type.Variable { constraints = Type.Unconstrained; _ } as variable) ->
+        Type.union [variable; other]
+    | Type.Variable { constraints = Type.Bound left; _ }, right ->
         join order left right
-    | left, Type.Variable { Type.constraints = Type.Bound right; _ } ->
+    | left, Type.Variable { constraints = Type.Bound right; _ } ->
         join order left right
-    | Type.Variable { Type.constraints = Type.Explicit left; _ }, right ->
+    | Type.Variable { constraints = Type.Explicit left; _ }, right ->
         join order (Type.union left) right
-    | left, Type.Variable { Type.constraints = Type.Explicit right; _ } ->
+    | left, Type.Variable { constraints = Type.Explicit right; _ } ->
         join order left (Type.union right)
 
     (* n: A_n = B_n -> Union[A_i] <= Union[B_i]. *)
@@ -836,6 +1035,8 @@ and join ((module Handler: Handler) as order) left right =
         else
           begin
             match other with
+            | Type.Optional Type.Bottom ->
+                Type.Optional union
             | Type.Optional element ->
                 Type.Optional (Type.union (element :: elements))
             | _ ->
@@ -843,48 +1044,88 @@ and join ((module Handler: Handler) as order) left right =
                 |> List.fold ~f:(join order) ~init:Type.Bottom
           end
 
-    | Type.Parametric _, Type.Parametric _ ->
-        let left_primitive, _ = Type.split left in
-        let right_primitive, _ = Type.split right in
-        let target =
-          try
-            if less_or_equal ~left:left_primitive ~right:right_primitive order then
-              right_primitive
-            else if less_or_equal ~left:right_primitive ~right:left_primitive order then
-              left_primitive
-            else
-              join order left_primitive right_primitive
-          with Untracked _ ->
-            Type.Object
-        in
-        if Handler.contains (Handler.indices ()) target then
-          let left_parameters = instantiate_parameters order ~source:left ~target in
-          let right_parameters = instantiate_parameters order ~source:right ~target in
-          let parameters =
-            match left_parameters, right_parameters with
-            | Some left, Some right when List.length left = List.length right ->
-                Some (List.map2_exn ~f:(join order) left right)
-            | _ ->
-                None
-          in
-          begin
-            match target, parameters with
-            | Type.Primitive name, Some parameters ->
-                Type.Parametric { Type.name; parameters }
-            | _ ->
-                Type.Object
-          end
-
+    | Type.Parametric _, Type.Parametric _
+    | Type.Parametric _, Type.Primitive _
+    | Type.Primitive _, Type.Parametric _ ->
+        if less_or_equal order ~left ~right then
+          right
+        else if less_or_equal order ~left:right ~right:left then
+          left
         else
-          Type.Object
+          let left_primitive, _ = Type.split left in
+          let right_primitive, _ = Type.split right in
+          let target =
+            try
+              if less_or_equal ~left:left_primitive ~right:right_primitive order then
+                right_primitive
+              else if less_or_equal ~left:right_primitive ~right:left_primitive order then
+                left_primitive
+              else
+                join order left_primitive right_primitive
+            with Untracked _ ->
+              Type.Object
+          in
+          if Handler.contains (Handler.indices ()) target then
+            let left_parameters = instantiate_successors_parameters order ~source:left ~target in
+            let right_parameters = instantiate_successors_parameters order ~source:right ~target in
+            let variables = variables order target in
+            let parameters =
+              let join_parameters left right variable =
+                match left, right, variable with
+                | Type.Bottom, other, _
+                | other, Type.Bottom, _ ->
+                    other
+                | Type.Object, _, _
+                | _, Type.Object, _ ->
+                    Type.Object
+                | _, _, Type.Variable { variance = Covariant; _ } ->
+                    join order left right
+                | _, _, Type.Variable { variance = Contravariant; _ } ->
+                    meet order left right
+                | _, _, Type.Variable { variance = Invariant; _ } ->
+                    if less_or_equal order ~left ~right &&
+                       less_or_equal order ~left:right ~right:left then
+                      left
+                    else
+                      (* We fallback to Type.Object if type equality fails to help display
+                         meaningful error messages. *)
+                      Type.Object
+                | _ ->
+                    Log.warning "Cannot join %a and %a, not a variable: %a"
+                      Type.pp left Type.pp right Type.pp variable;
+                    Type.Object
+              in
+              match left_parameters, right_parameters, variables with
+              | Some left, Some right, Some variables
+                when List.length left = List.length right &&
+                     List.length left = List.length variables ->
+                  let join_parameters left right variable =
+                    join_parameters left right variable
+                    |> Type.instantiate_variables ~replacement:Type.Top
+                  in
+                  Some (List.map3_exn ~f:join_parameters left right variables)
+              | _ ->
+                  None
+            in
+            begin
+              match target, parameters with
+              | Type.Primitive name, Some parameters ->
+                  Type.Parametric { name; parameters }
+              | Type.Primitive _, None ->
+                  target
+              | _ ->
+                  Type.Object
+            end
+          else
+            Type.Object
 
     (* Special case joins of optional collections with their uninstantated counterparts. *)
-    | Type.Parametric ({ Type.parameters = [Type.Bottom]; _ } as other),
-      Type.Optional (Type.Parametric ({ Type.parameters = [parameter]; _ } as collection))
-    | Type.Optional (Type.Parametric ({ Type.parameters = [parameter]; _ } as collection)),
-      Type.Parametric ({ Type.parameters = [Type.Bottom]; _ } as other)
-      when Identifier.equal other.Type.name collection.Type.name ->
-        Type.Parametric { other with Type.parameters = [parameter] }
+    | Type.Parametric ({ parameters = [Type.Bottom]; _ } as other),
+      Type.Optional (Type.Parametric ({ parameters = [parameter]; _ } as collection))
+    | Type.Optional (Type.Parametric ({ parameters = [parameter]; _ } as collection)),
+      Type.Parametric ({ parameters = [Type.Bottom]; _ } as other)
+      when Identifier.equal other.name collection.name ->
+        Type.Parametric { other with parameters = [parameter] }
 
     (* A <= B -> lub(A, Optional[B]) = Optional[B]. *)
     | other, Type.Optional parameter
@@ -903,55 +1144,86 @@ and join ((module Handler: Handler) as order) left right =
       when List.for_all ~f:(fun element -> Type.equal element left) tail &&
            less_or_equal order ~left ~right ->
         Type.Tuple (Type.Unbounded right)
-    | (Type.Tuple _ as tuple), (Type.Parametric _ as parametric)
-    | (Type.Parametric _ as parametric), (Type.Tuple _ as tuple) ->
-        if less_or_equal order ~left:tuple ~right:parametric then
-          parametric
-        else
-          Type.Object
+    | (Type.Tuple (Type.Unbounded parameter)), (Type.Parametric _ as annotation)
+    | (Type.Tuple (Type.Unbounded parameter)), (Type.Primitive _ as annotation)
+    | (Type.Parametric _ as annotation), (Type.Tuple (Type.Unbounded parameter))
+    | (Type.Primitive _ as annotation), (Type.Tuple (Type.Unbounded parameter)) ->
+        join order (Type.parametric "tuple" [parameter]) annotation
     | Type.Tuple _, _
     | _, Type.Tuple _ ->
-        Type.Object
+        Type.union [left; right]
 
-    | Type.Parametric parametric, ((Type.Primitive _) as primitive)
-    | ((Type.Primitive _) as primitive), Type.Parametric parametric ->
-        let instantiated_parametric =
-          instantiate_parameters order
-            ~source:primitive
-            ~target:(Type.split (Type.Parametric parametric) |> fst)
-          >>| (fun instantiated ->
-              Type.Parametric { parametric with Type.parameters = instantiated })
-          |> Option.value ~default:(Type.Parametric parametric)
-          |> Type.instantiate_variables
-        in
-        if less_or_equal order ~left:primitive ~right:instantiated_parametric then
-          instantiated_parametric
-        else if less_or_equal order ~left:instantiated_parametric ~right:primitive then
-          primitive
-        else
-          Type.Object
-
-    | Type.Callable ({ Callable.kind = Callable.Anonymous; _ } as left),
-      Type.Callable ({ Callable.kind = Callable.Anonymous; _ } as right)
-      when List.length left.Callable.overloads = 1 &&
-           List.length right.Callable.overloads = 1 &&
-           left.Callable.implicit = right.Callable.implicit ->
-        join_overloads
-          ~parameter_join:meet
-          ~return_join:join
-          order
-          (List.hd_exn left.Callable.overloads)
-          (List.hd_exn right.Callable.overloads)
-        >>| (fun overloads -> Type.Callable { left with Callable.overloads })
-        |> Option.value ~default:Type.Object
     | (Type.Callable { Callable.kind = Callable.Named left; _ } as callable),
       Type.Callable { Callable.kind = Callable.Named right; _ }
       when Expression.Access.equal left right ->
         callable
-    | Type.Callable _, _
-    | _, Type.Callable _ ->
+    | Type.TypedDictionary { fields = left_fields; _ },
+      Type.TypedDictionary { fields = right_fields; _ } ->
+        if Type.TypedDictionary.fields_have_colliding_keys left_fields right_fields then
+          Type.Parametric {
+            name = Identifier.create "typing.Mapping";
+            parameters = [ Type.string; Type.Object ]
+          }
+        else
+          let join_fields =
+            if less_or_equal order ~left ~right then
+              right_fields
+            else if less_or_equal order ~left:right ~right:left then
+              left_fields
+            else
+              let found_match field =
+                List.exists left_fields ~f:(Type.equal_typed_dictionary_field field)
+              in
+              List.filter right_fields ~f:found_match
+          in
+          Type.TypedDictionary.anonymous join_fields
+
+    | Type.TypedDictionary _, Type.Parametric { name = mapping; parameters = [ key_annotation; _ ] }
+    | Type.Parametric { name = mapping; parameters = [ key_annotation; _ ] }, Type.TypedDictionary _
+      when Identifier.show mapping = "typing.Mapping" &&
+           (* Mappings are only covariant in their value annotations. *)
+           Type.equal key_annotation Type.string ->
+        Type.Parametric {
+          name = Identifier.create "typing.Mapping";
+          parameters = [ Type.string; Type.Object ]
+        }
+
+    | Type.TypedDictionary _, _
+    | _, Type.TypedDictionary _ ->
         Type.Object
 
+    | Type.Callable left,
+      Type.Callable right ->
+        if List.is_empty left.Callable.overloads
+        && List.is_empty right.Callable.overloads then
+          let kind =
+            if Type.Callable.equal_kind left.kind right.kind then
+              left.kind
+            else
+              Type.Callable.Anonymous
+          in
+          join_implementations
+            ~parameter_join:meet
+            ~return_join:join
+            order
+            left.Callable.implementation
+            right.Callable.implementation
+          >>| (fun implementation -> Type.Callable { left with Callable.kind; implementation })
+          |> Option.value ~default:Type.Object
+        else
+          Type.Object
+
+    | Type.Callable callable, other
+    | other, Type.Callable callable ->
+        let other = join (module Handler) (Type.parametric "typing.Callable" [Type.Bottom]) other in
+        begin
+          match other with
+          | Type.Parametric { name; parameters = [other_callable] }
+            when Identifier.equal name (Identifier.create "typing.Callable") ->
+              join (module Handler) (Type.Callable callable) other_callable
+          | _ ->
+              Type.union [left; right]
+        end
     | _ ->
         match List.hd (least_upper_bound order left right) with
         | Some joined ->
@@ -964,7 +1236,7 @@ and join ((module Handler: Handler) as order) left right =
             Type.Object
 
 
-and meet order left right =
+and meet ((module Handler: Handler) as order) left right =
   if Type.equal left right then
     left
   else
@@ -985,19 +1257,16 @@ and meet order left right =
     | _, Type.Bottom ->
         Type.Bottom
 
-    | Type.Variable ({ Type.constraints = Type.Bound left; _ } as variable), right ->
-        Type.Variable {
-          variable with
-          Type.constraints = Type.Bound (meet order left right);
-        }
-    | left, Type.Variable ({ Type.constraints = Type.Bound right; _ } as variable) ->
-        Type.Variable {
-          variable with
-          Type.constraints = Type.Bound (meet order left right);
-        }
-    | Type.Variable { Type.constraints = Type.Explicit left; _ }, right ->
+    | Type.Variable { constraints = Type.Unconstrained; _ }, other
+    | other, Type.Variable { constraints = Type.Unconstrained; _ } ->
+        other
+    | Type.Variable ({ constraints = Type.Bound left; _ } as variable), right ->
+        Type.Variable { variable with constraints = Type.Bound (meet order left right) }
+    | left, Type.Variable ({ constraints = Type.Bound right; _ } as variable) ->
+        Type.Variable { variable with constraints = Type.Bound (meet order left right) }
+    | Type.Variable { constraints = Type.Explicit left; _ }, right ->
         meet order (Type.union left) right
-    | left, Type.Variable { Type.constraints = Type.Explicit right; _ } ->
+    | left, Type.Variable { constraints = Type.Explicit right; _ } ->
         meet order left (Type.union right)
 
     | (Type.Union left), (Type.Union right) ->
@@ -1015,23 +1284,67 @@ and meet order left right =
           |> List.fold ~f:(meet order) ~init:Type.Top
 
     | Type.Parametric _, Type.Parametric _ ->
-        let left_primitive, left_parameters = Type.split left in
-        let right_primitive, right_parameters = Type.split right in
-        let primitive = meet order left_primitive right_primitive in
-        let parameters =
-          (* TODO(T22785171): take type variables into account. *)
-          if List.length left_parameters = List.length right_parameters then
-            Some (List.map2_exn ~f:(meet order) left_parameters right_parameters)
+        if less_or_equal order ~left ~right then
+          left
+        else if less_or_equal order ~left:right ~right:left then
+          right
+        else
+          let left_primitive, _ = Type.split left in
+          let right_primitive, _ = Type.split right in
+          let target = meet order left_primitive right_primitive in
+          if Handler.contains (Handler.indices ()) target then
+            let left_parameters = instantiate_predecessors_parameters order ~source:left ~target in
+            let right_parameters =
+              instantiate_predecessors_parameters
+                order
+                ~source:right
+                ~target
+            in
+            let variables = variables order target in
+
+            let parameters =
+              let meet_parameters left right variable =
+                match left, right, variable with
+                | Type.Object, other, _
+                | other, Type.Object, _ when not (Type.is_unknown other) ->
+                    other
+                | Type.Bottom, _, _
+                | _, Type.Bottom, _ ->
+                    Type.Bottom
+                | _, _, Type.Variable { variance = Covariant; _ } ->
+                    meet order left right
+                | _, _, Type.Variable { variance = Contravariant; _ } ->
+                    join order left right
+                | _, _, Type.Variable { variance = Invariant; _ } ->
+                    if less_or_equal order ~left ~right &&
+                       less_or_equal order ~left:right ~right:left then
+                      left
+                    else
+                      (* We fallback to Type.Bottom if type equality fails to help display
+                         meaningful error messages. *)
+                      Type.Bottom
+                | _ ->
+                    Log.warning "Cannot meet %a and %a, not a variable: %a"
+                      Type.pp left Type.pp right Type.pp variable;
+                    Type.Bottom
+              in
+              match left_parameters, right_parameters, variables with
+              | Some left, Some right, Some variables
+                when List.length left = List.length right &&
+                     List.length left = List.length variables ->
+                  Some (List.map3_exn ~f:meet_parameters left right variables)
+              | _ ->
+                  None
+            in
+            begin
+              match target, parameters with
+              | Type.Primitive name, Some parameters ->
+                  Type.Parametric { name; parameters }
+              | _ ->
+                  Type.Bottom
+            end
           else
-            None
-        in
-        begin
-          match primitive, parameters with
-          | Type.Primitive name, Some parameters ->
-              Type.Parametric { Type.name; parameters }
-          | _ ->
-              Type.Bottom
-        end
+            Type.Bottom
 
     (* A <= B -> glb(A, Optional[B]) = A. *)
     | other, Type.Optional parameter
@@ -1073,17 +1386,14 @@ and meet order left right =
           Type.Bottom
 
     | Type.Callable ({ Callable.kind = Callable.Anonymous; _ } as left),
-      Type.Callable ({ Callable.kind = Callable.Anonymous; _ } as right)
-      when List.length left.Callable.overloads = 1 &&
-           List.length right.Callable.overloads = 1 &&
-           left.Callable.implicit = right.Callable.implicit ->
-        join_overloads
+      Type.Callable ({ Callable.kind = Callable.Anonymous; _ } as right) ->
+        join_implementations
           ~parameter_join:join
           ~return_join:meet
           order
-          (List.hd_exn left.Callable.overloads)
-          (List.hd_exn right.Callable.overloads)
-        >>| (fun overloads -> Type.Callable { left with Callable.overloads })
+          left.Callable.implementation
+          right.Callable.implementation
+        >>| (fun implementation -> Type.Callable { left with Callable.implementation })
         |> Option.value ~default:Type.Bottom
     | (Type.Callable { Callable.kind = Callable.Named left; _ } as callable),
       Type.Callable { Callable.kind = Callable.Named right; _ }
@@ -1091,6 +1401,25 @@ and meet order left right =
         callable
     | Type.Callable _, _
     | _, Type.Callable _ ->
+        Type.Bottom
+    | Type.TypedDictionary { fields = left_fields; _ },
+      Type.TypedDictionary { fields = right_fields; _ } ->
+        if Type.TypedDictionary.fields_have_colliding_keys left_fields right_fields then
+          Type.Bottom
+        else
+          let meet_fields =
+            if less_or_equal order ~left ~right then
+              left_fields
+            else if less_or_equal order ~left:right ~right:left then
+              right_fields
+            else
+              List.dedup_and_sort
+                (left_fields @ right_fields)
+                ~compare:Type.compare_typed_dictionary_field
+          in
+          Type.TypedDictionary.anonymous meet_fields
+    | Type.TypedDictionary _, _
+    | _, Type.TypedDictionary _ ->
         Type.Bottom
 
     | _ ->
@@ -1101,7 +1430,90 @@ and meet order left right =
             Type.Bottom
 
 
-and instantiate_parameters
+(* If a node on the graph has Generic[_T1, _T2, ...] as a supertype and has
+   concrete parameters, all occurrences of _T1, _T2, etc. in other supertypes
+   need to be replaced with the concrete parameter corresponding to the type
+   variable. This function takes a target with concrete parameters and its supertypes,
+   and instantiates the supertypes accordingly. *)
+and get_instantiated_successors ~generic_index ~parameters successors =
+  let generic_parameters =
+    let generic_parameters { Target.target; parameters } =
+      if Some target = generic_index then
+        Some parameters
+      else
+        None
+    in
+    List.find_map ~f:generic_parameters successors
+  in
+  generic_parameters
+  >>| (fun variables ->
+      if List.length variables = List.length parameters then
+        let constraints =
+          List.zip_exn variables parameters
+          |> Type.Map.of_alist_reduce ~f:(fun first _ -> first)
+          |> Map.find
+        in
+        let instantiate_parameters { Target.target; parameters } =
+          {
+            Target.target;
+            parameters = List.map parameters ~f:(Type.instantiate ~constraints);
+          }
+        in
+        List.map successors ~f:instantiate_parameters
+      else
+        successors)
+  |> Option.value ~default:successors
+
+
+and get_instantiated_predecessors
+    (module Handler: Handler)
+    ~generic_index
+    ~parameters
+    predecessors =
+  let instantiate { Target.target; parameters = predecessor_variables } =
+    let generic_parameters =
+      let generic_parameters { Target.target; parameters } =
+        if Some target = generic_index then
+          Some parameters
+        else
+          None
+      in
+      Handler.find (Handler.edges ()) target
+      >>= List.find_map ~f:generic_parameters
+      |> Option.value ~default:[]
+    in
+
+    (* Mappings from the generic variables, as they appear in the predecessor, to the
+       instantiated parameter in the current annotation. For example, given:
+
+       Derived(Base[T1, int, T2], Generic[ ...irrelevant... ])
+
+       and an instantiated: Base[str, int, float]
+       This mapping would include: { T1 => str; T2 => float }
+    *)
+    let substitutions =
+      match
+        List.fold2 predecessor_variables parameters ~init:Type.Map.empty ~f:diff_variables
+      with
+      | Ok result -> result
+      | Unequal_lengths -> Type.Map.empty
+    in
+
+    let propagated =
+      let replace parameter =
+        Map.find substitutions parameter
+        (* Use Bottom if we could not determine the value of the generic because the
+           predecessor did not propagate it to the base class. *)
+        |> Option.value ~default:Type.Bottom
+      in
+      List.map generic_parameters ~f:replace
+    in
+    { Target.target; parameters = propagated }
+  in
+  List.map predecessors ~f:instantiate
+
+
+and instantiate_successors_parameters
     ((module Handler: Handler) as order)
     ~source
     ~target =
@@ -1111,41 +1523,6 @@ and instantiate_parameters
   raise_if_untracked order target;
 
   let generic_index = Handler.find (Handler.indices ()) Type.generic in
-
-  (* If a node on the graph has Generic[_T1, _T2, ...] as a supertype and has
-     concrete parameters, all occurrences of _T1, _T2, etc. in other supertypes
-     need to be replaced with the concrete parameter corresponding to the type
-     variable. This function takes a target with concrete parameters and its supertypes,
-     and instantiates the supertypes accordingly. *)
-  let get_instantiated_successors { Target.parameters; _ } successors =
-    let generic_parameters =
-      let generic_parameters { Target.target; parameters } =
-        if Some target = generic_index then
-          Some parameters
-        else
-          None
-      in
-      List.find_map ~f:generic_parameters successors
-    in
-    generic_parameters
-    >>| (fun variables ->
-        if List.length variables = List.length parameters then
-          let constraints =
-            List.zip_exn variables parameters
-            |> Type.Map.of_alist_reduce ~f:(fun first _ -> first)
-            |> Map.find
-          in
-          let instantiate_parameters { Target.target; parameters } =
-            {
-              Target.target;
-              parameters = List.map parameters ~f:(Type.instantiate ~constraints);
-            }
-          in
-          List.map successors ~f:instantiate_parameters
-        else
-          successors)
-    |> Option.value ~default:successors
-  in
 
   let worklist = Queue.create () in
   Queue.enqueue
@@ -1159,7 +1536,7 @@ and instantiate_parameters
         else
           begin
             Handler.find (Handler.edges ()) target_index
-            >>| get_instantiated_successors { Target.target = target_index; parameters }
+            >>| get_instantiated_successors ~generic_index ~parameters
             >>| List.iter ~f:(Queue.enqueue worklist)
             |> ignore;
             iterate worklist
@@ -1168,6 +1545,100 @@ and instantiate_parameters
         None
   in
   iterate worklist
+
+
+and instantiate_predecessors_parameters
+    ((module Handler: Handler) as order)
+    ~source
+    ~target =
+  let primitive, parameters = Type.split source in
+
+  raise_if_untracked order primitive;
+  raise_if_untracked order target;
+
+  let generic_index = Handler.find (Handler.indices ()) Type.generic in
+
+  let worklist = Queue.create () in
+  Queue.enqueue
+    worklist
+    { Target.target = index_of order primitive; parameters };
+  let rec iterate worklist =
+    match Queue.dequeue worklist with
+    | Some { Target.target = target_index; parameters } ->
+        if target_index = index_of order target then
+          Some parameters
+        else
+          begin
+            Handler.find (Handler.backedges ()) target_index
+            >>| get_instantiated_predecessors order ~generic_index ~parameters
+            >>| List.iter ~f:(Queue.enqueue worklist)
+            |> ignore;
+            iterate worklist
+          end
+    | None ->
+        None
+  in
+  iterate worklist
+
+
+and diff_variables substitutions left right =
+  match left, right with
+  | Callable { implementation = left_implementation; overloads = left_overloads; _ },
+    Callable { implementation = right_implementation; overloads = right_overloads; _ } ->
+      begin
+        let open Type.Callable in
+        let diff_overloads
+            substitutions
+            { annotation = left_annotation; parameters = left_parameters }
+            { annotation = right_annotation; parameters = right_parameters } =
+          let substitutions = diff_variables substitutions left_annotation right_annotation in
+          match left_parameters, right_parameters with
+          | Defined left, Defined right ->
+              begin
+                let diff_parameters substitutions left right =
+                  diff_variables substitutions (Parameter.annotation left) (Parameter.annotation right)
+                in
+                match List.fold2 ~init:substitutions ~f:diff_parameters left right with
+                | Ok substitutions -> substitutions
+                | Unequal_lengths -> substitutions
+              end
+          | _ ->
+              substitutions
+        in
+        let substitutions = diff_overloads substitutions left_implementation right_implementation in
+        match List.fold2 ~init:substitutions ~f:diff_overloads left_overloads right_overloads with
+        | Ok substitutions -> substitutions
+        | Unequal_lengths -> substitutions
+      end
+  | Optional left, Optional right ->
+      diff_variables substitutions left right
+  | Parametric { parameters = left; _ }, Parametric { parameters = right; _ } ->
+      diff_variables_list substitutions left right
+  | Tuple (Bounded left), Tuple (Bounded right) ->
+      diff_variables_list substitutions left right
+  | Tuple (Unbounded left), Tuple (Unbounded right) ->
+      diff_variables substitutions left right
+  | TypedDictionary { fields = left_fields; _ }, TypedDictionary { fields = right_fields; _ } ->
+      begin
+        let diff_fields substitutions { Type.annotation = left; _ } { Type.annotation = right; _ } =
+          diff_variables substitutions left right
+        in
+        match List.fold2 ~init:substitutions ~f:diff_fields left_fields right_fields with
+        | Ok substitutions -> substitutions
+        | Unequal_lengths -> substitutions
+      end
+  | Union left, Union right ->
+      diff_variables_list substitutions left right
+  | Variable _, _ ->
+      Map.set substitutions ~key:left ~data:right
+  | _ ->
+      substitutions
+
+
+and diff_variables_list substitutions left right =
+  match List.fold2 left right ~init:substitutions ~f:diff_variables with
+  | Ok substitutions -> substitutions
+  | Unequal_lengths -> substitutions
 
 
 let widen order ~widening_threshold ~previous ~next ~iteration =

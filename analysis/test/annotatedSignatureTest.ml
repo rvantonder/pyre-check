@@ -44,7 +44,7 @@ let resolution =
 
       unknown: $unknown = ...
     |}
-  |> fun environment -> Environment.resolution environment ()
+  |> fun environment -> TypeCheck.resolution environment ()
 
 
 let parse_annotation annotation =
@@ -59,21 +59,21 @@ let test_select _ =
       Format.asprintf "typing.Callable%s" callable
       |> parse_annotation
       |> function
-      | Type.Callable ({ Type.Callable.overloads; _ } as callable) ->
+      | Type.Callable ({ Type.Callable.implementation; overloads; _ } as callable) ->
           let undefined { Type.Callable.parameters; _ } =
             match parameters with
             | Type.Callable.Undefined -> true
             | _ -> false
           in
-          if List.exists overloads ~f:undefined && not allow_undefined then
+          if List.exists (implementation :: overloads) ~f:undefined && not allow_undefined then
             failwith "Undefined parameters"
           else
             callable
       | _ ->
-          failwith "Could not extract overloads"
+          failwith "Could not extract signatures"
     in
     let callable = parse_callable callable in
-    let overload =
+    let signature =
       let arguments =
         match parse_single_access (Format.asprintf "call%s" arguments) with
         | [Access.Identifier _; Access.Call { Node.value = arguments; _ }] -> arguments
@@ -81,6 +81,7 @@ let test_select _ =
       in
       Signature.select ~arguments ~resolution ~callable
     in
+    let callable = { callable with Type.Callable.overloads = [] } in
     let expected =
       match expected with
       | `Found expected ->
@@ -104,6 +105,13 @@ let test_select _ =
             callable = parse_callable closest;
             reason = Some (TooManyArguments { expected; provided });
           }
+      | `NotFoundUnexpectedKeyword name ->
+          NotFound { callable; reason = Some (UnexpectedKeyword (Identifier.create name)) }
+      | `NotFoundUnexpectedKeywordWithClosest (closest, name) ->
+          NotFound {
+            callable = parse_callable closest;
+            reason = Some (UnexpectedKeyword (Identifier.create name));
+          }
       | `NotFoundMismatch (actual, expected, name, position) ->
           let reason =
             { actual; expected; name = name >>| Identifier.create; position }
@@ -125,7 +133,7 @@ let test_select _ =
       ~printer:Signature.show
       ~cmp:Signature.equal
       expected
-      overload
+      signature
   in
 
   (* Undefined callables always match. *)
@@ -136,12 +144,16 @@ let test_select _ =
     "[..., int]"
     "(a, b='depr', *variable, **keywords)"
     (`Found "[..., int]");
-  assert_select ~allow_undefined:true "[..., int][[int], int]" "(1)" (`Found "[..., int]");
+  assert_select
+    ~allow_undefined:true
+    "[..., unknown][[..., int][[int], int]]"
+    "(1)"
+    (`Found "[..., int]");
 
   (* Traverse anonymous arguments. *)
   assert_select "[[], int]" "()" (`Found "[[], int]");
 
-  assert_select "[[int], int]" "()" (`NotFoundMissingArgument "anonymous");
+  assert_select "[[int], int]" "()" (`NotFoundMissingArgument "$0");
   assert_select "[[], int]" "(1)" (`NotFoundTooManyArguments (0, 1));
 
   assert_select "[[int], int]" "(1)" (`Found "[[int], int]");
@@ -153,7 +165,7 @@ let test_select _ =
     "[[int], int]"
     "('string')"
     (`NotFoundMismatch (Type.string, Type.integer, None, 1));
-  assert_select "[[int], int]" "(name='string')" `NotFoundNoReason;
+  assert_select "[[int], int]" "(name='string')" (`NotFoundUnexpectedKeyword "name");
 
   assert_select "[[int], int]" "(*[1])" (`Found "[[int], int]");
   assert_select "[[str], int]" "(*[1])" (`NotFoundMismatch (Type.integer, Type.string, None, 1));
@@ -193,6 +205,15 @@ let test_select _ =
     "[[Variable(variable, int)], int]"
     "(*['string'])"
     (`NotFoundMismatch (Type.string, Type.integer, None, 1));
+  (* A single * is special. *)
+  assert_select
+    "[[Variable($parameter$, int), Named(i, int)], int]"
+    "(i=1)"
+    (`Found "[[Variable($parameter$, int), Named(i, int)], int]");
+  assert_select
+    "[[Variable($parameter$, int), Named(i, int)], int]"
+    "(2, i=1)"
+    (`NotFoundTooManyArguments (2, 3));
 
   (* Named arguments. *)
   assert_select
@@ -207,11 +228,26 @@ let test_select _ =
     "[[Named(i, int), Named(j, int)], int]"
     "(j=1, i=2)"
     (`Found "[[Named(i, int), Named(j, int)], int]");
-  assert_select "[[Named(i, int), Named(j, int)], int]" "(j=1, q=2)" `NotFoundNoReason;
+  assert_select
+    "[[Named(i, int), Named(j, int)], int]" "(j=1, q=2)"
+    (`NotFoundUnexpectedKeyword "q");
+  (* May want new class of error for `keyword argument repeated` *)
   assert_select
     "[[Named(i, int), Named(j, int)], int]"
     "(j=1, j=2, q=3)"
-    `NotFoundNoReason;
+    (`NotFoundUnexpectedKeyword "j");
+  assert_select
+    "[[Named(i, int), Named(j, int), Named(k, int)], int]"
+    "(j=1, a=2, b=3)"
+    (`NotFoundUnexpectedKeyword "a");
+  assert_select
+    "[[Named(i, int), Named(j, int)], int]"
+    "(j=1, a=2, b=3)"
+    (`NotFoundUnexpectedKeyword "a");
+  assert_select
+    "[[Named(i, int), Named(j, int)], int]"
+    "(i='string', a=2, b=3)"
+    (`NotFoundUnexpectedKeyword "a");
   assert_select
     "[[Named(i, int), Named(j, str)], int]"
     "(i=1, j=2)"
@@ -231,6 +267,10 @@ let test_select _ =
     "[[int, Named(i, int)], int]"
     "(1, **{'a': 1})"
     (`Found "[[int, Named(i, int)], int]");
+  assert_select
+    "[[Named(i, int), Named(j, int)], int]"
+    "(**{'i': 1}, j=2)"
+    (`Found "[[Named(i, int), Named(j, int)], int]");
 
 
   (* Keywords. *)
@@ -240,6 +280,10 @@ let test_select _ =
     "[[Keywords(keywords, int)], int]"
     "(a=1, b=2)"
     (`Found "[[Keywords(keywords, int)], int]");
+  assert_select
+    "[[Named(a, int), Named(c, int), Keywords(keywords, int)], int]"
+    "(a=1, b=2, c=3)"
+    (`Found "[[Named(a, int), Named(c, int), Keywords(keywords, int)], int]");
   assert_select
     "[[Keywords(keywords, str)], int]"
     "(a=1, b=2)"
@@ -251,6 +295,10 @@ let test_select _ =
 
   (* Constraint resolution. *)
   assert_select "[[_T], _T]" "(1)" (`Found "[[int], int]");
+  assert_select
+    "[[typing.Callable[[], _T]], _T]"
+    "(lambda: 1)"
+    (`Found "[[typing.Callable[[], int]], int]");
   assert_select "[[_T, _S], _T]" "(1, 'string')" (`Found "[[int, str], int]");
   assert_select
     "[[_T, _T], int]"
@@ -315,50 +363,84 @@ let test_select _ =
 
   (* Ranking. *)
   assert_select
-    "[[int, int, str], int][[int, str, str], int]"
+    ~allow_undefined:true
+    "[..., $unknown][[[int, int, str], int][[int, str, str], int]]"
     "(0)"
     (* Ambiguous, pick the first one. *)
     (`NotFoundMissingArgumentWithClosest
-       ("[[int, int, str], int]", "anonymous"));
+       ("[[int, int, str], int]", "$1"));
 
   assert_select
-    "[[str], str][[int, str], int]"
+    ~allow_undefined:true
+    "[..., $unknown][[[str], str][[int, str], int]]"
     "(1)"
     (* Ambiguous, prefer the one with the closer arity over the type match. *)
     (`NotFoundMismatchWithClosest
        ("[[str], str]", Type.integer, Type.string, None, 1));
 
   assert_select
-    "[[int, Keywords(keywords)], int][[int, str], int]"
+    ~allow_undefined:true
+    "[..., $unknown][[[int, Keywords(keywords)], int][[int, str], int]]"
     "(1, 1)" (* Prefer anonymous unmatched parameters over keywords. *)
     (`NotFoundMismatchWithClosest
        ("[[int, str], int]", Type.integer, Type.string, None, 2));
 
   assert_select
-    "[[str], str][[], str]"
+    ~allow_undefined:true
+    "[..., $unknown][[[str], str][[], str]]"
     "(1)"
     (`NotFoundMismatchWithClosest
        ("[[str], str]", Type.integer, Type.string, None, 1));
 
   assert_select
-    "[[str, Keywords(keywords)], int][[Keywords(keywords)], int]"
+    ~allow_undefined:true
+    "[..., $unknown][[[str, Keywords(keywords)], int][[Keywords(keywords)], int]]"
     "(1)" (* Prefer arity matches. *)
     (`NotFoundMismatchWithClosest
        ("[[str, Keywords(keywords)], int]", Type.integer, Type.string, None, 1));
 
   assert_select
-    "[[int, int, str], int][[int, str, str], int]"
+    ~allow_undefined:true
+    "[..., $unknown][[[int, int, str], int][[int, str, str], int]]"
     "(0, 'string')"
     (* Clear winner. *)
     (`NotFoundMissingArgumentWithClosest
        ("[[int, str, str], int]",
-        "anonymous"));
+        "$2"));
 
   assert_select
-    "[[int, str, str, str], int][[int, str, bool], int]"
+    ~allow_undefined:true
+    "[..., $unknown][[[int, str, str, str], int][[int, str, bool], int]]"
     "(0, 'string')"
     (`NotFoundMissingArgumentWithClosest
-       ("[[int, str, bool], int]", "anonymous"));
+       ("[[int, str, bool], int]", "$2"));
+
+  (* Match not found in overloads: error against implementation if it exists. *)
+  assert_select
+    "[[typing.Union[str, int]], typing.Union[str, int]][[[str], str][[int], int]]"
+    "(unknown)"
+    (`NotFoundMismatch (Type.Top, Type.union [Type.integer; Type.string], None, 1));
+
+  assert_select
+    "[[bool], bool][[[str], str][[int], int]]"
+    "(unknown)"
+    (`NotFoundMismatch (Type.Top, Type.bool, None, 1));
+
+  assert_select
+    "[[bool], bool][[[str, str], str][[int, int], int]]"
+    "(unknown)"
+    (`NotFoundMismatch (Type.Top, Type.bool, None, 1));
+
+  assert_select
+    "[[bool], bool][[[str, str], str][[int, int], int]]"
+    "(int, str)"
+    (`NotFoundTooManyArguments (1, 2));
+
+  assert_select
+    ~allow_undefined:true
+    "[..., $unknown][[[Named(a, int), Named(b, int)], int][[Named(c, int), Named(d, int)], int]]"
+    "(i=1, d=2)"
+    (`NotFoundUnexpectedKeywordWithClosest ("[[Named(c, int), Named(d, int)], int]", "i"));
 
   (* Void functions. *)
   assert_select ~allow_undefined:true "[..., None]" "()" (`Found "[..., None]");
@@ -413,4 +495,4 @@ let () =
     "select">::test_select;
     "determine">::test_determine;
   ]
-  |> run_test_tt_main;
+  |> Test.run;

@@ -3,17 +3,20 @@
     This source code is licensed under the MIT license found in the
     LICENSE file in the root directory of this source tree. *)
 
-
 open Core
 
+open Ast
+open Pyre
+open Statement
+
+module Json = Yojson.Safe
 module Kind = AnalysisKind
 module Result = InterproceduralResult
 
 
 let analysis_failed step ~exn callable ~message =
   let callable = (callable :> Callable.t) in
-  Log.log
-    ~section:`Interprocedural
+  Log.error
     "%s in step %s while analyzing %s.\nException %s\nBacktrace: %s"
     message
     (Fixpoint.show_step step)
@@ -45,7 +48,12 @@ let get_obscure_models analyses =
     Kind.Map.add (Kind.abstract kind) (Result.Pkg { kind = ModelPart kind; value = obscure_model; })
       map
   in
-  List.fold ~f:get_analysis_specific_obscure_model ~init:Kind.Map.empty analyses
+  let models = List.fold ~f:get_analysis_specific_obscure_model ~init:Kind.Map.empty analyses in
+  Result.{
+    models;
+    is_obscure = true;
+  }
+
 
 
 let non_fixpoint_witness
@@ -82,6 +90,24 @@ let non_fixpoint_witness ~iteration _kind left right =
 let reached_fixpoint ~iteration ~previous ~next =
   Kind.Map.merge (non_fixpoint_witness ~iteration) previous next
   |> Kind.Map.is_empty
+
+
+let join_models ~iteration left right =
+  let open Result in
+  let widen_pkg _
+      (Pkg { kind = ModelPart left_kind; value = left; })
+      (Pkg { kind = ModelPart right_kind; value = right; }) =
+    match Kind.are_equal left_kind right_kind with
+    | Kind.Equal ->
+        let module Analysis = (val (Result.get_analysis left_kind)) in
+        Some (Pkg { kind = ModelPart left_kind; value = Analysis.join ~iteration left right; })
+    | Kind.Distinct ->
+        failwith "Wrong kind matched up in widen."
+  in
+  if phys_equal left right then
+    left
+  else
+    Kind.Map.union widen_pkg left right
 
 
 let widen_models ~iteration ~previous ~next =
@@ -127,13 +153,13 @@ let widen ~iteration ~previous ~next =
     let result = widen_models ~iteration ~previous ~next in
     if not (reached_fixpoint ~iteration ~previous:result ~next:previous) then
       begin
-        Log.log ~section:`Interprocedural "WIDEN DOES NOT RESPECT JOIN: previous = %s\nwiden = %s\n"
+        Log.error "WIDEN DOES NOT RESPECT JOIN: previous = %s\nwiden = %s\n"
           (show_models previous) (show_models result);
         explain_non_fixpoint ~iteration ~previous:result ~next:previous
       end;
     if not (reached_fixpoint ~iteration ~previous:result ~next:next) then
       begin
-        Log.log ~section:`Interprocedural "WIDEN DOES NOT RESPECT JOIN: next = %s\nwiden = %s\n"
+        Log.error "WIDEN DOES NOT RESPECT JOIN: next = %s\nwiden = %s\n"
           (show_models next) (show_models result);
         explain_non_fixpoint ~iteration ~previous:result ~next:next
       end;
@@ -145,51 +171,71 @@ let widen ~iteration ~previous ~next =
     verify_widen ~iteration ~previous ~next
 
 
-let widen_if_necessary step callable new_model result =
+let widen_if_necessary step callable { Result.models = new_model; is_obscure } result =
+  let callable = (callable :> Callable.t) in
   (* Check if we've reached a fixed point *)
   match Fixpoint.get_old_model callable with
   | None ->
-      let () =
-        Log.log
-          ~section:`Interprocedural
-          "Initial model for %s\n%s"
-          (Callable.show callable)
-          (show_models new_model)
-      in
-      Fixpoint.{ is_partial = true; model = new_model; result; }
+      Format.asprintf "No initial model found for %a" Callable.pp callable
+      |> failwith
   | Some old_model ->
       if reached_fixpoint ~iteration:step.Fixpoint.iteration
-          ~previous:old_model ~next:new_model then
+          ~previous:old_model.models ~next:new_model then begin
+        Log.log
+          ~section:`Interprocedural
+          "Reached fixpoint for %a\n%a"
+          Callable.pp callable
+          Result.pp_model_t old_model;
         Fixpoint.{ is_partial = false; model = old_model; result }
+      end
       else
-        let () =
-          Log.log
-            ~section:`Interprocedural
-            "Model changed for %s\n%s"
-            (Callable.show callable)
-            (show_models new_model)
+        let model = Result.{
+            models =
+              widen
+                ~iteration:step.Fixpoint.iteration
+                ~previous:old_model.models
+                ~next:new_model;
+            is_obscure;
+          }
         in
+        Log.log
+          ~section:`Interprocedural
+          "Widened fixpoint for %a\nold: %anew: %a\nwidened: %a"
+          Callable.pp callable
+          Result.pp_model_t old_model
+          Result.pp_model_t {models=new_model; is_obscure}
+          Result.pp_model_t model;
         Fixpoint.{
           is_partial = true;
-          model =
-            widen ~iteration:step.Fixpoint.iteration ~previous:old_model ~next:new_model;
+          model;
           result;
         }
 
 
-let analyze_define step analyses callable define =
-  let analyze (Result.Analysis { Result.kind; analysis; }) =
-    let open Result in
-    let akind = Kind.abstract kind in
-    let module Analysis = (val analysis) in
-    let method_result, method_model = Analysis.analyze callable define in
-    (
-      akind,
-      Pkg { kind = ModelPart kind; value = method_model; },
-      Pkg { kind = ResultPart kind; value = method_result; }
-    )
+let analyze_define
+    step
+    analyses
+    callable
+    environment
+    ({ Node.value = { Define.name; _ }; _ } as define) =
+  let () =
+    Log.log
+      ~section:`Interprocedural
+      "Analyzing %a"
+      Callable.pp_real_target callable
   in
   let new_model, results =
+    let analyze (Result.Analysis { Result.kind; analysis; }) =
+      let open Result in
+      let akind = Kind.abstract kind in
+      let module Analysis = (val analysis) in
+      let method_result, method_model = Analysis.analyze ~callable ~environment ~define in
+      (
+        akind,
+        Pkg { kind = ModelPart kind; value = method_model; },
+        Pkg { kind = ResultPart kind; value = method_result; }
+      )
+    in
     let accumulate (models, results) analysis =
       let akind, model, result = analyze analysis
       in
@@ -202,23 +248,55 @@ let analyze_define step analyses callable define =
       let models, results = List.fold ~f:accumulate analyses ~init in
       models, results
     with
+    | Analysis.TypeOrder.Untracked annotation ->
+        Log.log
+          ~section:`Info
+          "Could not generate model for `%a` due to invalid annotation `%a`"
+          Access.pp name
+          Analysis.Type.pp annotation;
+        Result.Kind.Map.empty, Result.Kind.Map.empty
     | Sys.Break as exn ->
         analysis_failed step ~exn ~message:"Hit Ctrl+C" callable
     | _ as exn ->
         analysis_failed step ~exn ~message:"Analysis failed" callable
   in
-  widen_if_necessary step callable new_model results
+  widen_if_necessary step callable { Result.models=new_model; is_obscure=false } results
 
 
-let analyze_overrides _step _callable =
-  Fixpoint.{
-    is_partial = false;
-    model = Result.empty_model;
-    result = Result.empty_result;
-  }
+let analyze_overrides ({ Fixpoint.iteration; _ } as step) callable =
+  let overrides =
+    DependencyGraphSharedMemory.get_overriding_types ~member:(Callable.get_override_access callable)
+    |> Option.value ~default:[]
+    |> List.map ~f:(fun at_type -> Callable.create_derived_override callable ~at_type)
+  in
+  let model =
+    let get_override_model override =
+      match Fixpoint.get_model override with
+      | None ->  (* inidicates this is the leaf and not explicitly represented *)
+          Fixpoint.get_model (Callable.get_corresponding_method override)
+      | model ->
+          model
+    in
+    let lookup_and_join ({ Result.is_obscure; models } as result) override =
+      match get_override_model override with
+      | None ->
+          result
+      | Some model ->
+          {
+            is_obscure = is_obscure || model.is_obscure;
+            models = join_models ~iteration models model.models;
+          }
+    in
+    let direct_model =
+      Fixpoint.get_model (Callable.get_corresponding_method callable)
+      |> Option.value ~default:Result.empty_model
+    in
+    List.fold overrides ~f:lookup_and_join ~init:direct_model
+  in
+  widen_if_necessary step callable model Result.empty_result
 
 
-let analyze_callable analyses step callable =
+let analyze_callable analyses step callable environment =
   let () = (* Verify invariants *)
     let open Fixpoint in
     match Fixpoint.get_meta_data callable with
@@ -231,7 +309,7 @@ let analyze_callable analyses step callable =
             (Fixpoint.Epoch.show step.epoch)
             (Fixpoint.Epoch.show epoch)
         in
-        Log.log ~section:`Interprocedural "%s" message;
+        Log.error "%s" message;
         failwith message
     | _ -> ()
   in
@@ -241,8 +319,7 @@ let analyze_callable analyses step callable =
         match Callable.get_definition callable with
         | None ->
             let () =
-              Log.log
-                ~section:`Interprocedural
+              Log.error
                 "Found no definition for %s"
                 (Callable.show callable)
             in
@@ -254,7 +331,7 @@ let analyze_callable analyses step callable =
                     (Callable.show callable)
                     (Fixpoint.show_step step)
                 in
-                Log.log ~section:`Interprocedural "%s" message;
+                Log.error "%s" message;
                 failwith message
             in
             Fixpoint.{
@@ -263,10 +340,15 @@ let analyze_callable analyses step callable =
               result = Result.empty_result;
             }
         | Some define ->
-            analyze_define step analyses callable define
+            analyze_define step analyses callable environment define
       end
   | #Callable.override_target as callable ->
       analyze_overrides step callable
+  | #Callable.object_target as path ->
+      Format.asprintf
+        "Found object %a in fixpoint analysis"
+        Callable.pp path
+      |> failwith
 
 
 let get_errors results =
@@ -280,65 +362,89 @@ let get_errors results =
   |> List.map ~f:get_diagnostics
   |> List.concat_no_order
 
-let summaries_internal callable models results =
+
+let externalize_analysis kind callable models results =
   let open Result in
-  let merge _ model_opt result_opt =
-    match model_opt with
-    | Some model ->
-        Some (model, result_opt)
-    | None ->
-        None
+  let merge kind_candidate model_opt result_opt =
+    if kind_candidate = kind then
+      match model_opt, result_opt with
+      | Some model, _ ->
+          Some (model, result_opt)
+      | None, Some (Pkg { kind = ResultPart kind; _ }) ->
+          let module Analysis = (val (Result.get_analysis kind)) in
+          let model = Pkg { kind = ModelPart kind; value = Analysis.empty_model} in
+          Some (model, result_opt)
+      | _ ->
+          None
+    else
+      None
   in
   let merged = Kind.Map.merge merge models results in
   let get_summaries (_key, (Pkg { kind = ModelPart kind1; value = model; }, result_option)) =
     match result_option with
     | None ->
         let module Analysis = (val (Result.get_analysis kind1)) in
-        Analysis.summaries callable None model
+        Analysis.externalize callable None model
     | Some (Pkg { kind = ResultPart kind2; value = result; }) ->
         match Result.Kind.are_equal kind1 kind2 with
         | Kind.Equal ->
             let module Analysis = (val (Result.get_analysis kind1)) in
-            Analysis.summaries callable (Some result) model
+            Analysis.externalize callable (Some result) model
         | Kind.Distinct -> failwith "kind mismatch"
   in
   Kind.Map.bindings merged
   |> List.concat_map ~f:get_summaries
 
 
-let summaries callable =
+let externalize kind callable =
   match Fixpoint.get_model callable with
-  | Some models ->
+  | Some model ->
       let results = Fixpoint.get_result callable in
-      summaries_internal callable models results
+      externalize_analysis kind callable model.models results
   | None ->
       []
 
 
+let emit_externalization kind emitter callable =
+  externalize kind callable
+  |> List.iter ~f:emitter
+
+
 (* Called on a worker with a set of functions to analyze. *)
-let one_analysis_pass ~analyses step ~callables =
+let one_analysis_pass ~analyses step ~environment ~callables =
   let analyses = List.map ~f:Result.get_abstract_analysis analyses in
   let analyze_and_cache callable =
-    let result = analyze_callable analyses step callable in
+    let result = analyze_callable analyses step callable environment in
     Fixpoint.add_state step callable result
   in
-  List.iter callables ~f:analyze_and_cache
+  List.iter callables ~f:analyze_and_cache;
+  List.length callables
 
 
-let get_callable_dependents ~caller_map = function
-  | #Callable.real_target as real ->
-      begin
-        match Ast.Expression.Access.Map.find caller_map (Callable.get_real_access real) with
-        | None -> []
-        | Some callers ->
-            List.map ~f:Callable.make_real callers
-      end
-  | #Callable.override_target as _override ->
-      (* TODO(T32010422) *)
-      []
+let get_callable_dependents ~dependencies callable =
+  let explicit =
+    Callable.Map.find dependencies callable
+    |> Option.value ~default:[]
+  in
+  (* Add implicit dependencies *)
+  let implicit =
+    match callable with
+    | #Callable.method_target as method_target ->
+        (* Leafs have no explicit override target. So for these we need to
+           expand to their explicit parents. *)
+        let override_target = Callable.get_corresponding_override method_target in
+        if Fixpoint.has_model override_target then
+          [override_target]
+        else
+          Callable.Map.find dependencies override_target
+          |> Option.value ~default:[]
+    | _ ->
+        []
+  in
+  implicit @ explicit
 
 
-let compute_callables_to_reanalyze step previous_batch ~caller_map ~all_callables =
+let compute_callables_to_reanalyze step previous_batch ~dependencies ~all_callables =
   let open Fixpoint in
   let reanalyze_caller caller accumulator =
     Callable.Set.add caller accumulator
@@ -351,7 +457,7 @@ let compute_callables_to_reanalyze step previous_batch ~caller_map ~all_callable
           else
             (* c must be re-analyzed next iteration because its result has
                changed, and therefore its callers must also be reanalyzed. *)
-            let callers = get_callable_dependents ~caller_map callable in
+            let callers = get_callable_dependents ~dependencies callable in
             List.fold callers ~init:(Callable.Set.add callable accumulator)
               ~f:(fun accumulator caller -> reanalyze_caller caller accumulator))
   in
@@ -369,6 +475,7 @@ let compute_callables_to_reanalyze step previous_batch ~caller_map ~all_callable
       let check_missing callable =
         match Fixpoint.get_meta_data callable with
         | None -> () (* okay, caller is in a later epoch *)
+        | Some { step = { epoch; _ }; _ } when epoch = Epoch.predefined -> ()
         | Some meta ->
             let message =
               Format.sprintf
@@ -379,7 +486,7 @@ let compute_callables_to_reanalyze step previous_batch ~caller_map ~all_callable
                 (Fixpoint.Epoch.show step.epoch)
                 (Fixpoint.meta_data_to_string meta)
             in
-            Log.log ~section:`Interprocedural "%s" message;
+            Log.error "%s" message;
             failwith message
       in
       Callable.Set.iter check_missing missing
@@ -387,27 +494,38 @@ let compute_callables_to_reanalyze step previous_batch ~caller_map ~all_callable
   callables_to_reanalyze
 
 
-let compute_fixpoint ~configuration ~scheduler ~analyses ~caller_map ~all_callables epoch =
+let compute_fixpoint
+    ~configuration
+    ~scheduler
+    ~environment
+    ~analyses
+    ~dependencies
+    ~all_callables
+    epoch =
   (* Start iteration > 0 is to avoid a useless special 0 iteration for mega
      components. *)
   let max_iterations = 100 in
   let rec iterate ~iteration callables_to_analyze =
-    let num_callables = List.length callables_to_analyze in
+    let number_of_callables = List.length callables_to_analyze in
     let () =
       let witnesses =
-        if num_callables <= 6 then
+        if number_of_callables <= 6 then
           String.concat ~sep:", " (List.map ~f:Callable.show callables_to_analyze)
         else
           "..."
       in
-      Log.log ~section:`Interprocedural "Iteration #%d. Callables [%s]" iteration witnesses
+      Log.log
+        ~section:`Info
+        "Iteration #%d. %d Callables [%s]"
+        iteration
+        number_of_callables
+        witnesses
     in
-    if num_callables = 0 then
+    if number_of_callables = 0 then
       (* Fixpoint. *)
       iteration
     else if iteration >= max_iterations then
       begin
-        Log.log ~section:`Interprocedural "Failed to reach interprocedural fixed point";
         let max_to_show = 15 in
         let bucket =
           callables_to_analyze
@@ -422,38 +540,59 @@ let compute_fixpoint ~configuration ~scheduler ~analyses ~caller_map ~all_callab
             (String.concat ~sep:", " (List.take bucket max_to_show))
             (if bucket_len > max_to_show then "..." else "")
         in
-        Log.log ~section:`Interprocedural "%s" message;
+        Log.error "%s" message;
         failwith message
       end
     else
       let time_0 = Unix.gettimeofday () in
       let step = Fixpoint.{ epoch; iteration; } in
       let old_batch = Fixpoint.KeySet.of_list callables_to_analyze in
+      let reduce n m =
+        let callables_processed = n + m in
+        let () =
+          Log.log
+            ~section:`Progress
+            "Processed %d of %d callables"
+            callables_processed
+            number_of_callables
+        in
+        callables_processed
+      in
       let () =
         Fixpoint.oldify old_batch;
-        Scheduler.map_reduce
-          scheduler
-          ~configuration
-          ~map:(fun _ callables -> one_analysis_pass ~analyses step ~callables)
-          ~initial:()
-          ~reduce:(fun _ _ -> ())
-          ~inputs:callables_to_analyze
-          ();
+        let _ =
+          Scheduler.map_reduce
+            scheduler
+            ~configuration
+            ~map:(fun _ callables -> one_analysis_pass ~analyses step ~environment ~callables)
+            ~bucket_size:1000
+            ~initial:0
+            ~reduce
+            ~inputs:callables_to_analyze
+            ()
+        in
         Fixpoint.remove_old old_batch
       in
       let callables_to_analyze =
-        compute_callables_to_reanalyze step callables_to_analyze ~caller_map ~all_callables
+        compute_callables_to_reanalyze step callables_to_analyze ~dependencies ~all_callables
       in
       let hs = SharedMem.heap_size () in
       let time_f = Unix.gettimeofday () in
       let elapsed = time_f -. time_0 |> Unix.gmtime in
       let () =
-        Log.log ~section:`Interprocedural "Iteration #%n, heap size %n took %nm %02ds"
-          iteration hs elapsed.Unix.tm_min elapsed.Unix.tm_sec
+        Log.log ~section:`Info "Iteration #%n, %d callables, heap size %n took %nm %02ds"
+          iteration number_of_callables hs elapsed.Unix.tm_min elapsed.Unix.tm_sec
       in
       iterate ~iteration:(iteration + 1) callables_to_analyze
   in
-  iterate ~iteration:0 all_callables
+  try
+    iterate ~iteration:0 all_callables
+  with exn ->
+    Log.error
+      "Fixpoint iteration failed.\nException %s\nBacktrace: %s"
+      (Exn.to_string exn)
+      (Printexc.get_backtrace ());
+    raise exn
 
 
 let extract_errors scheduler ~configuration all_callables =
@@ -473,3 +612,66 @@ let extract_errors scheduler ~configuration all_callables =
     ~inputs:all_callables
     ()
   |> List.concat_no_order
+
+
+let save_results ~configuration ~analyses all_callables =
+  let emit_json_array_elements out_buffer =
+    let seen_element = ref false in
+    fun json ->
+      if !seen_element then
+        begin
+          Bi_outbuf.add_string out_buffer ",\n";
+          Json.to_outbuf out_buffer json;
+        end
+      else
+        begin
+          seen_element := true;
+          Json.to_outbuf out_buffer json;
+        end
+  in
+  match configuration.Configuration.StaticAnalysis.result_json_path with
+  | None -> ()
+  | Some directory ->
+      let save_models (Result.Analysis { Result.analysis; kind }) =
+        let kind = Result.Kind.abstract kind in
+        let module Analysis = (val analysis) in
+        let filename = Format.sprintf "%s-output.json" Analysis.name in
+        let output_path = Path.append directory ~element:filename in
+        let out_channel = open_out (Path.absolute output_path) in
+        let out_buffer = Bi_outbuf.create_channel_writer out_channel in
+        let array_emitter = emit_json_array_elements out_buffer in
+        let root =
+          configuration.Configuration.StaticAnalysis.configuration.local_root
+          |> Path.absolute
+        in
+        let config =
+          `Assoc [
+            "repo", `String root;
+          ]
+        in
+        (* I wish Yojson had a stream emitter. *)
+        Bi_outbuf.add_string out_buffer "{\n";
+        Bi_outbuf.add_string out_buffer "\"config\": ";
+        Json.to_outbuf out_buffer config;
+        Bi_outbuf.add_string out_buffer ",\n";
+        Bi_outbuf.add_string out_buffer "\"results\": [\n";
+        List.iter ~f:(emit_externalization kind array_emitter) all_callables;
+        Bi_outbuf.add_string out_buffer "\n]\n";
+        Bi_outbuf.add_string out_buffer "}\n";
+        Bi_outbuf.flush_output_writer out_buffer;
+        close_out out_channel
+      in
+      let analyses = List.map ~f:Result.get_abstract_analysis analyses in
+      let save_metadata (Result.Analysis { Result.analysis; _ }) =
+        let module Analysis = (val analysis) in
+        let filename = Format.sprintf "%s-metadata.json" Analysis.name in
+        let output_path = Path.append directory ~element:filename in
+        let out_channel = open_out (Path.absolute output_path) in
+        let out_buffer = Bi_outbuf.create_channel_writer out_channel in
+        Analysis.metadata ()
+        |> Json.to_outbuf out_buffer;
+        Bi_outbuf.flush_output_writer out_buffer;
+        close_out out_channel
+      in
+      List.iter analyses ~f:save_models;
+      List.iter analyses ~f:save_metadata

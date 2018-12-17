@@ -6,6 +6,7 @@
 open OUnit2
 
 open Ast
+open Analysis
 open Taint
 open Domains
 open Core
@@ -15,8 +16,8 @@ let is_user_controlled = (=) Sources.UserControlled
 let is_RCE = (=) Sinks.RemoteCodeExecution
 
 
-let source_taint = ForwardTaint.of_list [ Sources.TestSource; Sources.UserControlled; ]
-let sink_taint = BackwardTaint.of_list [ Sinks.TestSink; Sinks.RemoteCodeExecution; ]
+let source_taint = ForwardTaint.of_list [ Sources.Test; Sources.UserControlled; ]
+let sink_taint = BackwardTaint.of_list [ Sinks.Test; Sinks.RemoteCodeExecution; ]
 
 
 let test_partition_match_all _ =
@@ -54,7 +55,7 @@ let test_partition_match_some_sources _ =
     ~printer:(fun taint -> Sexp.to_string [%message (taint: Flow.flow list)])
     [
       {
-        source_taint = ForwardTaint.singleton Sources.TestSource;
+        source_taint = ForwardTaint.singleton Sources.Test;
         sink_taint;
       };
     ]
@@ -81,7 +82,7 @@ let test_partition_match_some_sinks _ =
     [
       {
         source_taint;
-        sink_taint = BackwardTaint.singleton Sinks.TestSink;
+        sink_taint = BackwardTaint.singleton Sinks.Test;
       };
     ]
     rest
@@ -106,12 +107,12 @@ let test_partition_match_some_sinks_and_sources _ =
     ~printer:(fun taint -> Sexp.to_string [%message (taint: Flow.flow list)])
     [
       {
-        source_taint = ForwardTaint.singleton Sources.TestSource;
+        source_taint = ForwardTaint.singleton Sources.Test;
         sink_taint = BackwardTaint.singleton Sinks.RemoteCodeExecution;
       };
       {
         source_taint;
-        sink_taint = BackwardTaint.singleton Sinks.TestSink;
+        sink_taint = BackwardTaint.singleton Sinks.Test;
       };
     ]
     rest
@@ -121,23 +122,23 @@ let test_no_errors _ =
   let open Flow in
   let source_tree_a =
     ForwardTaint.singleton Sources.UserControlled
-    |> ForwardState.make_leaf
-    |> ForwardState.make_tree [AccessPathTree.Label.Field (Identifier.create "a")]
+    |> ForwardState.Tree.create_leaf
+    |> ForwardState.Tree.prepend [AbstractTreeDomain.Label.Field "a"]
   in
   let source_tree_b =
-    ForwardTaint.singleton Sources.TestSource
-    |> ForwardState.make_leaf
-    |> ForwardState.make_tree [AccessPathTree.Label.Field (Identifier.create "b")]
+    ForwardTaint.singleton Sources.Test
+    |> ForwardState.Tree.create_leaf
+    |> ForwardState.Tree.prepend [AbstractTreeDomain.Label.Field "b"]
   in
   let sink_tree_a =
-    BackwardTaint.singleton Sinks.TestSink
-    |> BackwardState.make_leaf
-    |> BackwardState.make_tree [AccessPathTree.Label.Field (Identifier.create "a")]
+    BackwardTaint.singleton Sinks.Test
+    |> BackwardState.Tree.create_leaf
+    |> BackwardState.Tree.prepend [AbstractTreeDomain.Label.Field "a"]
   in
   let sink_tree_b =
     BackwardTaint.singleton Sinks.RemoteCodeExecution
-    |> BackwardState.make_leaf
-    |> BackwardState.make_tree [AccessPathTree.Label.Field (Identifier.create "b")]
+    |> BackwardState.Tree.create_leaf
+    |> BackwardState.Tree.prepend [AbstractTreeDomain.Label.Field "b"]
   in
   let assert_no_errors ~source_tree ~sink_tree =
     let location = Location.create ~start:Lexing.dummy_pos ~stop:Lexing.dummy_pos in
@@ -147,7 +148,8 @@ let test_no_errors _ =
     in
     let errors =
       generate_source_sink_matches ~location ~source_tree ~sink_tree
-      |> generate_errors ~define
+      |> generate_issues ~define
+      |> List.map ~f:generate_error
     in
     assert_equal
       ~msg:"Errors"
@@ -166,23 +168,28 @@ let test_errors _ =
   let open Flow in
   let source_tree_a =
     ForwardTaint.singleton Sources.UserControlled
-    |> ForwardState.make_leaf
-    |> ForwardState.make_tree [AccessPathTree.Label.Field (Identifier.create "a")]
+    |> ForwardState.Tree.create_leaf
+    |> ForwardState.Tree.prepend [AbstractTreeDomain.Label.Field "a"]
   in
   let source_tree_b =
-    ForwardTaint.singleton Sources.TestSource
-    |> ForwardState.make_leaf
-    |> ForwardState.make_tree [AccessPathTree.Label.Field (Identifier.create "b")]
+    ForwardTaint.singleton Sources.Test
+    |> ForwardState.Tree.create_leaf
+    |> ForwardState.Tree.prepend [AbstractTreeDomain.Label.Field "b"]
   in
   let sink_tree_a =
     BackwardTaint.singleton Sinks.RemoteCodeExecution
-    |> BackwardState.make_leaf
-    |> BackwardState.make_tree [AccessPathTree.Label.Field (Identifier.create "a")]
+    |> BackwardState.Tree.create_leaf
+    |> BackwardState.Tree.prepend [AbstractTreeDomain.Label.Field "a"]
   in
   let sink_tree_b =
-    BackwardTaint.singleton Sinks.TestSink
-    |> BackwardState.make_leaf
-    |> BackwardState.make_tree [AccessPathTree.Label.Field (Identifier.create "b")]
+    BackwardTaint.singleton Sinks.Test
+    |> BackwardState.Tree.create_leaf
+    |> BackwardState.Tree.prepend [AbstractTreeDomain.Label.Field "b"]
+  in
+  let sink_tree_c =
+    BackwardTaint.singleton Sinks.Thrift
+    |> BackwardState.Tree.create_leaf
+    |> BackwardState.Tree.prepend [AbstractTreeDomain.Label.Field "a"]
   in
   let assert_error ~source_tree ~sink_tree code =
     let location = Location.create ~start:Lexing.dummy_pos ~stop:Lexing.dummy_pos in
@@ -192,7 +199,8 @@ let test_errors _ =
     in
     let errors =
       generate_source_sink_matches ~location ~source_tree ~sink_tree
-      |> generate_errors ~define
+      |> generate_issues ~define
+      |> List.map ~f:generate_error
     in
     assert_equal
       ~msg:"Error"
@@ -202,11 +210,11 @@ let test_errors _ =
   in
   assert_error ~source_tree:source_tree_a ~sink_tree:sink_tree_a 5001;
   assert_error ~source_tree:source_tree_b ~sink_tree:sink_tree_b 5002;
+  assert_error ~source_tree:source_tree_a ~sink_tree:sink_tree_c 5003;
   ()
 
 
 let () =
-  Scheduler.mock () |> ignore;
   "test_taint_flow">:::[
     "partition_match_all">::test_partition_match_all;
     "partition_match_some_sources">::test_partition_match_some_sources;
@@ -215,4 +223,4 @@ let () =
     "test_no_errors">::test_no_errors;
     "test_errors">::test_errors;
   ]
-  |> run_test_tt_main
+  |> Test.run

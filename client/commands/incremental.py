@@ -41,9 +41,15 @@ class Incremental(Reporting):
             result.check()
             errors = self._get_errors(result)
             self._print(errors)
+
+            if errors:
+                self._exit_code = ExitCode.FOUND_ERRORS
         except ClientException as exception:
-            LOG.error("Error while waiting for server.")
-            LOG.error("Run `%s restart` in order to restart the server.", sys.argv[0])
+            LOG.error("Error while waiting for server: %s", str(exception))
+            arguments = sys.argv[:-1] if sys.argv[-1] == "incremental" else sys.argv
+            LOG.error(
+                "Run `%s restart` in order to restart the server.", " ".join(arguments)
+            )
             self._exit_code = ExitCode.FAILURE
 
     def _flags(self) -> List[str]:
@@ -60,6 +66,10 @@ class Incremental(Reporting):
         search_path = self._configuration.search_path
         if search_path:
             flags.extend(["-search-path", ",".join(search_path)])
+
+        excludes = self._configuration.excludes
+        for exclude in excludes:
+            flags.extend(["-exclude", exclude])
 
         return flags
 

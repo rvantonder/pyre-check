@@ -14,6 +14,7 @@ module type ANALYSIS_PROVIDED = sig
   type call_model  (* Used in fixpoint computation (widened), used at call sites. *)
   type result      (* Produced in each iteration (replaced), not used at call sites. *)
 
+  (* Used as part of a filename, so avoid spaces and slashes *)
   val name: string
 
   (* Functions to construct global operations. *)
@@ -24,7 +25,9 @@ module type ANALYSIS_PROVIDED = sig
   val reached_fixpoint: iteration:int -> previous:call_model -> next:call_model -> bool
 
   val get_errors: result -> InterproceduralError.t list
-  val summaries: Callable.t -> result option -> call_model -> Yojson.Safe.json list
+  val externalize: Callable.t -> result option -> call_model -> Yojson.Safe.json list
+  (* Additional metadata an analysis wants to save, e.g., warning code explanation. *)
+  val metadata: unit -> Yojson.Safe.json
 
   val show_call_model: call_model -> string
 end
@@ -65,17 +68,31 @@ type 'part pkg = Pkg: {
     kind: ('part, 'value) partial_kind;
     value: 'value;
   } -> 'part pkg
+[@@deriving show]
 
 type result_pkg = result pkg
-type model_pkg = model pkg
+[@@deriving show]
 
-type model_t = model_pkg Kind.Map.t
+type model_pkg = model pkg
+[@@deriving show]
+
+type model_t = {
+  models: model_pkg Kind.Map.t;
+  is_obscure: bool;
+}
+[@@deriving show]
+
 type result_t = result_pkg Kind.Map.t
+[@@deriving show]
 
 module type ANALYZER = sig
   type result
   type call_model
-  val analyze: Callable.real_target -> Statement.Define.t Node.t -> result * call_model
+  val analyze
+    :  callable: Callable.real_target
+    -> environment: (module Analysis.Environment.Handler)
+    -> define: Statement.Define.t Node.t
+    -> result * call_model
 
   (* Called once on master before analysis of individual callables. *)
   val init: types:string list -> functions:Callable.t list -> unit
@@ -142,6 +159,7 @@ module Make(Analysis : ANALYSIS_PROVIDED): ANALYSIS_RESULT_WITH_REGISTRATION
    and type call_model := Analysis.call_model
 
 val empty_model: model_t
+val obscure_model: model_t
 val empty_result: result_t
 
 val get: ('part, 'value) partial_kind -> 'part pkg Kind.Map.t -> 'value option
@@ -149,7 +167,7 @@ val get_model: ('result, 'model) analysis_data Kind.kind -> model_t -> 'model op
 val with_model:
   ('result, 'model) analysis_data Kind.kind
   -> 'model
-  -> model pkg Kind.Map.t
-  -> model pkg Kind.Map.t
+  -> model_t
+  -> model_t
 
 val get_result: ('result, 'model) analysis_data Kind.kind -> result_t -> 'result option

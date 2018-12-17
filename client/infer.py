@@ -25,7 +25,7 @@ from . import (
     is_capable_terminal,
     log,
     log_statistics,
-    resolve_analysis_directories,
+    resolve_analysis_directory,
     switch_root,
 )
 from .commands import ExitCode
@@ -434,6 +434,9 @@ def main():
     parser.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--sequential", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--strict", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--run-additional-checks", action="store_true", help=argparse.SUPPRESS
+    )
 
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     parser.add_argument(
@@ -501,58 +504,44 @@ def main():
         "--target", action="append", help="The buck target to check"
     )
 
-    analysis_directory = parser.add_argument_group("analysis-directory")
-    analysis_directory.add_argument(
-        "--analysis-directory",
+    source_directories = parser.add_argument_group("source-directories")
+    source_directories.add_argument(
+        "--source-directory",
         action="append",
-        help="The analysis directory to run the inference on.",
+        help="The source directory to run the inference on.",
     )
 
     arguments = parser.parse_args()
+
+    arguments.source_directories = arguments.source_directory
+    del arguments.source_directory
+    arguments.targets = arguments.target
+    del arguments.target
 
     start = time.time()
     stubs = []
     error_message = ""
     try:
         exit_code = ExitCode.SUCCESS
-        analysis_directories = []
         shared_analysis_directory = None
 
         arguments.capable_terminal = is_capable_terminal()
         if arguments.debug or not arguments.capable_terminal:
             arguments.noninteractive = True
+        arguments.command = None
 
         log.initialize(arguments)
         switch_root(arguments)
 
-        configuration = Configuration(
-            local_configuration_directory=arguments.local_configuration_directory,
-            local_configuration=arguments.local_configuration,
-        )
+        configuration = Configuration(local_configuration=arguments.local_configuration)
 
         if arguments.version or arguments.binary_version:
             sys.stdout.write(get_binary_version(configuration) + "\n")
             return ExitCode.SUCCESS
 
-        analysis_directories = resolve_analysis_directories(
-            arguments, configuration, prompt=False
+        analysis_directory = resolve_analysis_directory(
+            arguments, commands, configuration, prompt=False
         )
-        if len(analysis_directories) == 1:
-            analysis_directory = AnalysisDirectory(analysis_directories.pop())
-        else:
-            local_configuration_path = configuration.local_configuration
-            if local_configuration_path:
-                local_root = os.path.dirname(
-                    os.path.relpath(
-                        local_configuration_path, arguments.current_directory
-                    )
-                )
-            else:
-                local_root = None
-            shared_analysis_directory = SharedAnalysisDirectory(
-                analysis_directories, local_root
-            )
-            analysis_directory = shared_analysis_directory
         Infer(arguments, configuration, analysis_directory).run()
     except (
         buck.BuckException,
@@ -576,9 +565,9 @@ def main():
         if configuration and configuration.logger:
             log_statistics(
                 "perfpipe_pyre_infer_performance",
-                arguments,
-                configuration,
-                ints={
+                arguments=arguments,
+                configuration=configuration,
+                integers={
                     "exit_code": exit_code,
                     "runtime": int((time.time() - start) * 1000),  # ms
                     "stubs_generated": len(stubs),

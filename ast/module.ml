@@ -12,13 +12,13 @@ open Statement
 type t = {
   aliased_exports: (Access.t * Access.t) list;
   empty_stub: bool;
-  path: string option;
+  handle: File.Handle.t option;
   wildcard_exports: Access.t list;
 }
 [@@deriving compare, eq, sexp]
 
 
-let pp format { aliased_exports; empty_stub; path; wildcard_exports } =
+let pp format { aliased_exports; empty_stub; handle; wildcard_exports } =
   let aliased_exports =
     List.map aliased_exports
       ~f:(fun (source, target) -> Format.asprintf "%a -> %a" Access.pp source Access.pp target)
@@ -30,7 +30,7 @@ let pp format { aliased_exports; empty_stub; path; wildcard_exports } =
   in
   Format.fprintf format
     "%s: [%s, empty_stub = %b, __all__ = [%s]]"
-    (Option.value ~default:"unknown path" path)
+    (Option.value ~default:"unknown path" (handle >>| File.Handle.show))
     aliased_exports
     empty_stub
     wildcard_exports
@@ -61,23 +61,22 @@ let from_empty_stub ~access ~module_definition =
   is_empty_stub ~lead:[] ~tail:access
 
 
-let path { path; _ } =
-  path
+let handle { handle; _ } =
+  handle
 
 
 let wildcard_exports { wildcard_exports; _ } =
   wildcard_exports
 
 
-(* TODO(T33409564): Modules have handles, not paths. *)
-let create ~qualifier ~local_mode ?path ~stub statements =
+let create ~qualifier ~local_mode ?handle ~stub statements =
   let aliased_exports =
     let aliased_exports { Node.value; _ } =
       match value with
       | Import { Import.from = Some from; imports } ->
           let from =
             Source.expand_relative_import
-              ?handle:(path >>| File.Handle.create)
+              ?handle
               ~qualifier
               ~from
           in
@@ -139,7 +138,10 @@ let create ~qualifier ~local_mode ?path ~stub statements =
         }
         when Access.equal (Access.sanitized target) (Access.create "__all__") ->
           let to_access = function
-            | { Node.value = Expression.String { value = name; _ }; _ } -> Some (Access.create name)
+            | { Node.value = Expression.String { value = name; _ }; _ } ->
+                Access.create name
+                |> List.last
+                >>| fun access -> [access]
             | _ -> None
           in
           public_values, Some (List.filter_map ~f:to_access names)
@@ -160,7 +162,7 @@ let create ~qualifier ~local_mode ?path ~stub statements =
   {
     aliased_exports;
     empty_stub = stub && Source.equal_mode local_mode Source.PlaceholderStub;
-    path;
+    handle;
     wildcard_exports = (Option.value dunder_all ~default:toplevel_public);
   }
 

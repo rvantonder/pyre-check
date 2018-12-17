@@ -7,17 +7,32 @@ open Core
 
 
 type t =
-  | TestSource
+  | Cookies
+  | Demo
+  | PII
+  | Secrets  (* Such as passwords, tokens *)
+  | Test
+  | Thrift
   | UserControlled
 [@@deriving compare, sexp, show, hash]
 
 
+let show = function
+  | Cookies -> "Cookies"
+  | Demo -> "Demo"
+  | PII -> "PII"
+  | Secrets -> "Secrets"
+  | Test -> "Test"
+  | Thrift -> "Thrift"
+  | UserControlled -> "UserControlled"
+
+
 let create = function
-  | "TestSource" -> TestSource
+  | "Cookies" -> Cookies
+  | "PII" -> PII
+  | "Secrets" -> Secrets
+  | "Demo" -> Demo
+  | "Test" -> Test
+  | "Thrift" -> Thrift
   | "UserControlled" -> UserControlled
   | name -> failwith (Format.sprintf "Unsupported taint source %s" name)
-
-
-let to_string = function
-  | TestSource -> "test source"
-  | UserControlled -> "user controlled"

@@ -5,11 +5,13 @@
 
 
 type t =
-  | TestSource
+  | Cookies
+  | Demo
+  | PII
+  | Secrets  (* Such as passwords, tokens *)
+  | Test
+  | Thrift
   | UserControlled
 [@@deriving compare, sexp, show, hash]
 
-
 val create: string -> t
-
-val to_string: t -> string

@@ -14,7 +14,7 @@ val base_command_line_arguments
      -> bool
      -> bool
      -> bool
-     -> string list option
+     -> bool
      -> string option
      -> int
      -> string
@@ -22,6 +22,7 @@ val base_command_line_arguments
      -> string
      -> string list
      -> string option
+     -> string list
      -> string
      -> unit
      -> unit,

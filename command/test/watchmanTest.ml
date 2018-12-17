@@ -38,8 +38,10 @@ let test_watchman_exists context =
            ~relative:".watchmanconfig"))
   then
     Out_channel.write_all ".watchmanconfig" ~data:"{}";
-  let configuration = Configuration.create ~local_root:(Path.current_working_directory ()) () in
-  let watchman_root = (Configuration.pyre_root configuration) ^| "watchman" in
+  let configuration =
+    Configuration.Analysis.create ~local_root:(Path.current_working_directory ()) ()
+  in
+  let watchman_root = (Configuration.Analysis.pyre_root configuration) ^| "watchman" in
   let pid_path = watchman_root ^| "watchman.pid" in
   let lock_path = watchman_root ^| "watchman.lock" in
   let set_up _ =
@@ -51,7 +53,7 @@ let test_watchman_exists context =
   in
 
   let tear_down (pid_path, lock_path, pid) _ =
-    Commands.Server.stop ~graceful:true "." ();
+    ignore (Commands.Stop.stop ~local_root:".");
     Signal.send_i Signal.int (`Pid (Pid.of_int pid));
     Path.remove pid_path;
     Path.remove lock_path;
@@ -69,8 +71,7 @@ let test_watchman_exists context =
          ~sections:[]
          ~local_root:"."
          ~search_path:[]
-         ~project_root:(Some "."));
-  CommandTest.clean_environment ()
+         ~project_root:(Some "."))
 
 
 let test_watchman_client context =
@@ -104,11 +105,11 @@ let test_watchman_client context =
       ]
   in
   let cleanup () =
-    Commands.Server.stop ~graceful:true "." ();
-    CommandTest.clean_environment ()
+    Commands.Stop.stop ~local_root:"."
+    |> ignore
   in
   let configuration =
-    Configuration.create
+    Configuration.Analysis.create
       ~local_root:root
       ()
   in
@@ -165,9 +166,9 @@ let test_different_root context =
   Out_channel.write_all ~data:"" (root ^ "/search/stub.py");
   let local_root = Path.create_absolute (root ^ "/files") in
   let configuration =
-    Configuration.create
+    Configuration.Analysis.create
       ~local_root
-      ~search_path:[Path.create_absolute (root ^ "/search")]
+      ~search_path:[Path.SearchPath.Root (Path.create_absolute (root ^ "/search"))]
       ()
   in
 
@@ -217,9 +218,8 @@ let test_different_root context =
   CommandTest.start_server () |> ignore;
 
   let cleanup () =
-    Command.run ~argv:["_"; "-graceful"] Commands.Server.stop_command;
-    Commands.Server.stop ~graceful:true "." ();
-    CommandTest.clean_environment ()
+    Commands.Stop.stop ~local_root:"."
+    |> ignore
   in
   CommandTest.protect
     ~f:(fun () -> assert_watchman_response_ok "files/a.py" "files/other/c.py")

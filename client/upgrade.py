@@ -53,7 +53,7 @@ def run_fixme(arguments, result) -> None:
                 sorted_descriptions = sorted(list(descriptions[number]))
 
                 description = ""
-                if arguments.comment:
+                if hasattr(arguments, "comment") and arguments.comment:
                     description = ": " + arguments.comment
                 else:
                     description = ": " + ", ".join(sorted_descriptions)
@@ -76,7 +76,7 @@ def run_missing_overridden_return_annotations(
     arugments, errors: List[Tuple[str, List[Any]]]
 ) -> None:
     for path, errors in result:
-        LOG.info(f"Patching errors in `{path}`.")
+        LOG.info("Patching errors in `%s`.", path)
         errors = reversed(sorted(errors, key=lambda error: error["line"]))
 
         path = pathlib.Path(path)
@@ -92,23 +92,17 @@ def run_missing_overridden_return_annotations(
                 continue
             annotation = match.groups()[0]
 
-            if (
-                annotation == "typing.Optional[typing.Unbound]"
-                or annotation == "Optional[typing.Unbound]"
-            ):
-                annotation = "None"
-
             # Find last closing parenthesis in after line.
-            LOG.info(f"Looking at {line}: {lines[line]}")
+            LOG.info("Looking at %d: %s", line, lines[line])
             while True:
                 if "):" in lines[line]:
-                    lines[line] = lines[line].replace("):", f") -> {annotation}:")
-                    LOG.info(f"{line}: {lines[line]}")
+                    lines[line] = lines[line].replace("):", ") -> %s:" % annotation)
+                    LOG.info("%d: %s", line, lines[line])
                     break
                 else:
                     line = line + 1
 
-        LOG.warn(f"Writing patched {str(path)}")
+        LOG.warn("Writing patched %s", str(path))
         path.write_text("\n".join(lines))
 
 
@@ -147,10 +141,21 @@ if __name__ == "__main__":
         def error_path(error):
             return error["path"]
 
-        result = itertools.groupby(
-            sorted(json.load(sys.stdin), key=error_path), error_path
-        )
+        input_string = sys.stdin.read()
+        errors = json.loads(input_string) if input_string else json.loads("{}")
+        result = itertools.groupby(sorted(errors, key=error_path), error_path)
         arguments.function(arguments, result)
+    except json.decoder.JSONDecodeError:
+        if not input_string:
+            LOG.error(
+                "Recevied no input."
+                "If piping from `pyre check` be sure to use `--output=json`."
+            )
+        else:
+            LOG.error(
+                "Recevied invalid JSON as input."
+                "If piping from `pyre check` be sure to use `--output=json`."
+            )
     except Exception as error:
         LOG.error(str(error))
         LOG.info(traceback.format_exc())

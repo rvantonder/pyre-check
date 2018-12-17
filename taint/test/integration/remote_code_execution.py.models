@@ -1,0 +1,101 @@
+{
+  "kind": "issue",
+  "data": {
+    "callable": "qualifier.rce_problem",
+    "callable_line": 4,
+    "code": 5001,
+    "line": 6,
+    "start": 9,
+    "end": 10,
+    "filename": "remote_code_execution.py",
+    "message":
+      "Possible shell injection. Data from [UserControlled] source(s) may reach [RemoteCodeExecution] sink(s)",
+    "traces": [
+      {
+        "name": "forward",
+        "roots": [
+          {
+            "root": {
+              "filename": "remote_code_execution.py",
+              "line": 5,
+              "start": 24,
+              "end": 26
+            },
+            "tito": [],
+            "leaves": [
+              { "kind": "UserControlled", "name": "__userControlled" }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "backward",
+        "roots": [
+          {
+            "root": {
+              "filename": "remote_code_execution.py",
+              "line": 6,
+              "start": 9,
+              "end": 10
+            },
+            "tito": [],
+            "leaves": [ { "kind": "RemoteCodeExecution", "name": "eval" } ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "issue",
+  "data": {
+    "callable": "qualifier.subprocess_problem",
+    "callable_line": 9,
+    "code": 5001,
+    "line": 11,
+    "start": 26,
+    "end": 27,
+    "filename": "remote_code_execution.py",
+    "message":
+      "Possible shell injection. Data from [UserControlled] source(s) may reach [RemoteCodeExecution] sink(s)",
+    "traces": [
+      {
+        "name": "forward",
+        "roots": [
+          {
+            "root": {
+              "filename": "remote_code_execution.py",
+              "line": 10,
+              "start": 24,
+              "end": 26
+            },
+            "tito": [],
+            "leaves": [
+              { "kind": "UserControlled", "name": "__userControlled" }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "backward",
+        "roots": [
+          {
+            "root": {
+              "filename": "remote_code_execution.py",
+              "line": 11,
+              "start": 26,
+              "end": 27
+            },
+            "tito": [],
+            "leaves": [
+              {
+                "kind": "RemoteCodeExecution",
+                "name": "subprocess.check_call"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

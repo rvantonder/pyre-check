@@ -5,20 +5,41 @@
 
 
 type t =
+  | Demo
+  | GetAttr
   | LocalReturn  (* Special marker to infer function in-out behavior *)
+  | Logging
   | RemoteCodeExecution
-  | TestSink
+  | SQL
+  | Test
+  | Thrift
+  | XMLParser
+  | XSS
 [@@deriving compare, eq, sexp, show, hash]
 
 
-let create = function
-  | "LocalReturn" -> LocalReturn
-  | "RemoteCodeExecution" -> RemoteCodeExecution
-  | "TestSink" -> TestSink
-  | name -> failwith (Format.sprintf "Unsupported taint sink %s" name)
-
-
-let to_string = function
+let show = function
+  | Demo -> "Demo"
+  | GetAttr -> "GetAttr"
   | LocalReturn -> "LocalReturn"
-  | RemoteCodeExecution -> "RCE"
-  | TestSink -> "test sink"
+  | Logging -> "Logging"
+  | RemoteCodeExecution -> "RemoteCodeExecution"
+  | SQL -> "SQL"
+  | Thrift -> "Thrift"
+  | Test -> "Test"
+  | XMLParser -> "XMLParser"
+  | XSS -> "XSS"
+
+
+let create = function
+  | "Demo" -> Demo
+  | "GetAttr" -> GetAttr
+  | "LocalReturn" -> LocalReturn
+  | "Logging" -> Logging
+  | "RemoteCodeExecution" -> RemoteCodeExecution
+  | "SQL" -> SQL
+  | "Test" -> Test
+  | "Thrift" -> Thrift
+  | "XMLParser" -> XMLParser
+  | "XSS" -> XSS
+  | name -> failwith (Format.sprintf "Unsupported taint sink %s" name)

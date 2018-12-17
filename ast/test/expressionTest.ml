@@ -20,12 +20,17 @@ let assert_expression_equal =
 
 
 let test_negate _ =
-  assert_expression_equal
-    (negate (+True))
-    (+UnaryOperator {
-       UnaryOperator.operator = UnaryOperator.Not;
-       operand = +True;
-     })
+  let assert_negate ~expected ~negated =
+    assert_equal
+      ~printer:Expression.show
+      ~cmp:Expression.equal
+      (parse_single_expression expected)
+      (Expression.negate (parse_single_expression negated))
+  in
+  assert_negate ~expected:"True" ~negated:"not True";
+  assert_negate ~expected:"not True" ~negated:"True";
+  assert_negate ~expected:"True is False" ~negated:"True is not False";
+  assert_negate ~expected:"True is not False" ~negated:"True is False"
 
 
 let test_normalize _ =
@@ -209,7 +214,7 @@ let test_pp _ =
        ];
        Lambda.body = +Tuple [!"x"; +String (StringLiteral.create "y")]
      })
-    {|lambda (x=1, y=2) ((x, "y"()))|};
+    {|lambda (x=1, y=2) ((x, "y"))|};
 
   assert_pp_equal
     (+Access [
@@ -254,10 +259,22 @@ let test_drop_prefix _ =
     (Access.create "a.b.c")
 
 
+let test_prefix _ =
+  let assert_access_equal = assert_equal ~printer:(Access.show) ~pp_diff:(diff ~print:Access.pp) in
+
+  assert_access_equal
+    (Access.prefix (Access.create "a.b.c"))
+    (Access.create "a.b");
+
+  assert_access_equal
+    (Access.prefix [])
+    []
+
+
 let test_equality _ =
   let compare_two_locations left right =
     let full_printer ({ Node.location; _ } as expression) =
-      Format.asprintf "%s/%a" (Location.Reference.to_string location) Expression.pp expression
+      Format.asprintf "%s/%a" (Location.Reference.show location) Expression.pp expression
     in
     let value = String (StringLiteral.create "some_string") in
     let expression_left = Node.create ~location:left value in
@@ -352,7 +369,8 @@ let test_comparison_operator_override _ =
   assert_override "a < b" (Some "a.__lt__(b)");
   assert_override "a == b" (Some "a.__eq__(b)");
   assert_override "a >= b" (Some "a.__ge__(b)");
-  assert_override "a in b" (Some "b.__contains__(a)");
+  assert_override "a in b" None;
+  assert_override "a not in b" None;
   assert_override "a is not b" None
 
 
@@ -421,4 +439,4 @@ let () =
     "name_and_arguments">::test_name_and_arguments;
     "is_assert_function">::test_is_assert_function;
   ]
-  |> run_test_tt_main
+  |> Test.run

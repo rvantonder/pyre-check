@@ -104,7 +104,7 @@ module Dictionary : sig
 
   type 'expression t = {
     entries: ('expression entry) list;
-    keywords: 'expression option;
+    keywords: 'expression list;
   }
   [@@deriving compare, eq, sexp, show, hash]
 end
@@ -201,6 +201,8 @@ module Access : sig
   val create_from_identifiers: Identifier.t list -> t
   val create_from_expression: expression_t -> t
 
+  val expression: ?location: Location.t -> t -> expression_t
+
   val sanitized: t -> t
   val pp_sanitized: Format.formatter -> t -> unit
   val show_sanitized: t -> string
@@ -210,6 +212,9 @@ module Access : sig
 
   val is_strict_prefix: prefix: t -> t -> bool
   val drop_prefix: t -> prefix: t -> t
+  (* Returns all but the last component in the access. *)
+  val prefix: t -> t
+  val last: t -> expression_t access option
 
   val call
     :  ?arguments: Argument.t list
@@ -226,7 +231,7 @@ module Access : sig
   val name_and_arguments: call: t -> call option
 
   (* Calls like `__add__` have backups that are called on exceptions. *)
-  val backup: arguments: Argument.t list -> name: t -> (Argument.t list * t) option
+  val backup: name: t -> t option
   (* Some calls are redirected to method calls, e.g. `repr(x)` will call
      `x.__repr__()`. *)
   val redirect: arguments: Argument.t list -> location: Location.t -> name: t -> t option

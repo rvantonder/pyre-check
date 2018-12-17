@@ -69,7 +69,7 @@ class FilesystemTest(unittest.TestCase):
             ],
         )
 
-    def test_merge_analysis_directory(self) -> None:
+    def test_merge_into_paths(self) -> None:
         root = os.path.realpath(tempfile.mkdtemp())
 
         def create_file(name: str) -> None:
@@ -96,7 +96,7 @@ class FilesystemTest(unittest.TestCase):
         create_symlink("scipyi/sci.pyi", "scipyi/another.py")
         shared_analysis_directory = SharedAnalysisDirectory([root])
         all_paths = {}  # type: Dict[str, str]
-        shared_analysis_directory._merge_analysis_directory(root, all_paths)
+        shared_analysis_directory._merge_into_paths(root, all_paths)
         self.assertEqual(
             all_paths,
             {
@@ -161,7 +161,9 @@ class FilesystemTest(unittest.TestCase):
         )
         shared_analysis_directory._merge()
         shared_root = shared_analysis_directory.get_root()
-        os_makedirs.assert_has_calls([call(shared_root), call(shared_root + "/b")])
+        os_makedirs.assert_has_calls(
+            [call(shared_root), call(shared_root + "/b")], any_order=True
+        )
         os_symlink.assert_has_calls(
             [
                 call(root + "/first/x.py", shared_root + "/x.py"),
@@ -235,36 +237,57 @@ class FilesystemTest(unittest.TestCase):
         shared_analysis_directory.cleanup()
         rmtree.assert_called_with(shared_analysis_directory.get_root())
 
-    @patch.object(subprocess, "check_output")
-    def test_filesystem_list(self, check_output):
+    @patch.object(subprocess, "run")
+    def test_filesystem_list_bare(self, run):
         filesystem = Filesystem()
         filesystem.list(".", ".pyre_configuration.local")
 
+        def fail_command(arguments, **kwargs):
+            return subprocess.CompletedProcess(
+                args=[], returncode=1, stdout="".encode("utf-8")
+            )
+
+        run.side_effect = fail_command
+        self.assertEqual([], filesystem.list(".", ".pyre_configuration.local"))
+        run.assert_has_calls(
+            [
+                call(
+                    ["find", ".", "-name", "*.pyre_configuration.local"],
+                    stdout=subprocess.PIPE,
+                ),
+                call().stdout.decode("utf-8"),
+                call().stdout.decode().split(),
+                call(
+                    ["find", ".", "-name", "*.pyre_configuration.local"],
+                    stdout=subprocess.PIPE,
+                ),
+            ]
+        )
+
+    @patch.object(subprocess, "run")
+    def test_filesystem_list_mercurial(self, run):
         filesystem = MercurialBackedFilesystem()
         filesystem.list(".", ".pyre_configuration.local")
 
-        def fail_on_mercurial(arguments, **kwargs):
-            if "hg" in arguments:
-                raise FileNotFoundError
-            else:
-                return "external/a/.pyre_configuration.local".encode("utf-8")
+        def fail_command(arguments, **kwargs):
+            return subprocess.CompletedProcess(
+                args=[], returncode=1, stdout="".encode("utf-8")
+            )
 
-        check_output.side_effect = fail_on_mercurial
-        with self.assertRaises(EnvironmentException):
-            filesystem.list(".", ".pyre_configuration.local")
-        check_output.assert_has_calls(
+        run.side_effect = fail_command
+        self.assertEqual([], filesystem.list(".", ".pyre_configuration.local"))
+        run.assert_has_calls(
             [
-                call(["find", ".", "-name", "*.pyre_configuration.local"]),
-                call().decode("utf-8"),
-                call().decode().split(),
                 call(
                     ["hg", "files", "--include", "**.pyre_configuration.local"],
+                    stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
                 ),
-                call().decode("utf-8"),
-                call().decode().split(),
+                call().stdout.decode("utf-8"),
+                call().stdout.decode().split(),
                 call(
                     ["hg", "files", "--include", "**.pyre_configuration.local"],
+                    stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
                 ),
             ]
@@ -298,7 +321,7 @@ class FilesystemTest(unittest.TestCase):
         check_output.side_effect = FileNotFoundError
         getcwd.return_value = "default"
         shared_analysis_directory = SharedAnalysisDirectory(
-            ["first", "second"], "path/to/local"
+            ["first", "second"], ["path/to/local"], "path/to/local"
         )
 
         directory = shared_analysis_directory.get_scratch_directory()
@@ -311,7 +334,7 @@ class FilesystemTest(unittest.TestCase):
         check_output.side_effect = None
         check_output.return_value = "/scratch\n".encode("utf-8")
         shared_analysis_directory = SharedAnalysisDirectory(
-            ["first", "second"], "path/to/local"
+            ["first", "second"], ["path/to/local"], "path/to/local"
         )
         directory = shared_analysis_directory.get_scratch_directory()
         self.assertEqual(directory, "/scratch")

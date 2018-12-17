@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import resource
+import signal
 import subprocess
 import threading
 from abc import abstractmethod
@@ -33,6 +34,8 @@ class ExitCode(enum.IntEnum):
     SUCCESS = 0
     FOUND_ERRORS = 1
     FAILURE = 2
+    # If the process exited due to a signal, this will be the negative signal number.
+    SIGSEGV = -signal.SIGSEGV
 
 
 class Result:
@@ -43,6 +46,11 @@ class Result:
     def check(self) -> None:
         if self.code != ExitCode.SUCCESS:
             description = ":\n{}".format(self.output) if self.output else ""
+            if self.code == ExitCode.SIGSEGV:
+                description += (
+                    "\nThis is a Pyre bug. Please re-run Pyre with --debug "
+                    "and provide the output to the developers."
+                )
             raise ClientException(
                 "Client exited with error code {}{}".format(self.code, description)
             )
@@ -64,6 +72,7 @@ class Command:
         self._debug = arguments.debug
         self._sequential = arguments.sequential
         self._strict = arguments.strict
+        self._run_additional_checks = arguments.run_additional_checks
         self._show_error_traces = arguments.show_error_traces
         self._verbose = arguments.verbose
         self._show_parse_errors = arguments.show_parse_errors
@@ -103,6 +112,8 @@ class Command:
             flags.extend(["-sequential"])
         if self._strict:
             flags.extend(["-strict"])
+        if self._run_additional_checks:
+            flags.extend(["-run-additional-checks"])
         if self._show_error_traces:
             flags.append("-show-error-traces")
         if self._verbose:
@@ -215,6 +226,7 @@ class Command:
             return Result(code=process.returncode, output=output)
 
     def _relative_path(self, path) -> str:
+        # pyre-fixme: Expected str, got bytes
         return os.path.relpath(path, self._original_directory)
 
     def _state(self) -> State:

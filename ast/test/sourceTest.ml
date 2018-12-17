@@ -20,13 +20,13 @@ let test_parse _ =
     assert_equal local_mode expected_mode
   in
   assert_mode " # pyre-placeholder-stub" Source.PlaceholderStub;
-  assert_mode "  # pyre-do-not-check " Source.Declare;
-  assert_mode "\t# pyre-do-not-check" Source.Declare;
+  assert_mode "  # pyre-ignore-all-errors " Source.Declare;
+  assert_mode "\t# pyre-ignore-all-errors" Source.Declare;
   assert_mode " # pyre-strict" Source.Strict;
   assert_mode " # pyre-durp" Source.Default;
-  assert_mode " # pyre-do-not-check[42, 7,   15] " (Source.DefaultButDontCheck [42; 7; 15]);
+  assert_mode " # pyre-ignore-all-errors[42, 7,   15] " (Source.DefaultButDontCheck [42; 7; 15]);
   (* prevent typos from being hidden as do-not-checks *)
-  assert_mode " # pyre-do-not-check[42, 7,   15" Source.Default;
+  assert_mode " # pyre-ignore-all-errors[42, 7,   15" Source.Default;
 
   let assert_ignore lines expected_ignore_lines =
     let { Source.Metadata.ignore_lines; _ } = Source.Metadata.parse test_path lines in
@@ -370,10 +370,10 @@ let () =
   "metadata">:::[
     "parse">::test_parse;
   ]
-  |> run_test_tt_main;
+  |> Test.run;
   "source">:::[
     "qualifier">::test_qualifier;
     "expand_relative_import">::test_expand_relative_import;
     "signature_hash">::test_signature_hash;
   ]
-  |> run_test_tt_main
+  |> Test.run

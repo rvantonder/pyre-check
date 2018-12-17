@@ -5,6 +5,7 @@
 
 open Core
 
+
 let base_command_line_arguments =
   Command.Spec.(
     empty
@@ -27,16 +28,14 @@ let base_command_line_arguments =
       "-recursive-infer"
       no_arg
       ~doc:"Recursively run infer until no new annotations are generated."
+    +> flag "-run-additional-checks" no_arg ~doc:"Run additional checks after type checking"
     +> flag "-sequential" no_arg ~doc:"Turn off parallel processing (parallel on by default)."
     (* Delete -filter-directories once there are no callers *)
     +> flag
       "-filter-directories"
-      (optional (Arg_type.comma_separated string))
-      ~doc:"Only report errors for files originating from one of the filter directories."
-    +> flag
-      "-filter-directories-semicolon"
       (optional string)
-      ~doc:"Only report errors for files originating from one of the filter directories."
+      ~doc:"DIRECTORY1;... Only report errors for files \
+            under one of the semicolon-separated filter directories."
     +> flag
       "-workers"
       (optional_with_default 4 int)
@@ -61,4 +60,8 @@ let base_command_line_arguments =
       "-typeshed"
       (optional string)
       ~doc:"DIRECTORY Typeshed root directory."
+    +> flag
+      "-exclude"
+      (listed string)
+      ~doc:"REGEXP Do not parse relative paths (files and directories) matching this regexp."
     +> anon (maybe_with_default "." ("source-root" %: string)))

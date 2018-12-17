@@ -21,10 +21,10 @@ let entry =
 
 
 let create
-    ~configuration:{ Configuration.parallel; number_of_workers; _ }
+    ~configuration:({ Configuration.Analysis.parallel; number_of_workers; _ } as configuration)
     ?(bucket_multiplier = 10)
     () =
-  let heap_handle = Memory.get_heap_handle () in
+  let heap_handle = Memory.get_heap_handle configuration in
   let workers =
     Hack_parallel.Std.Worker.make
       ?call_wrapper:None
@@ -38,9 +38,11 @@ let create
   { workers; number_of_workers; bucket_multiplier; is_parallel = parallel }
 
 
-let run_process ~configuration:({ Configuration.verbose; sections; _ } as configuration) process =
+let run_process
+    ~configuration:({ Configuration.Analysis.verbose; sections; _ } as configuration)
+    process =
   Log.initialize ~verbose ~sections;
-  Configuration.set_global configuration;
+  Configuration.Analysis.set_global configuration;
   try
     let result = process () in
     Statistics.flush ();
@@ -60,12 +62,16 @@ let map_reduce
     () =
   if is_parallel then
     let number_of_workers =
-      match bucket_size with
-      | Some exact_size when exact_size > 0 ->
-          (List.length inputs / exact_size) + 1
-      | _ ->
-          let bucket_multiplier = Core.Int.min bucket_multiplier (1 + (List.length inputs / 400)) in
-          number_of_workers * bucket_multiplier
+      Core.Int.max
+        number_of_workers
+        (match bucket_size with
+         | Some exact_size when exact_size > 0 ->
+             (List.length inputs / exact_size) + 1
+         | _ ->
+             let bucket_multiplier =
+               Core.Int.min bucket_multiplier (1 + (List.length inputs / 400))
+             in
+             number_of_workers * bucket_multiplier)
     in
     let map accumulator inputs =
       (fun () -> map accumulator inputs)
@@ -110,7 +116,8 @@ let single_job { workers; _ } ~f work =
 
 
 let mock () =
-  Memory.get_heap_handle () |> ignore;
+  let configuration = Configuration.Analysis.create () in
+  Memory.get_heap_handle configuration |> ignore;
   { workers = []; number_of_workers = 1; bucket_multiplier = 1; is_parallel = false }
 
 

@@ -40,6 +40,7 @@ class AnalyzeTest(unittest.TestCase):
                     "stub",
                     "-search-path",
                     "path1,path2",
+                    "-dump-call-graph",
                 ],
             )
             command.run()
@@ -63,6 +64,7 @@ class AnalyzeTest(unittest.TestCase):
                     "path1,path2",
                     "-taint-models",
                     "taint_models",
+                    "-dump-call-graph",
                 ],
             )
             command.run()
@@ -87,6 +89,34 @@ class AnalyzeTest(unittest.TestCase):
                     "path1,path2",
                     "-taint-models",
                     "overriding_models",
+                    "-dump-call-graph",
+                ],
+            )
+            command.run()
+            call_client.assert_called_once_with(command=commands.Analyze.NAME)
+
+        arguments = mock_arguments()
+        arguments.save_results_to = "/tmp/results.json"
+        with patch.object(
+            commands.Command, "_call_client", return_value=result
+        ) as call_client, patch("json.loads", return_value=[]):
+            command = commands.Analyze(arguments, configuration, ".")
+            self.assertEqual(
+                command._flags(),
+                [
+                    "-project-root",
+                    ".",
+                    "-workers",
+                    "5",
+                    "-typeshed",
+                    "stub",
+                    "-search-path",
+                    "path1,path2",
+                    "-taint-models",
+                    "taint_models",
+                    "-save-results-to",
+                    "/tmp/results.json",
+                    "-dump-call-graph",
                 ],
             )
             command.run()

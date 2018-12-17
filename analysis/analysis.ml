@@ -6,14 +6,17 @@
 
 module AbstractDomain = AbstractDomain
 module AbstractSetDomain = AbstractSetDomain
+module AbstractElementSetDomain = AbstractElementSetDomain
 module AbstractMapDomain = AbstractMapDomain
 module AbstractPairDomain = AbstractPairDomain
+module AbstractProductDomain = AbstractProductDomain
+module AbstractTreeDomain = AbstractTreeDomain
+module AwaitableCheck = AwaitableCheck
 module Annotated = Annotated
 module Annotation = Annotation
 module BaseError = BaseError
-module CallGraph = CallGraph
-module CallGraphSharedMemory = CallGraphSharedMemory
 module Cfg = Cfg
+module Check = Check
 module Coverage = Coverage
 module Dependencies = Dependencies
 module Environment = Environment
@@ -27,4 +30,4 @@ module Type = Type
 module TypeCheck = TypeCheck
 module TypeOrder = TypeOrder
 module Inference = Inference
-module TypeResolutionSharedMemory = TypeResolutionSharedMemory
+module ResolutionSharedMemory = ResolutionSharedMemory

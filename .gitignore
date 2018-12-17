@@ -5,8 +5,8 @@ yarn-error.log
 
 _build
 .merlin
+.ignore
 /pyrelib.install
-/Makefile
 /dune
 /_tags
 /scripts/dist
@@ -21,3 +21,5 @@ website/i18n/*
 !website/i18n/en.json
 
 hack_parallel/hack_parallel/utils/get_build_id.c
+/.buckd
+/buck-out

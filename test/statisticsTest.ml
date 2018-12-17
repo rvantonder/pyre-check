@@ -9,8 +9,8 @@ open! Test  (* Suppresses logging. *)
 
 
 let () =
-  let configuration = Configuration.create () in
-  Configuration.set_global configuration
+  let configuration = Configuration.Analysis.create () in
+  Configuration.Analysis.set_global configuration
 
 
 let test_request_sample_format _ =
@@ -92,4 +92,4 @@ let () =
     "end_to_end_format">::test_end_to_end_format;
     "coverage_sample_format">::test_coverage_sample_format;
   ]
-  |> run_test_tt_main
+  |> Test.run

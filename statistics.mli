@@ -18,7 +18,9 @@ val flush: unit -> unit
 val performance
   :  ?flush: bool
   -> ?randomly_log_every: int
-  -> ?section:Log.section
+  -> ?always_log_time_threshold: float
+  -> ?section: Log.section
+  -> ?category: string
   -> name: string
   -> timer: Timer.t
   -> ?integers: (string * int) list
@@ -40,4 +42,10 @@ val event
   -> ?integers: (string * int) list
   -> ?normals: (string * string) list
   -> unit
+  -> unit
+
+val log_exception
+  :  exn
+  -> fatal: bool
+  -> origin: string
   -> unit

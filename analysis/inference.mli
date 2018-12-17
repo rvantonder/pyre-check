@@ -12,9 +12,9 @@ module State : sig
   include module type of struct include TypeCheck.State end
 
   val initial_backward
-    :  ?configuration: Configuration.t
+    :  ?configuration: Configuration.Analysis.t
     -> Statement.Define.t Node.t
-    -> forward:t
+    -> forward: t
     -> t
 
   val update_only_existing_annotations: t -> t -> t
@@ -25,13 +25,12 @@ module Fixpoint : Fixpoint.Fixpoint with type state := State.t
 
 val backward_fixpoint
   :  Cfg.t
-  -> initial_forward:State.t
-  -> initialize_backward:(forward:State.t -> State.t)
+  -> initial_forward: State.t
+  -> initialize_backward: (forward: State.t -> State.t)
   -> Fixpoint.t
 
 val infer
-  :  Configuration.t
-  -> (module Environment.Handler)
-  -> ?mode_override: Source.mode
-  -> Source.t
+  :  configuration: Configuration.Analysis.t
+  -> environment: (module Environment.Handler)
+  -> source: Source.t
   -> TypeCheck.Result.t

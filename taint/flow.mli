@@ -29,6 +29,15 @@ type flow_state = {
 }
 [@@deriving sexp]
 
+type issue = {
+  code: int;
+  flow: flow;
+  issue_location: Location.t;
+  (* Only used to create the Pyre errors. *)
+  define: Ast.Statement.Define.t Ast.Node.t;
+}
+[@@deriving sexp]
+
 val partition_flows:
   ?sources: (Sources.t -> bool)
   -> ?sinks: (Sinks.t -> bool)
@@ -37,11 +46,20 @@ val partition_flows:
 
 val generate_source_sink_matches:
   location: Location.t
-  -> source_tree: ForwardState.access_path_tree
-  -> sink_tree: BackwardState.access_path_tree
+  -> source_tree: ForwardState.Tree.t
+  -> sink_tree: BackwardState.Tree.t
   -> candidate
 
-val generate_errors:
+val generate_issues:
   define: Define.t Node.t
   -> candidate
-  -> Interprocedural.Error.t list
+  -> issue list
+
+val to_json:
+  Interprocedural.Callable.t
+  -> issue
+  -> Yojson.Safe.json
+
+val generate_error: issue -> Interprocedural.Error.t
+
+val code_metadata: unit -> Yojson.Safe.json

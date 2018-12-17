@@ -10,18 +10,15 @@ open Analysis
 open Network
 
 open State
-open Configuration
-open ServerConfiguration
+open Configuration.Analysis
+open Configuration.Server
 open Protocol
 open Request
 
 open Pyre
 
 
-exception InvalidRequest
-
-
-let parse ~root ~request =
+let parse_lsp ~configuration ~request =
   let open LanguageServer.Types in
   let log_method_error method_name =
     Log.error
@@ -29,18 +26,16 @@ let parse ~root ~request =
       method_name
       (Yojson.Safe.pretty_to_string request)
   in
-  let uri_to_contained_relative_path ~root ~uri =
-    let to_relative_path ~root ~path =
-      String.chop_prefix ~prefix:(root ^ "/") path
-      |> Option.value ~default:path
-    in
-    String.chop_prefix ~prefix:"file://" uri
-    >>= (fun path ->
-        if String.is_prefix ~prefix:root path then
-          Some (to_relative_path ~root ~path)
-        else
-          None)
-    |> Option.value ~default:uri
+  let uri_to_path ~uri =
+    let search_path = Configuration.Analysis.search_path configuration in
+    Path.from_uri uri
+    >>= fun path ->
+    match Path.search_for_path ~search_path ~path with
+    | Some path ->
+        Some path
+    | None ->
+        Ast.SharedMemory.SymlinksToPaths.get (Path.absolute path)
+        >>= fun path -> Path.search_for_path ~search_path ~path
   in
   let process_request request_method =
     match request_method with
@@ -58,21 +53,16 @@ let parse ~root ~request =
               id;
               _;
             } ->
-              let file =
-                uri_to_contained_relative_path
-                  ~root:(Path.absolute root)
-                  ~uri
-                |> fun relative ->
-                Path.create_relative ~root ~relative
-                |> File.create
-              in
-              Some (GetDefinitionRequest {
-                  DefinitionRequest.id;
-                  file;
-                  (* The LSP protocol starts a file at line 0, column 0.
-                     Pyre starts a file at line 1, column 0. *)
-                  position = { Ast.Location.line = line + 1; column = character };
-                })
+              uri_to_path ~uri
+              >>| File.create
+              >>| fun file ->
+              GetDefinitionRequest {
+                DefinitionRequest.id;
+                file;
+                (* The LSP protocol starts a file at line 0, column 0.
+                   Pyre starts a file at line 1, column 0. *)
+                position = { Ast.Location.line = line + 1; column = character };
+              }
           | Ok _ ->
               None
           | Error yojson_error ->
@@ -92,16 +82,11 @@ let parse ~root ~request =
                 };
               _;
             } ->
-              let file =
-                uri_to_contained_relative_path
-                  ~root:(Path.absolute root)
-                  ~uri
-                |> fun relative ->
-                Path.create_relative ~root ~relative
-                |> File.create
-              in
+              uri_to_path ~uri
+              >>| File.create
+              >>| fun file ->
               Log.log ~section:`Server "Closed file %a" File.pp file;
-              Some (CloseDocument file)
+              CloseDocument file
           | Ok _ ->
               log_method_error request_method;
               None
@@ -123,16 +108,11 @@ let parse ~root ~request =
                 };
               _;
             } ->
-              let file =
-                uri_to_contained_relative_path
-                  ~root:(Path.absolute root)
-                  ~uri
-                |> fun relative ->
-                Path.create_relative ~root ~relative
-                |> File.create
-              in
+              uri_to_path ~uri
+              >>| File.create
+              >>| fun file ->
               Log.log ~section:`Server "Opened file %a" File.pp file;
-              Some (OpenDocument file)
+              OpenDocument file
           | Ok _ ->
               log_method_error request_method;
               None
@@ -154,15 +134,10 @@ let parse ~root ~request =
                 };
               _;
             } ->
-              let file =
-                uri_to_contained_relative_path
-                  ~root:(Path.absolute root)
-                  ~uri
-                |> fun relative ->
-                Path.create_relative ~root ~relative
-                |> File.create ?content:text
-              in
-              Some (SaveDocument file)
+              uri_to_path ~uri
+              >>| File.create ?content:text
+              >>| fun file ->
+              SaveDocument file
           | Ok _ ->
               log_method_error request_method;
               None
@@ -185,21 +160,16 @@ let parse ~root ~request =
               id;
               _;
             } ->
-              let file =
-                uri_to_contained_relative_path
-                  ~root:(Path.absolute root)
-                  ~uri
-                |> fun relative ->
-                Path.create_relative ~root ~relative
-                |> File.create
-              in
-              Some (HoverRequest {
-                  DefinitionRequest.id;
-                  file;
-                  (* The LSP protocol starts a file at line 0, column 0.
-                     Pyre starts a file at line 1, column 0. *)
-                  position = { Ast.Location.line = line + 1; column = character };
-                })
+              uri_to_path ~uri
+              >>| File.create
+              >>| fun file ->
+              HoverRequest {
+                DefinitionRequest.id;
+                file;
+                (* The LSP protocol starts a file at line 0, column 0.
+                   Pyre starts a file at line 1, column 0. *)
+                position = { Ast.Location.line = line + 1; column = character };
+              }
           | Ok _ ->
               None
           | Error yojson_error ->
@@ -237,8 +207,16 @@ type response = {
 
 
 module LookupCache = struct
-  let get ~state:{ lookups; environment; _ } ~configuration file =
-    let handle = File.handle ~configuration file in
+  let handle ~configuration file =
+    try
+      File.handle ~configuration file
+      |> Option.some
+    with File.NonexistentHandle error ->
+      Log.info "%s" error;
+      None
+
+
+  let get_by_handle ~state:{ lookups; environment; _ } ~file ~handle =
     let cache_read = String.Table.find lookups (File.Handle.show handle) in
     match cache_read with
     | Some _ ->
@@ -259,22 +237,111 @@ module LookupCache = struct
         lookup
 
 
+  let get ~state ~configuration file =
+    handle ~configuration file
+    >>= fun handle -> get_by_handle ~state ~file ~handle
+
+
   let evict ~state:{ lookups; _ } ~configuration file =
-    File.handle ~configuration file
-    |> File.Handle.show
-    |> String.Table.remove lookups
+    handle ~configuration file
+    >>| File.Handle.show
+    >>| String.Table.remove lookups
+    |> ignore
 
 
-  let find_annotation ~state ~configuration file position =
-    get ~state ~configuration file
-    >>= fun { table; source } ->
-    Lookup.get_annotation table ~position ~source
+  let log_lookup ~handle ~position ~timer ~name ?(integers = []) ?(normals = []) () =
+    let normals =
+      let base_normals = [
+        "handle", File.Handle.show handle;
+        "position", Location.show_position position;
+      ]
+      in
+      base_normals @ normals
+    in
+    Statistics.performance
+      ~section:`Event
+      ~category:"perfpipe_pyre_ide_integration"
+      ~name
+      ~timer
+      ~integers
+      ~normals
+      ()
+
+
+  let find_annotation ~state ~configuration ~file ~position =
+    let find_annotation_by_handle handle =
+      let timer = Timer.start () in
+      let annotation =
+        get_by_handle ~state ~file ~handle
+        >>= fun { table; source } ->
+        Lookup.get_annotation table ~position ~source
+      in
+      let normals =
+        annotation
+        >>| fun (location, annotation) ->
+        [
+          "resolved location", Location.Instantiated.show location;
+          "resolved annotation", Type.show annotation;
+        ]
+      in
+      log_lookup
+        ~handle
+        ~position
+        ~timer
+        ~name:"find annotation"
+        ?normals
+        ();
+      annotation
+    in
+    handle ~configuration file
+    >>= find_annotation_by_handle
+
+
+  let find_all_annotations ~state ~configuration ~file =
+    let find_annotation_by_handle handle =
+      let timer = Timer.start () in
+      let annotations =
+        get_by_handle ~state ~file ~handle
+        >>| (fun { table; _ } -> Lookup.get_all_annotations table)
+        |> Option.value ~default:[]
+      in
+      let integers = ["annotation list size", List.length annotations] in
+      log_lookup
+        ~handle
+        ~position:Location.any_position
+        ~timer
+        ~name:"find all annotations"
+        ~integers
+        ();
+      annotations
+    in
+    handle ~configuration file
+    >>| find_annotation_by_handle
 
 
   let find_definition ~state ~configuration file position =
-    get ~state ~configuration file
-    >>= fun { table; source } ->
-    Lookup.get_definition table ~position ~source
+    let find_definition_by_handle handle =
+      let timer = Timer.start () in
+      let definition =
+        get_by_handle ~state ~file ~handle
+        >>= fun { table; source } ->
+        Lookup.get_definition table ~position ~source
+      in
+      let normals =
+        definition
+        >>| fun location -> ["resolved location", Location.Instantiated.show location]
+      in
+      log_lookup
+        ~handle
+        ~position
+        ~timer
+        ~name:"find definition"
+        ?normals
+        ();
+      definition
+    in
+    handle ~configuration file
+    >>= find_definition_by_handle
 end
 
 
@@ -288,15 +355,14 @@ let process_client_shutdown_request ~state ~id =
   { state; response = Some (LanguageServerProtocolResponse response) }
 
 
-let process_type_query_request ~state:({ State.environment; _ } as state) ~request =
+let process_type_query_request ~state:({ State.environment; _ } as state) ~configuration ~request =
   let (module Handler: Environment.Handler) = environment in
   let process_request () =
     let order = (module Handler.TypeOrderHandler : TypeOrder.Handler) in
-    let resolution = Environment.resolution environment () in
+    let resolution = TypeCheck.resolution environment () in
     let parse_and_validate access =
       let annotation =
-        Expression.Access access
-        |> Node.create_with_default_location
+        Expression.Access.expression access
         |> Resolution.parse_annotation resolution
       in
       if TypeOrder.is_instantiated order annotation then
@@ -373,7 +439,7 @@ let process_type_query_request ~state:({ State.environment; _ } as state) ~reque
         |> Handler.class_definition
         >>| (fun { Analysis.Resolution.class_definition; _ } -> class_definition)
         >>| Annotated.Class.create
-        >>| Annotated.Class.methods
+        >>| Annotated.Class.methods ~resolution
         >>| List.map ~f:to_method
         >>| (fun methods -> TypeQuery.Response (TypeQuery.FoundMethods methods))
         |> Option.value
@@ -386,6 +452,12 @@ let process_type_query_request ~state:({ State.environment; _ } as state) ~reque
     | TypeQuery.NormalizeType expression ->
         parse_and_validate expression
         |> (fun annotation -> TypeQuery.Response (TypeQuery.Type annotation))
+
+    | TypeQuery.SaveServerState path ->
+        let path = Path.absolute path in
+        Log.info "Saving server state into `%s`" path;
+        Memory.save_shared_memory ~path;
+        TypeQuery.Response (TypeQuery.Success ())
 
     | TypeQuery.Signature function_name ->
         let keep_known_annotation annotation =
@@ -400,7 +472,7 @@ let process_type_query_request ~state:({ State.environment; _ } as state) ~reque
           | Some { Node.value; _ } ->
               begin
                 match Annotation.annotation value with
-                | Type.Callable { Type.Callable.overloads; _ } ->
+                | Type.Callable { Type.Callable.implementation; overloads; _ } ->
                     let overload_signature { Type.Callable.annotation; parameters } =
                       match parameters with
                       | Type.Callable.Defined parameters ->
@@ -426,7 +498,7 @@ let process_type_query_request ~state:({ State.environment; _ } as state) ~reque
                     in
                     TypeQuery.Response
                       (TypeQuery.FoundSignature
-                         (List.filter_map overloads ~f:overload_signature))
+                         (List.filter_map (implementation :: overloads) ~f:overload_signature))
                 | _ ->
                     TypeQuery.Error
                       (Format.sprintf
@@ -483,30 +555,30 @@ let process_type_query_request ~state:({ State.environment; _ } as state) ~reque
               TypeQuery.Error (Format.sprintf "Expression had errors: %s" descriptions)
         end
 
-    | TypeQuery.TypeAtLocation {
-        Ast.Location.path;
-        start = ({ Ast.Location.line; column} as start);
-        _;
-      } ->
-        let source =
-          Ast.SharedMemory.Sources.get (File.Handle.create path)
-          >>= (fun { Ast.Source.path; _ } -> path)
-          >>| File.create
-          >>= File.content
-          |> Option.value ~default:""
-        in
-        File.Handle.create path
-        |> Ast.SharedMemory.Sources.get
-        >>| Lookup.create_of_source environment
-        >>= Lookup.get_annotation ~position:start ~source
-        >>| (fun (_, annotation) -> TypeQuery.Response (TypeQuery.Type annotation))
-        |> Option.value ~default:(
+    | TypeQuery.TypeAtPosition { file; position; } ->
+        let default =
           TypeQuery.Error (
-            Format.sprintf
-              "Not able to get lookup at %s:%d:%d"
-              path
-              line
-              column))
+            Format.asprintf
+              "Not able to get lookup at %a:%a"
+              Path.pp (File.path file)
+              Location.pp_position position)
+        in
+        LookupCache.find_annotation ~state ~configuration ~file ~position
+        >>| (fun (location, annotation) ->
+            TypeQuery.Response (TypeQuery.TypeAtLocation { TypeQuery.location; annotation }))
+        |> Option.value ~default
+
+    | TypeQuery.TypesInFile file ->
+        let default =
+          TypeQuery.Error (
+            Format.asprintf
+              "Not able to get lookups in %a"
+              Path.pp (File.path file))
+        in
+        LookupCache.find_all_annotations ~state ~configuration ~file
+        >>| List.map ~f:(fun (location, annotation) -> { TypeQuery.location; annotation })
+        >>| (fun list -> TypeQuery.Response (TypeQuery.TypesAtLocations list))
+        |> Option.value ~default
   in
   let response =
     try
@@ -545,9 +617,15 @@ let process_display_type_errors_request
         Hashtbl.data errors
         |> List.concat
     | _ ->
-        List.map ~f:(File.handle ~configuration) files
-        |> List.filter_map ~f:(Hashtbl.find errors)
-        |> List.concat
+        let errors file =
+          try
+            File.handle ~configuration file
+            |> Hashtbl.find errors
+            |> Option.value ~default:[]
+          with (File.NonexistentHandle _) ->
+            []
+        in
+        List.concat_map ~f:errors files
   in
   { state; response = Some (TypeCheckResponse (build_file_to_error_map ~state errors)) }
 
@@ -556,7 +634,29 @@ let process_type_check_request
     ~state:({ State.environment; errors; scheduler; deferred_requests; _ } as state)
     ~configuration:({ debug; _ } as configuration)
     ~request:{ TypeCheckRequest.update_environment_with; check} =
-  Annotated.Class.AttributesCache.clear ();
+  Annotated.Class.Attribute.Cache.clear ();
+  let update_environment_with, check =
+    let keep file =
+      match File.handle ~configuration file with
+      | exception ((File.NonexistentHandle _) as uncaught_exception) ->
+          Statistics.log_exception uncaught_exception ~fatal:false ~origin:"server";
+          false
+      | handle ->
+          begin
+            match Ast.SharedMemory.Modules.get ~qualifier:(Source.qualifier ~handle) with
+            | Some existing ->
+                let existing_handle =
+                  Module.handle existing
+                  |> Option.value ~default:handle
+                in
+                File.Handle.equal existing_handle handle
+            | _  ->
+                true
+          end
+    in
+    List.filter update_environment_with ~f:keep,
+    List.filter check ~f:keep
+  in
   let (module Handler: Environment.Handler) = environment in
   let scheduler = Scheduler.with_parallel scheduler ~is_parallel:(List.length check > 5) in
 
@@ -568,13 +668,16 @@ let process_type_check_request
           let signature_hashes ~default =
             let table = File.Handle.Table.create () in
             let add_signature_hash file =
-              let handle = File.handle file ~configuration in
-              let signature_hash =
-                Ast.SharedMemory.Sources.get handle
-                >>| Source.signature_hash
-                |> Option.value ~default
-              in
-              Hashtbl.set table ~key:handle ~data:signature_hash
+              try
+                let handle = File.handle file ~configuration in
+                let signature_hash =
+                  Ast.SharedMemory.Sources.get handle
+                  >>| Source.signature_hash
+                  |> Option.value ~default
+                in
+                Hashtbl.set table ~key:handle ~data:signature_hash
+              with (File.NonexistentHandle _) ->
+                Log.log ~section:`Server "Unable to get handle for %a" File.pp file
             in
             List.iter update_environment_with ~f:add_signature_hash;
             table
@@ -592,6 +695,11 @@ let process_type_check_request
           if not (List.is_empty newly_introduced_handles) then
             Ast.SharedMemory.HandleKeys.add ~handles:newly_introduced_handles;
           Ast.SharedMemory.Sources.remove ~handles;
+          let targets =
+            let find_target file = Path.readlink (File.path file) in
+            List.filter_map update_environment_with ~f:find_target
+          in
+          Ast.SharedMemory.SymlinksToPaths.remove ~targets;
           Service.Parser.parse_sources ~configuration ~scheduler ~files:update_environment_with
           |> ignore;
 
@@ -613,7 +721,33 @@ let process_type_check_request
               let new_signature_hash = Hashtbl.find_exn new_signature_hashes handle in
               new_signature_hash <> old_signature_hash
             in
-            if signature_hash_changed then
+            let has_starred_import () =
+              let was_starred_import { Node.value; _ } =
+                (* Heuristic: if the list of exports for a module we import matches exactly
+                   what that module exports, this was a starred import before preprocessing. *)
+                let open Statement in
+                match value with
+                | Import { Import.from = Some from; imports } ->
+                    begin
+                      match Ast.SharedMemory.Modules.get_exports ~qualifier:from with
+                      | Some exports ->
+                          let import_names =
+                            List.map imports ~f:(fun { Import.name; _ } -> name )
+                          in
+                          List.equal ~equal:Access.equal import_names exports
+                      | _ ->
+                          false
+                    end
+                | _ ->
+                    false
+              in
+
+              Ast.SharedMemory.Sources.get handle
+              >>| Source.statements
+              |> Option.value ~default:[]
+              |> List.exists ~f:was_starred_import
+            in
+            if signature_hash_changed or has_starred_import () then
               let qualifier = Ast.Source.qualifier ~handle in
               Handler.dependencies qualifier
             else
@@ -632,7 +766,7 @@ let process_type_check_request
           Sexp.pp [%message (dependents: File.Handle.t list)];
         let to_file handle =
           Ast.SharedMemory.Sources.get handle
-          >>= fun { Ast.Source.path; _ } -> path
+          >>= (fun { Ast.Source.handle; _ } -> File.Handle.to_path ~configuration handle)
           >>| File.create
         in
         List.filter_map dependents ~f:to_file
@@ -641,7 +775,12 @@ let process_type_check_request
       if List.is_empty files then
         deferred_requests
       else
-        (TypeCheckRequest (TypeCheckRequest.create ~check:files ())) :: deferred_requests
+        (TypeCheckRequest
+           (TypeCheckRequest.create
+              ~update_environment_with:files
+              ~check:files
+              ())) ::
+        deferred_requests
     else
       deferred_requests
   in
@@ -649,8 +788,19 @@ let process_type_check_request
   (* Repopulate the environment. *)
   let repopulate_handles =
     (* Clean up all data related to updated files. *)
-    let handles = List.map update_environment_with ~f:(File.handle ~configuration) in
+    let handle file =
+      try
+        Some (File.handle ~configuration file)
+      with File.NonexistentHandle _ ->
+        None
+    in
+    let handles = List.filter_map update_environment_with ~f:handle in
     Ast.SharedMemory.Sources.remove ~handles;
+    let targets =
+      let find_target file = Path.readlink (File.path file) in
+      List.filter_map update_environment_with ~f:find_target
+    in
+    Ast.SharedMemory.SymlinksToPaths.remove ~targets;
     Handler.purge ~debug handles;
     update_environment_with
     |> List.iter ~f:(LookupCache.evict ~state ~configuration);
@@ -664,19 +814,23 @@ let process_type_check_request
       in
       List.partition_tf ~f:is_stub update_environment_with
     in
-    let stubs = Service.Parser.parse_sources ~configuration ~scheduler ~files:stubs in
+    let { Service.Parser.parsed = stubs; _ } =
+      Service.Parser.parse_sources ~configuration ~scheduler ~files:stubs
+    in
     let sources =
       let keep file =
-        (File.handle ~configuration file
-         |> fun handle -> Some (Source.qualifier ~handle)
+        (handle file
+         >>= fun handle -> Some (Source.qualifier ~handle)
          >>= Handler.module_definition
-         >>= Module.path
-         >>| (fun existing_path -> File.Handle.show handle = existing_path))
+         >>= Module.handle
+         >>| (fun existing_handle -> File.Handle.equal handle existing_handle))
         |> Option.value ~default:true
       in
       List.filter ~f:keep sources
     in
-    let sources = Service.Parser.parse_sources ~configuration ~scheduler ~files:sources in
+    let { Service.Parser.parsed = sources; _ } =
+      Service.Parser.parse_sources ~configuration ~scheduler ~files:sources
+    in
     stubs @ sources
   in
   Log.log
@@ -684,14 +838,15 @@ let process_type_check_request
     "Repopulating the environment with %a"
     Sexp.pp [%message (repopulate_handles: File.Handle.t list)];
   List.filter_map ~f:Ast.SharedMemory.Sources.get repopulate_handles
-  |> Service.Environment.populate environment;
+  |> Service.Environment.populate ~configuration environment;
   let classes_to_infer =
     let get_class_keys handle =
       Handler.DependencyHandler.get_class_keys ~handle
     in
     List.concat_map repopulate_handles ~f:get_class_keys
   in
-  Analysis.Environment.infer_protocols ~handler:environment ~classes_to_infer ();
+  let resolution = TypeCheck.resolution environment () in
+  Analysis.Environment.infer_protocols ~handler:environment resolution ~classes_to_infer ();
   Statistics.event
     ~section:`Memory
     ~name:"shared memory size"
@@ -700,16 +855,22 @@ let process_type_check_request
   Service.Postprocess.register_ignores ~configuration scheduler repopulate_handles;
 
   (* Compute new set of errors. *)
-  let new_source_handles = List.map ~f:(File.handle ~configuration) check in
+  let handle file =
+    try
+      Some (File.handle ~configuration file)
+    with File.NonexistentHandle _ ->
+      None
+  in
+  let new_source_handles = List.filter_map ~f:handle check in
 
   (* Clear all type resolution info from shared memory for all affected sources. *)
   List.filter_map ~f:Ast.SharedMemory.Sources.get new_source_handles
   |> List.concat_map ~f:(Preprocessing.defines ~extract_into_toplevel:true)
   |> List.map ~f:(fun { Node.value = { Statement.Define.name; _ }; _ } -> name)
-  |> TypeResolutionSharedMemory.remove;
+  |> ResolutionSharedMemory.remove;
 
   let new_errors, _ =
-    Service.TypeCheck.analyze_sources
+    Service.Check.analyze_sources
       ~scheduler
       ~configuration
       ~environment
@@ -734,6 +895,22 @@ let process_type_check_request
   }
 
 
+let process_get_definition_request
+    ~state
+    ~configuration
+    ~request:{ DefinitionRequest.id; file; position } =
+  let response =
+    let open LanguageServer.Protocol in
+    let definition = LookupCache.find_definition ~state ~configuration file position in
+    TextDocumentDefinitionResponse.create ~configuration ~id ~location:definition
+    |> TextDocumentDefinitionResponse.to_yojson
+    |> Yojson.Safe.to_string
+    |> (fun response -> LanguageServerProtocolResponse response)
+    |> Option.some
+  in
+  { state; response }
+
+
 let rec process
     ~socket
     ~state:({ State.environment; deferred_requests; errors; lock; connections; _ } as state)
@@ -744,6 +921,17 @@ let rec process
     ~request =
   let timer = Timer.start () in
   let (module Handler: Environment.Handler) = environment in
+  let log_request_error ~error =
+    Statistics.event
+      ~section:`Error
+      ~name:"request error"
+      ~normals:[
+        "request", Request.show request;
+        "error", error;
+      ]
+      ~flush:true
+      ()
+  in
   let result =
     try
       match request with
@@ -752,7 +940,7 @@ let rec process
           process_type_check_request ~state ~configuration ~request
 
       | TypeQueryRequest request ->
-          process_type_query_request ~state ~request
+          process_type_query_request ~state ~configuration ~request
 
       | DisplayTypeErrors files ->
           process_display_type_errors_request ~state ~configuration ~files
@@ -791,8 +979,8 @@ let rec process
           { state; response = None }
 
       | LanguageServerProtocolRequest request ->
-          parse
-            ~root:configuration.local_root
+          parse_lsp
+            ~configuration
             ~request:(Yojson.Safe.from_string request)
           >>| (fun request -> process ~state ~socket ~configuration:server_configuration ~request)
           |> Option.value ~default:{ state; response = None }
@@ -815,23 +1003,14 @@ let rec process
           in
           { state; response }
 
-      | GetDefinitionRequest { DefinitionRequest.id; file; position } ->
-          let response =
-            let open LanguageServer.Protocol in
-            let definition = LookupCache.find_definition ~state ~configuration file position in
-            TextDocumentDefinitionResponse.create ~id ~location:definition
-            |> TextDocumentDefinitionResponse.to_yojson
-            |> Yojson.Safe.to_string
-            |> (fun response -> LanguageServerProtocolResponse response)
-            |> Option.some
-          in
-          { state; response }
+      | GetDefinitionRequest request ->
+          process_get_definition_request ~state ~configuration ~request
 
       | HoverRequest { DefinitionRequest.id; file; position } ->
           let response =
             let open LanguageServer.Protocol in
             let result =
-              LookupCache.find_annotation ~state ~configuration file position
+              LookupCache.find_annotation ~state ~configuration ~file ~position
               >>| fun (location, annotation) ->
               {
                 HoverResponse.location;
@@ -849,9 +1028,12 @@ let rec process
       | OpenDocument file ->
           (* Make sure cache is fresh. We might not have received a close notification. *)
           LookupCache.evict ~state ~configuration file;
-          LookupCache.get ~state ~configuration file
-          |> ignore;
-          { state; response = None }
+          (* Make sure the IDE flushes its state about this file, by sending back all the
+             errors for this file. *)
+          process_type_check_request
+            ~state
+            ~configuration
+            ~request:{ TypeCheckRequest.update_environment_with = [file]; check = [file]; }
 
       | CloseDocument file ->
           LookupCache.evict ~state ~configuration file;
@@ -881,20 +1063,37 @@ let rec process
 
       (* Requests that cannot be fulfilled here. *)
       | ClientConnectionRequest _ ->
-          raise InvalidRequest
-    with Unix.Unix_error (kind, name, parameters) ->
-      Log.log_unix_error (kind, name, parameters);
-      Statistics.event
-        ~name:"unix error on request"
-        ~normals:[
-          "request", Request.show request;
-          "error kind", Unix.error_message kind;
-          "error name", name;
-          "parameters", parameters;
-        ]
-        ~flush:true
-        ();
-      { state; response = None }
+          Log.warning  "Explicitly ignoring ClientConnectionRequest request";
+          { state; response = None }
+    with
+    | Unix.Unix_error (kind, name, parameters) ->
+        Log.log_unix_error (kind, name, parameters);
+        log_request_error
+          ~error:(Format.sprintf "Unix error %s: %s(%s)" (Unix.error_message kind) name parameters);
+        { state; response = None }
+    | Analysis.TypeOrder.Untracked annotation ->
+        log_request_error ~error:(Format.sprintf "Untracked %s" (Type.show annotation));
+        { state; response = None }
+    | uncaught_exception ->
+        let should_stop =
+          match request with
+          | HoverRequest _
+          | GetDefinitionRequest _ ->
+              false
+          | _ ->
+              true
+        in
+        Statistics.log_exception uncaught_exception ~fatal:should_stop ~origin:"server";
+        if should_stop then
+          Mutex.critical_section
+            lock
+            ~f:(fun () ->
+                Operations.stop
+                  ~reason:"uncaught exception"
+                  ~configuration:server_configuration
+                  ~socket:!connections.socket);
+        { state; response = None }
+
   in
   Statistics.performance
     ~name:"server request"

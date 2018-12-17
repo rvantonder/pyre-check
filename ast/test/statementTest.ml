@@ -26,12 +26,51 @@ let test_is_method _ =
       docstring = None;
       return_annotation = None;
       async = false;
-      generated = false;
       parent = parent >>| Access.create;
     }
   in
   assert_true (Define.is_method (define ~name:"path.source.foo" ~parent:(Some "path.source")));
   assert_false (Define.is_method (define ~name:"foo" ~parent:None))
+
+
+let test_is_classmethod _ =
+  let define name decorators =
+    {
+      Define.name = Access.create name;
+      parameters = [];
+      body = [+Pass];
+      decorators;
+      docstring = None;
+      return_annotation = None;
+      async = false;
+      parent = Some (Access.create "bar");
+    } in
+
+  assert_false (Define.is_class_method (define "foo" []));
+  assert_false (Define.is_class_method (define "__init__" []));
+  assert_true (Define.is_class_method (define "foo" [!"classmethod"]));
+  assert_true (Define.is_class_method (define "__init_subclass__" []));
+  assert_true (Define.is_class_method (define "__new__" []));
+  assert_true (Define.is_class_method (define "__class_getitem__" []))
+
+
+let test_is_class_property _ =
+  let define name decorators =
+    {
+      Define.name = Access.create name;
+      parameters = [];
+      body = [+Pass];
+      decorators;
+      docstring = None;
+      return_annotation = None;
+      async = false;
+      parent = Some (Access.create "bar");
+    }
+  in
+  assert_false (Define.is_class_property (define "foo" []));
+  assert_false (Define.is_class_property (define "__init__" []));
+  assert_true (Define.is_class_property (define "foo" [!"pyre_extensions.classproperty"]));
+  assert_false (Define.is_class_property (define "__new__" []))
 
 
 let test_decorator _ =
@@ -44,7 +83,6 @@ let test_decorator _ =
       docstring = None;
       return_annotation = None;
       async = false;
-      generated = false;
       parent = None;
     } in
 
@@ -52,7 +90,6 @@ let test_decorator _ =
   assert_false (Define.is_static_method (define [!"foo"]));
   assert_true (Define.is_static_method (define [!"staticmethod"]));
   assert_true (Define.is_static_method (define [!"foo"; !"staticmethod"]));
-  assert_true (Define.is_class_method (define [!"classmethod"]));
 
   assert_false (Define.is_abstract_method (define []));
   assert_false (Define.is_abstract_method (define [!"foo"]));
@@ -86,7 +123,6 @@ let test_is_constructor _ =
         docstring = None;
         return_annotation = None;
         async = false;
-        generated = false;
         parent;
       }
     in
@@ -94,6 +130,8 @@ let test_is_constructor _ =
   in
   assert_is_constructor ~name:"Foo.__init__" ~parent:(Some "Foo") true;
   assert_is_constructor ~in_test:true ~name:"Foo.setUp" ~parent:(Some "Foo") true;
+  assert_is_constructor ~in_test:true ~name:"Foo.async_setUp" ~parent:(Some "Foo") true;
+  assert_is_constructor ~in_test:false ~name:"Foo.async_setUp" ~parent:(Some "Foo") false;
   assert_is_constructor ~in_test:true ~name:"Foo.with_context" ~parent:(Some "Foo") true;
   assert_is_constructor ~name:"__init__" false;
   assert_is_constructor ~name:"Foo.bar" ~parent:(Some "Foo") false
@@ -146,6 +184,68 @@ let test_constructor _ =
     ~exists:false
 
 
+let test_defines _ =
+  let assert_define source ~method_name ~exists ~total =
+    let definition =
+      match parse_single_statement source with
+      | { Node.value = Class definition; _ } -> definition
+      | _ -> failwith "Could not parse class"
+    in
+    assert_equal
+      total
+      (List.length (Class.defines definition))
+      ~msg:"Wrong number of defines"
+      ~printer:Int.to_string;
+    let method_id = Identifier.create method_name in
+    match Class.find_define definition ~method_name:method_id with
+    | Some define when exists ->
+        assert_equal
+          define.Node.value.Define.name
+          [Access.Identifier method_id]
+          ~printer:Access.show
+    | None when not exists ->
+        ()
+    | Some { Node.value = { Define.name; _ }; _ } ->
+        Format.asprintf
+          "method %a found when not expected (looking for %s)"
+          Access.pp name
+          method_name
+        |> assert_failure
+    | None ->
+        Format.sprintf "method %s not found when expected" method_name
+        |> assert_failure
+  in
+
+  assert_define
+    {|
+      class Foo:
+        def method(self):
+          pass
+
+        def other(self):
+          pass
+    |}
+    ~total:2
+    ~method_name:"method"
+    ~exists:true;
+
+  assert_define
+    {|
+      class Foo:
+        def method(self):
+          pass
+
+        def other(self):
+          pass
+
+        def third(self):
+          pass
+    |}
+    ~total:3
+    ~method_name:"non_existant"
+    ~exists:false
+
+
 let test_attributes _ =
   let create_attribute
       ?(primitive = false)
@@ -157,8 +257,7 @@ let test_attributes _ =
       ~value
       () =
     {
-      Attribute.target =
-        Node.create_with_default_location (Expression.Access (Access.create target));
+      Attribute.target = Expression.Access.expression (Access.create target);
       annotation;
       defines;
       value;
@@ -336,8 +435,7 @@ let test_attributes _ =
     let value =
       value
       >>| Access.create
-      >>| (fun access -> Expression.Access access)
-      >>| Node.create_with_default_location
+      >>| Access.expression
     in
     target, annotation, value, setter, number_of_defines
   in
@@ -358,7 +456,6 @@ let test_attributes _ =
               docstring = None;
               return_annotation = Some !"int";
               async = false;
-              generated = false;
               parent = None;
             }
             in
@@ -773,73 +870,56 @@ let test_docstring _ =
 
 
 let test_pp _ =
-  let to_lines = String.split_on_chars ~on:['\n'] in
-
-  let test_equal pretty_print_expected source =
+  let assert_pretty_print ~expected source =
     let pretty_print_expected =
-      pretty_print_expected
+      expected
       |> String.lstrip ~drop:((=) '\n')
       |> Test.trim_extra_indentation
     in
-
     let source =
       Test.trim_extra_indentation source
       |> String.rstrip ~drop:((=) '\n')
     in
-
     let pretty_print_of_source =
-      to_lines source
+      source
+      |> String.split_on_chars ~on:['\n']
       |> Parser.parse
       |> List.map ~f:Statement.show
       |> String.concat ~sep:"\n"
       |> String.rstrip ~drop:((=) '\n')
     in
-
     assert_equal
       ~printer:Fn.id
       pretty_print_expected
       pretty_print_of_source
   in
-
   (* Test 1 : simple def *)
-  let source =
+  assert_pretty_print
     {|
       def foo(bar):
         x = "hello world"
     |}
-  in
-
-  let pretty_print_expect =
-    {|
+    ~expected:{|
       def #foo(bar):
-        x = "hello world"()
-    |}
-  in
-
-  test_equal pretty_print_expect source;
+        x = "hello world"
+    |};
 
   (* Test 2 : def with multiple decorators *)
-  let source =
+  assert_pretty_print
     {|
       @decorator1
       @decorator2
       def foo(bar):
         x = "hello world"
     |}
-  in
-
-  let pretty_print_expect =
-    {|
+    ~expected:{|
       @(decorator1, decorator2)
       def #foo(bar):
-        x = "hello world"()
-    |}
-  in
-
-  test_equal pretty_print_expect source;
+        x = "hello world"
+    |};
 
   (* Test 3 : multiple defs and statements *)
-  let source =
+  assert_pretty_print
     {|
       @decorator1
       @decorator2
@@ -851,25 +931,19 @@ let test_pp _ =
         x = "hello squirrel"
         y = 5
     |}
-  in
-
-  let pretty_print_expect =
-    {|
+    ~expected:{|
       @(decorator1, decorator2)
       def #foo(bar):
-        x = "hello world"()
+        x = "hello world"
 
       @(decorator3)
       def #foo(baz):
-        x = "hello squirrel"()
+        x = "hello squirrel"
         y = 5
-    |}
-  in
-
-  test_equal pretty_print_expect source;
+    |};
 
   (* Test 4 : cover classes, for loops, compound statements *)
-  let source =
+  assert_pretty_print
     {|
       @class_decorator
       class Foo(Bar):
@@ -878,24 +952,17 @@ let test_pp _ =
             i = 1
           i = 2
     |}
-  in
-
-  let pretty_print_expect =
-    {|
+    ~expected:{|
       @(class_decorator)
       class Foo(Bar):
         def Foo#baz(quux):
           for i in xrange(quux):
             i = 1
           i = 2
-
-    |}
-  in
-
-  test_equal pretty_print_expect source;
+    |};
 
   (* Test 5 : try/except/finally blocks *)
-  let source =
+  assert_pretty_print
     {|
       try:
         raise Exception("whoops")
@@ -911,12 +978,9 @@ let test_pp _ =
       finally:
         pass
     |}
-  in
-
-  let pretty_print_expect =
-    {|
+    ~expected:{|
       try:
-        raise Exception("whoops"())
+        raise Exception("whoops")
       except SomeError as e:
         pass
       except (AnotherError, YetAnotherError):
@@ -928,13 +992,10 @@ let test_pp _ =
         pass
       finally:
         pass
-    |}
-  in
-
-  test_equal pretty_print_expect source;
+    |};
 
   (* Test 6 : while and if/then/else and list access *)
-  let source =
+  assert_pretty_print
     {|
       while x:
         i = 1
@@ -944,12 +1005,11 @@ let test_pp _ =
           i = 2
         j = 2
       i[j] = 3
+      i[j] += 3
+      i[j][7] = 8
       i[j::1] = i[:j]
     |}
-  in
-
-  let pretty_print_expect =
-    {|
+    ~expected:{|
       while x:
         i = 1
         if i > 0:
@@ -957,50 +1017,78 @@ let test_pp _ =
         else:
           i = 2
         j = 2
-      i[j] = 3
-      i[slice(j,None,1)] = i[slice(None,j,None)]
-    |}
-  in
+      i.__setitem__(j,3)
+      i.__setitem__(j,i[j].__add__(3))
+      i[j].__setitem__(7,8)
+      i.__setitem__(slice(j,None,1),i[slice(None,j,None)])
+    |};
 
-  test_equal pretty_print_expect source;
+  assert_pretty_print
+    "i[j] = 5 if 1 else 1"
+    ~expected:"i.__setitem__(j,5 if 1 else 1)";
 
-  let source =
+  assert_pretty_print
+    "x = i[j] = y"
+    ~expected:{|
+      x = y
+      i.__setitem__(j,y)
+    |};
+
+  assert_pretty_print
+    "j[i] = x = i[j] = y"
+    ~expected:{|
+      j.__setitem__(i,y)
+      x = y
+      i.__setitem__(j,y)
+    |};
+
+  assert_pretty_print
+    "x, i[j] = y"
+    ~expected:{|
+      (x, i[j]) = y
+    |};
+
+  assert_pretty_print
+    " i[j] = x =  ... # type: Something"
+    ~expected:{|
+      i.__setitem__(j,...)
+      x: "Something" = ...
+    |};
+
+  assert_pretty_print
     {|
       @some.decorator('with_a_string')
       def decorator_test():
         return 5
     |}
-  in
-
-  let pretty_print_expect =
-    {|
-      @(some.decorator("with_a_string"()))
+    ~expected:{|
+      @(some.decorator("with_a_string"))
       def #decorator_test():
         return 5
     |}
-  in
-
-  test_equal pretty_print_expect source
 
 
 let () =
   "define">:::[
     "is_method">::test_is_method;
+    "classmethod">::test_is_classmethod;
+    "is_class_property">::test_is_class_property;
     "decorator">::test_decorator;
     "is_constructor">::test_is_constructor;
     "dump">::test_dump;
   ]
-  |> run_test_tt_main;
+  |> Test.run;
   "class">:::[
     "constructor">::test_constructor;
+    "defines">::test_defines;
     "attributes">::test_attributes;
     "update">::test_update;
   ]
-  |> run_test_tt_main;
+  |> Test.run;
   "statement">:::[
     "assume">::test_assume;
     "preamble">::test_preamble;
     "terminates">::test_terminates;
     "pp">::test_pp;
   ]
-  |> run_test_tt_main
+  |> Test.run

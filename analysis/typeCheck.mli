@@ -36,22 +36,22 @@ module State : sig
      The join takes the union of keys and does an element-wise join on the
      values. *)
   and t = {
-    configuration: Configuration.t;
+    configuration: Configuration.Analysis.t;
     resolution: Resolution.t;
     errors: Error.t Location.Reference.Map.t;
     define: Define.t Node.t;
     nested_defines: nested_define Location.Reference.Map.t;
     bottom: bool;
-    resolution_fixpoint: (Annotation.t Access.Map.Tree.t) Int.Map.Tree.t
+    resolution_fixpoint: ResolutionSharedMemory.annotation_map Int.Map.Tree.t
   }
   [@@deriving eq, show]
 
   val create
-    :  ?configuration: Configuration.t
+    :  ?configuration: Configuration.Analysis.t
     -> ?bottom: bool
     -> resolution: Resolution.t
     -> define: Statement.Define.t Node.t
-    -> ?resolution_fixpoint: (Annotation.t Access.Map.Tree.t) Int.Map.Tree.t
+    -> ?resolution_fixpoint: ResolutionSharedMemory.annotation_map Int.Map.Tree.t
     -> unit
     -> t
 
@@ -59,7 +59,7 @@ module State : sig
   val coverage: t -> Coverage.t
 
   val initial
-    :  ?configuration: Configuration.t
+    :  ?configuration: Configuration.Analysis.t
     -> resolution: Resolution.t
     -> Define.t Node.t
     -> t
@@ -87,8 +87,20 @@ module Result : sig
 end
 
 val check
-  :  Configuration.t
-  -> (module Environment.Handler)
-  -> ?mode_override: Source.mode
-  -> Source.t
+  :  configuration: Configuration.Analysis.t
+  -> environment: (module Environment.Handler)
+  -> source: Source.t
   -> Result.t
+
+val resolution
+  :  (module Environment.Handler)
+  -> ?annotations: Annotation.t Access.Map.t
+  -> unit
+  -> Resolution.t
+
+val resolution_with_key
+  :  environment: (module Environment.Handler)
+  -> parent: Expression.Access.t option
+  -> access: Expression.Access.t
+  -> key: int option
+  -> Resolution.t

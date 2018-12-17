@@ -177,7 +177,7 @@ module Dictionary = struct
 
   type 'expression t = {
     entries: ('expression entry) list;
-    keywords: 'expression option;
+    keywords: 'expression list;
   }
   [@@deriving compare, eq, sexp, show, hash]
 end
@@ -365,6 +365,12 @@ module Access = struct
     Format.asprintf "%a" pp access
 
 
+  let expression ?location access =
+    let location = Option.value location ~default:Location.Reference.any in
+    Access access
+    |> Node.create ~location
+
+
   let sanitized access =
     let sanitized element =
       match element with
@@ -457,6 +463,18 @@ module Access = struct
     |> Option.value ~default:access
 
 
+  let prefix access =
+    match List.rev access with
+    | _head :: prefix_reversed ->
+        List.rev prefix_reversed
+    | _ ->
+        []
+
+
+  let last access =
+    List.last access
+
+
   let call ?(arguments = []) ~location ~name () =
     [Identifier (Identifier.create name); Call { Node.location; value = arguments }]
 
@@ -479,7 +497,7 @@ module Access = struct
         None
 
 
-  let backup ~arguments ~name =
+  let backup ~name =
     match List.rev name with
     | (Identifier name) :: _ ->
         (* cf. https://docs.python.org/3/reference/datamodel.html#object.__radd__ *)
@@ -501,7 +519,7 @@ module Access = struct
           | "__or__" -> Some "__ror__"
           | _ -> None
         end
-        >>| fun name -> List.rev arguments, [Identifier (Identifier.create name)]
+        >>| fun name -> [Identifier (Identifier.create name)]
     | _ ->
         None
 
@@ -590,12 +608,12 @@ module ComparisonOperator = struct
       | Equals -> Some "__eq__"
       | GreaterThan -> Some "__gt__"
       | GreaterThanOrEquals -> Some "__ge__"
-      | In -> Some "__contains__"
       | Is
       | IsNot -> None
       | LessThan -> Some "__lt__"
       | LessThanOrEquals -> Some "__le__"
       | NotEquals -> Some "__ne__"
+      | In -> None
       | NotIn -> None
     in
     operator
@@ -628,14 +646,47 @@ module UnaryOperator = struct
 end
 
 
-let negate ({ Node.location; _ } as node) =
-  {
-    Node.location;
-    value = UnaryOperator {
-        UnaryOperator.operator = UnaryOperator.Not;
-        operand = node;
-      };
-  }
+let negate ({ Node.location; value } as node) =
+  match value with
+  | UnaryOperator {
+      UnaryOperator.operator = UnaryOperator.Not;
+      operand;
+    } ->
+      operand
+  | ComparisonOperator {
+      ComparisonOperator.operator = ComparisonOperator.IsNot;
+      left;
+      right;
+    } ->
+      {
+        Node.location;
+        value = ComparisonOperator {
+            ComparisonOperator.operator = ComparisonOperator.Is;
+            left;
+            right;
+          };
+      }
+  | ComparisonOperator {
+      ComparisonOperator.operator = ComparisonOperator.Is;
+      left;
+      right;
+    } ->
+      {
+        Node.location;
+        value = ComparisonOperator {
+            ComparisonOperator.operator = ComparisonOperator.IsNot;
+            left;
+            right;
+          };
+      }
+  | _ ->
+      {
+        Node.location;
+        value = UnaryOperator {
+            UnaryOperator.operator = UnaryOperator.Not;
+            operand = node;
+          };
+      }
 
 
 (* Changes boolean expressions to negation normal form *)
@@ -835,6 +886,17 @@ module PrettyPrinter = struct
           pp_generator generator
           pp_generators xs
 
+  and pp_keywords formatter keywords =
+    match keywords with
+    | [] -> ()
+    | keyword :: [] -> Format.fprintf formatter ", %a" pp_expression_t keyword
+    | keyword :: keywords ->
+        Format.fprintf
+          formatter
+          ", %a%a"
+          pp_expression_t keyword
+          pp_keywords keywords
+
   and pp_parameter formatter { Node.value = { Parameter.name; value; annotation }; _ } =
     let identifier = Identifier.show name in
     match value,annotation with
@@ -930,13 +992,13 @@ module PrettyPrinter = struct
           | StringLiteral.Bytes -> "b"
           | _ -> ""
         in
-        let expressions =
+        begin
           match kind with
-          | StringLiteral.Format expressions -> expressions
-          | _ -> []
-        in
-        Format.fprintf formatter "%s\"%s\"(%a)" bytes value pp_expression_list expressions
-
+          | StringLiteral.Format expressions ->
+              Format.fprintf formatter "%s\"%s\"(%a)" bytes value pp_expression_list expressions
+          | _ ->
+              Format.fprintf formatter "%s\"%s\"" bytes value
+        end
     | ComparisonOperator { ComparisonOperator.left; operator; right } ->
         Format.fprintf
           formatter
@@ -953,11 +1015,6 @@ module PrettyPrinter = struct
     | Complex float_value -> Format.fprintf formatter "%f" float_value
 
     | Dictionary { Dictionary.entries; keywords } ->
-        let pp_keywords format = function
-          | Some keywords ->
-              Format.fprintf format ", %a" pp_expression_t keywords
-          | None ->
-              () in
         Format.fprintf
           formatter
           "Dictionary { %a%a }"

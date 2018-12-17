@@ -27,6 +27,7 @@ let test_expand_relative_imports _ =
     ~handle:"module/submodule/test.py"
     {|
       from builtins import str
+      from future.builtins import str
       from . import a
       from .relative import b
       from .. import c
@@ -34,6 +35,7 @@ let test_expand_relative_imports _ =
     |}
     {|
       from builtins import str
+      from future.builtins import str
       from module.submodule import a
       from module.submodule.relative import b
       from module import c
@@ -264,6 +266,14 @@ let test_qualify _ =
       $local_qualifier$a, *$local_qualifier$b = [1]
     |};
 
+  assert_qualify
+    {|
+      [*a, b] = [1]
+    |}
+    {|
+      [*$local_qualifier$a, $local_qualifier$b] = [1]
+    |};
+
   (* Qualify classes. *)
   assert_qualify
     {|
@@ -387,17 +397,83 @@ let test_qualify _ =
     |};
 
 
-  (* Qualify strings. *)
+  (* Only qualify strings for annotations and potential type aliases. *)
   assert_qualify
     {|
       from typing import List
       T = 'List'
       def foo() -> 'List[int]': ...
+      a = ['List']
+      d = {'List': 'List'}
+      f = MayBeType['List']
     |}
     {|
       from typing import List
       $local_qualifier$T = 'typing.List'
       def qualifier.foo() -> 'typing.List[int]': ...
+      $local_qualifier$a = ['List']
+      $local_qualifier$d = {'List': 'List'}
+      $local_qualifier$f = MayBeType['typing.List']
+    |};
+  assert_qualify
+    {|
+      from typing import List
+      def f():
+        T = 'List'
+        def foo() -> 'List[int]': ...
+        a = ['List']
+        d = {'List': 'List'}
+        f = MayBeType['List']
+    |}
+    {|
+      from typing import List
+      def qualifier.f():
+        $local_qualifier?f$T = 'List'
+        def qualifier.f.foo() -> 'typing.List[int]': ...
+        $local_qualifier?f$a = ['List']
+        $local_qualifier?f$d = {'List': 'List'}
+        $local_qualifier?f$f = MayBeType['List']
+    |};
+  assert_qualify
+    {|
+      def foo(arg):
+        x = 'arg'
+        return {'arg': x}
+    |}
+    {|
+      def qualifier.foo($parameter$arg):
+        $local_qualifier?foo$x = 'arg'
+        return {'arg': $local_qualifier?foo$x}
+    |};
+  assert_qualify
+    {|
+      from typing import TypeVar as TV
+      class C:
+        T = 'C'
+        TSelf = TV("TSelf", bound="C")
+    |}
+    {|
+      from typing import TypeVar as TV
+      class qualifier.C():
+        qualifier.C.T = "C"
+        qualifier.C.TSelf = typing.TypeVar("TSelf",$parameter$bound = "qualifier.C")
+    |};
+  assert_qualify
+    {|
+      from typing import TypeVar as TV
+      class X: pass
+      class A: pass
+      class C:
+        T = 'C'
+        TSelf = TV("TSelf", "C", X, "A")
+    |}
+    {|
+      from typing import TypeVar as TV
+      class qualifier.X(): pass
+      class qualifier.A(): pass
+      class qualifier.C():
+        qualifier.C.T = "C"
+        qualifier.C.TSelf = typing.TypeVar("TSelf", "qualifier.C", qualifier.X, "qualifier.A")
     |};
 
   (* Qualify functions. *)
@@ -620,6 +696,97 @@ let test_qualify _ =
         return None
       else:
         return $local_qualifier$variable
+    |};
+
+  assert_qualify
+    {|
+       a: x = ...
+       def x():
+         ...
+    |}
+    {|
+       $local_qualifier$a: qualifier.x = ...
+       def qualifier.x(): ...
+    |};
+
+  assert_qualify
+    {|
+       def f(a: x): ...
+       def x(): ...
+    |}
+    {|
+       def qualifier.f($parameter$a: qualifier.x): ...
+       def qualifier.x():
+         ...
+    |};
+
+  assert_qualify
+    {|
+      class C:
+        def f(parameter: x):
+          ...
+        def x():
+          ...
+    |}
+    {|
+      class qualifier.C:
+        def qualifier.C.f($parameter$parameter: qualifier.C.x):
+          ...
+        def qualifier.C.x():
+          ...
+    |};
+
+  assert_qualify
+    {|
+      class slice:
+        pass
+      class C:
+        slice: int = ...
+    |}
+    {|
+      class qualifier.slice:
+        pass
+      class qualifier.C:
+        qualifier.C.slice: int = ...
+    |};
+
+  assert_qualify
+    {|
+      def f():
+        pass
+      class C:
+        def f():
+          return f()
+        a = f
+        def g():
+          return f()
+    |}
+    {|
+      def qualifier.f():
+        pass
+      class qualifier.C:
+        def qualifier.C.f():
+          return qualifier.f()
+        qualifier.C.a = qualifier.C.f
+        def qualifier.C.g():
+          return qualifier.f()
+    |};
+  assert_qualify
+    {|
+      class C:
+        alias = int
+        def f() -> alias:
+          return alias
+        def g(x: alias):
+          pass
+    |}
+    {|
+      class qualifier.C:
+        qualifier.C.alias = int
+        def qualifier.C.f() -> qualifier.C.alias:
+          return alias
+        def qualifier.C.g($parameter$x: qualifier.C.alias):
+          pass
     |}
 
 
@@ -789,6 +956,144 @@ let test_replace_version_specific_code _ =
     |}
 
 
+let test_replace_platform_specific_code _ =
+  let assert_preprocessed ?(handle="stub.pyi") source expected =
+    assert_source_equal
+      (parse ~handle expected)
+      (Preprocessing.replace_platform_specific_code (parse ~handle source))
+  in
+  assert_preprocessed
+    {|
+      if sys.platform != 'win32':
+        a = 1
+    |}
+    {|
+      a = 1
+    |};
+  assert_preprocessed
+    {|
+      if sys.platform != 'win32':
+        a = 2
+        b = 3
+      else:
+        c = 4
+    |}
+    {|
+      a = 2
+      b = 3
+    |};
+  assert_preprocessed
+    {|
+      if sys.platform != 'win32':
+        a = 5
+      else:
+        b = 6
+        c = 7
+    |}
+    {|
+      a = 5
+    |};
+  assert_preprocessed
+    {|
+      if sys.platform != 'linux':
+        a = 8
+    |}
+    {|
+      if sys.platform != 'linux':
+        a = 8
+    |};
+  assert_preprocessed
+    {|
+      if sys.platform != 'linux':
+        a = 9
+      else:
+        b = 10
+        c = 11
+    |}
+    {|
+      if sys.platform != 'linux':
+        a = 9
+      else:
+        b = 10
+        c = 11
+    |};
+  assert_preprocessed
+    {|
+      if sys.platform == 'win32' or sys.platform == 'darwin':
+        a = 12
+    |}
+    {|
+      if sys.platform == 'win32' or sys.platform == 'darwin':
+        a = 12
+    |};
+  assert_preprocessed
+    {|
+      if sys.platform == 'win32' or sys.platform == 'darwin':
+        a = 13
+      else:
+        b = 14
+    |}
+    {|
+      if sys.platform == 'win32' or sys.platform == 'darwin':
+        a = 13
+      else:
+        b = 14
+    |};
+  assert_preprocessed
+    {|
+      if sys.platform == 'win32' or flag:
+        a = 15
+      else:
+        b = 16
+    |}
+    {|
+      if sys.platform == 'win32' or flag:
+        a = 15
+      else:
+        b = 16
+    |};
+  assert_preprocessed
+    {|
+      if sys.platform == 'linux' or flag:
+        a = 17
+      else:
+        b = 18
+    |}
+    {|
+      if sys.platform == 'linux' or flag:
+        a = 17
+      else:
+        b = 18
+    |};
+  assert_preprocessed
+    {|
+      if 'win32' == sys.platform:
+        a = 19
+      else:
+        b = 20
+        c = 21
+    |}
+    {|
+      b = 20
+      c = 21
+    |};
+  assert_preprocessed
+    {|
+      if 'linux' == sys.platform:
+        a = 22
+        b = 23
+      else:
+        c = 24
+    |}
+    {|
+      if 'linux' == sys.platform:
+        a = 22
+        b = 23
+      else:
+        c = 24
+    |}
+
+
 let test_expand_type_checking_imports _ =
   let assert_expanded source expected =
     assert_source_equal
@@ -839,7 +1144,9 @@ let test_expand_type_checking_imports _ =
 
 
 let test_expand_wildcard_imports _ =
-  let configuration = Configuration.create ~local_root:(Path.current_working_directory ()) () in
+  let configuration =
+    Configuration.Analysis.create ~local_root:(Path.current_working_directory ()) ()
+  in
   let assert_expanded environment_sources check_source expected =
     let create_file (name, source) =
       File.create
@@ -858,12 +1165,15 @@ let test_expand_wildcard_imports _ =
     let files = List.map environment_sources ~f:create_file in
     let file_to_check = create_file ("test.py", check_source) in
     clear_memory (file_to_check :: files);
-    let file_to_check_handle =
+    let { Service.Parser.parsed; _ } =
       Service.Parser.parse_sources
-        ~configuration:(Configuration.create ~local_root:(Path.current_working_directory ()) ())
+        ~configuration:(
+          Configuration.Analysis.create ~local_root:(Path.current_working_directory ()) ())
         ~scheduler:(Scheduler.mock ())
         ~files:(file_to_check :: files)
-      |> List.find_exn ~f:(fun handle -> File.Handle.show handle = "test.py")
+    in
+    let file_to_check_handle =
+      List.find_exn parsed ~f:(fun handle -> File.Handle.show handle = "test.py")
     in
     assert_equal
       ~cmp:(List.equal ~equal:Statement.equal)
@@ -936,15 +1246,15 @@ let test_expand_wildcard_imports _ =
     |}
 
 
-let test_expand_returns _ =
+let test_expand_implicit_returns _ =
   let assert_expand source expected =
     assert_source_equal
       (parse expected)
-      (Preprocessing.expand_returns (parse source))
+      (Preprocessing.expand_implicit_returns (parse source))
   in
   let assert_expand_implicit_returns source expected_body =
     assert_source_equal
-      (Preprocessing.expand_returns (parse source))
+      (Preprocessing.expand_implicit_returns (parse source))
       (Source.create ~handle:(File.Handle.create "test.py")
          [
            +Define {
@@ -955,34 +1265,10 @@ let test_expand_returns _ =
              docstring = None;
              return_annotation = None;
              async = false;
-             generated = false;
              parent = None;
            };
          ])
   in
-  assert_expand
-    "return None"
-    {|
-      $return = None
-      return $return
-    |};
-  assert_expand
-    "return foo"
-    {|
-      $return = foo
-      return $return
-    |};
-
-  assert_expand
-    {|
-      def foo():
-        return None
-    |}
-    {|
-      def foo():
-        $return = None
-        return $return
-    |};
   assert_expand_implicit_returns
     {|
       def foo():
@@ -1026,22 +1312,6 @@ let test_expand_returns _ =
         is_implicit = true
       }
     ];
-  assert_expand
-    {|
-      def foo():
-        try:
-          pass
-        finally:
-          return 1
-    |}
-    {|
-      def foo():
-        try:
-          pass
-        finally:
-          $return = 1
-          return $return
-    |};
 
   (* Lol termination analysis. *)
   assert_expand_implicit_returns
@@ -1074,36 +1344,19 @@ let test_expand_returns _ =
     |}
 
 
-let test_expand_ternary _ =
-  let assert_expand source expected =
-    assert_source_equal
-      (parse expected)
-      (Preprocessing.expand_ternary_assign (parse source))
-  in
-
-  assert_expand
-    {|
-      a = 5 if 1 else 3
-    |}
-    {|
-      if 1:
-        a = 5
-      else:
-        a = 3
-    |}
-
-
 let test_defines _ =
   let assert_defines statements defines =
+    let printer defines = List.map defines ~f:Define.show |> String.concat ~sep:"\n" in
     assert_equal
       ~cmp:(List.equal ~equal:Define.equal)
+      ~printer
+      defines
       (Preprocessing.defines ~extract_into_toplevel:true (Source.create statements)
        |> List.map ~f:Node.value)
-      defines in
-
-  let define =
+  in
+  let create_define name =
     {
-      Define.name = Access.create "foo";
+      Define.name = Access.create name;
       parameters = [
         +{
           Parameter.name = ~~"a";
@@ -1116,26 +1369,26 @@ let test_defines _ =
       docstring = None;
       return_annotation = None;
       async = false;
-      generated = false;
       parent = None;
     }
   in
-  let toplevel =
+  let create_toplevel body =
     {
       Define.name = Access.create "$toplevel";
       parameters = [];
-      body = [+Define define];
+      body;
       decorators = [];
       docstring = None;
       return_annotation = None;
       async = false;
-      generated = false;
       parent = None;
     }
   in
+
+  let define = create_define "foo" in
   assert_defines
     [+Define define]
-    [toplevel; define];
+    [create_toplevel [+Define define]; define];
 
   let inner =
     {
@@ -1152,7 +1405,6 @@ let test_defines _ =
       docstring = None;
       return_annotation = None;
       async = false;
-      generated = false;
       parent = None;
     }
   in
@@ -1171,26 +1423,28 @@ let test_defines _ =
       docstring = None;
       return_annotation = None;
       async = false;
-      generated = false;
-      parent = None;
-    }
-  in
-  let toplevel =
-    {
-      Define.name = Access.create "$toplevel";
-      parameters = [];
-      body = [+Define define];
-      decorators = [];
-      docstring = None;
-      return_annotation = None;
-      async = false;
-      generated = false;
       parent = None;
     }
   in
   assert_defines
     [+Define define]
-    [toplevel; define]
+    [create_toplevel [+Define define]; define];
+
+  (* Note: Defines are returned in reverse order. *)
+  let define_foo = create_define "foo" in
+  let define_bar = create_define "bar" in
+  let parent =
+    {
+      Statement.Class.name = Access.create "Foo";
+      bases = [];
+      body = [+Define define_foo; +Define define_bar];
+      decorators = [];
+      docstring = None;
+    }
+  in
+  assert_defines
+    [+Class parent]
+    [create_toplevel [+Class parent]; define_bar; define_foo]
 
 
 let test_classes _ =
@@ -1214,7 +1468,6 @@ let test_classes _ =
           docstring = None;
           return_annotation = None;
           async = false;
-          generated = false;
           parent = Some (Access.create "foo");
         };
       ];
@@ -1251,17 +1504,144 @@ let test_classes _ =
     [class_define; inner]
 
 
+let test_replace_mypy_extensions_stub _ =
+  let given = parse
+      ~handle:"mypy_extensions.pyi"
+      {|
+      from typing import Dict, Type, TypeVar, Optional, Union, Any, Generic
+
+      _T = TypeVar('_T')
+      _U = TypeVar('_U')
+
+      def TypedDict(typename: str, fields: Dict[str, Type[_T]], total: bool = ...) -> Type[dict]:
+        ...
+
+      def Arg(type: _T = ..., name: Optional[str] = ...) -> _T: ...
+      def DefaultArg(type: _T = ..., name: Optional[str] = ...) -> _T: ...
+    |}
+  in
+  let expected = parse
+      ~handle:"mypy_extensions.pyi"
+      {|
+      from typing import Dict, Type, TypeVar, Optional, Union, Any, Generic
+
+      _T = TypeVar('_T')
+      _U = TypeVar('_U')
+
+      TypedDict: typing._SpecialForm = ...
+
+      def Arg(type: _T = ..., name: Optional[str] = ...) -> _T: ...
+      def DefaultArg(type: _T = ..., name: Optional[str] = ...) -> _T: ...
+    |}
+  in
+  assert_source_equal expected (Preprocessing.replace_mypy_extensions_stub given)
+
+
+let test_expand_typed_dictionaries _ =
+  let assert_expand ?(qualifier = []) source expected =
+    let actual =
+      parse ~qualifier source
+      |> Preprocessing.qualify
+      |> Preprocessing.expand_typed_dictionary_declarations
+    in
+    assert_source_equal
+      (Preprocessing.qualify (parse ~qualifier expected))
+      actual
+  in
+  assert_expand
+    {|
+      Movie = mypy_extensions.TypedDict('Movie', {'name': str, 'year': int})
+    |}
+    {|
+      Movie: typing.Type[mypy_extensions.TypedDict[('Movie', ('name', str), ('year', int))]] = (
+        mypy_extensions.TypedDict[('Movie', ('name', str), ('year', int))])
+    |};
+  assert_expand
+    {|
+      Movie = mypy_extensions.TypedDict('Movie', {})
+    |}
+    {|
+      Movie: typing.Type[mypy_extensions.TypedDict[('Movie',)]] = (
+        mypy_extensions.TypedDict[('Movie',)])
+    |};
+  assert_expand
+    {|
+      NamelessTypedDict = mypy_extensions.TypedDict({'name': str, 'year': int})
+    |}
+    {|
+      NamelessTypedDict = mypy_extensions.TypedDict({'name': str, 'year': int})
+    |};
+  assert_expand
+    {|
+      TypedDictWithWrongArity = mypy_extensions.TypedDict(A, B, C)
+    |}
+    {|
+      TypedDictWithWrongArity = mypy_extensions.TypedDict(A, B, C)
+    |};
+  assert_expand
+    {|
+      class Movie(mypy_extensions.TypedDict):
+        name: str
+        year: int
+    |}
+    {|
+      Movie: typing.Type[mypy_extensions.TypedDict[('Movie', ('name', str), ('year', int))]] = (
+        mypy_extensions.TypedDict[('Movie', ('name', str), ('year', int))])
+    |};
+  assert_expand
+    {|
+      class Movie(mypy_extensions.TypedDict):
+        name: str
+        year: int
+    |}
+    {|
+      Movie: typing.Type[mypy_extensions.TypedDict[('Movie', ('name', str), ('year', int))]] = (
+        mypy_extensions.TypedDict[('Movie', ('name', str), ('year', int))])
+    |}
+    ~qualifier:(Access.create "foo.bar")
+
+
+let test_try_preprocess _ =
+  let assert_try_preprocess source expected =
+    let parse source =
+      let handle = File.Handle.create "test.py" in
+      parse ~qualifier:(Source.qualifier ~handle) source
+    in
+    let parsed = source |> parse in
+    let expected = expected >>| parse in
+    let printer source =
+      source
+      >>| Format.asprintf "%a" Source.pp
+      |> Option.value ~default:"(none)"
+    in
+    assert_equal
+      ~cmp:(Option.equal Source.equal)
+      ~printer
+      expected
+      (Preprocessing.try_preprocess parsed)
+  in
+  assert_try_preprocess
+    "from foo import *"
+    None;
+  assert_try_preprocess
+    "a = 3"
+    (Some "$local_test$a = 3")
+
+
 let () =
   "preprocessing">:::[
     "expand_string_annotations">::test_expand_string_annotations;
     "expand_format_string">::test_expand_format_string;
     "qualify">::test_qualify;
     "replace_version_specific_code">::test_replace_version_specific_code;
+    "replace_platform_specific_code">::test_replace_platform_specific_code;
     "expand_type_checking_imports">::test_expand_type_checking_imports;
     "expand_wildcard_imports">::test_expand_wildcard_imports;
-    "expand_returns">::test_expand_returns;
-    "expand_ternary_assigns">::test_expand_ternary;
+    "expand_implicit_returns">::test_expand_implicit_returns;
     "defines">::test_defines;
     "classes">::test_classes;
+    "typed_dictionary_stub_fix">::test_replace_mypy_extensions_stub;
+    "typed_dictionaries">::test_expand_typed_dictionaries;
+    "try_preprocess">::test_try_preprocess;
   ]
-  |> run_test_tt_main
+  |> Test.run

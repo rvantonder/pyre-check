@@ -47,10 +47,15 @@ module TypeQuery = struct
     | Meet of Access.t * Access.t
     | Methods of Access.t
     | NormalizeType of Access.t
+    | SaveServerState of Pyre.Path.t
     | Signature of Access.t
     | Superclasses of Access.t
     | Type of Expression.t
-    | TypeAtLocation of Location.Instantiated.t
+    | TypeAtPosition of {
+        file: File.t;
+        position: Location.position;
+      }
+    | TypesInFile of File.t
   [@@deriving eq, show]
 
 
@@ -79,13 +84,22 @@ module TypeQuery = struct
   }
   [@@deriving eq, show, to_yojson]
 
+  type type_at_location = {
+    location: Location.Instantiated.t;
+    annotation: Type.t;
+  }
+  [@@deriving eq, show, to_yojson]
+
   type base_response =
     | Boolean of bool
     | FoundAttributes of attribute list
     | FoundMethods of method_representation list
     | FoundSignature of found_signature list
+    | Success of unit
     | Superclasses of Type.t list
     | Type of Type.t
+    | TypeAtLocation of type_at_location
+    | TypesAtLocations of type_at_location list
   [@@deriving eq, show]
 
   let base_response_to_yojson = function
@@ -97,10 +111,16 @@ module TypeQuery = struct
         `Assoc ["methods", `List (List.map methods ~f:method_representation_to_yojson)]
     | FoundSignature signatures ->
         `Assoc ["signature", `List (List.map signatures ~f:found_signature_to_yojson)]
+    | Success () ->
+        `Assoc []
     | Superclasses classes ->
         `Assoc ["superclasses", `List (List.map classes ~f:Type.to_yojson)]
     | Type annotation ->
         `Assoc ["type", Type.to_yojson annotation]
+    | TypeAtLocation annotation ->
+        type_at_location_to_yojson annotation
+    | TypesAtLocations annotations ->
+        `Assoc ["types", `List (List.map annotations ~f:type_at_location_to_yojson)]
 
   type response =
     | Response of base_response

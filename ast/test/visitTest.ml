@@ -162,7 +162,7 @@ let test_collect_accesses_with_location _ =
       (List.map
          ~f:(fun node ->
              Format.sprintf "%s|%s"
-               (Node.location node |> instantiate |> Location.Instantiated.to_string)
+               (Node.location node |> instantiate |> Location.Instantiated.show)
                (Node.value node |> Access.show))
          (Visit.collect_accesses_with_location source))
   in
@@ -260,4 +260,4 @@ let () =
     "statement_visitor">::test_statement_visitor;
     "statement_visitor_source">::test_statement_visitor_source;
   ]
-  |> run_test_tt_main
+  |> Test.run

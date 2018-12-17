@@ -31,15 +31,15 @@ class PyreTest(unittest.TestCase):
         validate.side_effect = EnvironmentException
         with patch.object(sys, "argv", ["pyre", "persistent"]):
             self.assertEqual(pyre.main(), 2)
-            run_null_server.assert_has_calls([call(timeout=3600)])
+            run_null_server.assert_has_calls([call(timeout=3600 * 12)])
 
     @patch.object(json, "dump")
     @patch.object(json, "load")
     @patch.object(configuration.Configuration, "_read")
     @patch.object(configuration.Configuration, "_validate")
-    @patch.object(buck, "generate_analysis_directories", return_value=["."])
+    @patch.object(buck, "generate_source_directories", return_value=["."])
     def test_buck_build_prompting(
-        self, generate_analysis_directories, validate, read, _json_load, _json_dump
+        self, generate_source_directories, validate, read, _json_load, _json_dump
     ) -> None:
         mock_success = MagicMock()
         mock_success.exit_code = lambda: 0
@@ -47,7 +47,7 @@ class PyreTest(unittest.TestCase):
         with patch.object(commands.Check, "run", return_value=mock_success):
             with patch.object(sys, "argv", ["pyre", "check"]):
                 self.assertEqual(pyre.main(), 0)
-                generate_analysis_directories.assert_called_with(
+                generate_source_directories.assert_called_with(
                     set(), build=False, prompt=False
                 )
         with patch.object(commands.Incremental, "run", return_value=mock_success):
@@ -56,12 +56,12 @@ class PyreTest(unittest.TestCase):
                 # another for shutil.which(BINARY_NAME).
                 with patch.object(shutil, "which", side_effect=[True, True]):
                     self.assertEqual(pyre.main(), 0)
-                    generate_analysis_directories.assert_called_with(
+                    generate_source_directories.assert_called_with(
                         set(), build=False, prompt=False
                     )
         with patch.object(commands.Persistent, "run", return_value=mock_success):
             with patch.object(sys, "argv", ["pyre", "persistent"]):
                 self.assertEqual(pyre.main(), 0)
-                generate_analysis_directories.assert_called_with(
+                generate_source_directories.assert_called_with(
                     set(), build=False, prompt=True
                 )

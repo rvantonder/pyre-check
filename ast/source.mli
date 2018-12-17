@@ -5,8 +5,6 @@
 
 open Expression
 
-open Pyre
-
 type mode =
   | Default
   | DefaultButDontCheck of int list
@@ -46,19 +44,17 @@ type t = {
   hash: int;
   metadata: Metadata.t;
   handle: File.Handle.t;
-  path: Path.t option;
   qualifier: Access.t;
   statements: Statement.t list;
 }
 [@@deriving compare, eq, show]
 
-val mode: t -> configuration:Configuration.t -> mode
+val mode: configuration: Configuration.Analysis.t -> local_mode: mode option -> mode
 
 val create
   :  ?docstring: string option
   -> ?metadata: Metadata.t
   -> ?handle: File.Handle.t
-  -> ?path: Path.t
   -> ?qualifier: Access.t
   -> ?hash: int
   -> Statement.t list

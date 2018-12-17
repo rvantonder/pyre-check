@@ -503,7 +503,6 @@ let test_define _ =
         docstring = None;
         return_annotation = None;
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -529,7 +528,6 @@ let test_define _ =
         docstring = None;
         return_annotation = None;
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -550,7 +548,6 @@ let test_define _ =
         docstring = None;
         return_annotation = None;
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -565,7 +562,6 @@ let test_define _ =
         docstring = None;
         return_annotation = None;
         async = true;
-        generated = false;
         parent = None;
       };
     ];
@@ -580,7 +576,6 @@ let test_define _ =
         docstring = None;
         return_annotation = None;
         async = true;
-        generated = false;
         parent = None;
       }
     ];
@@ -595,7 +590,6 @@ let test_define _ =
         docstring = None;
         return_annotation = None;
         async = true;
-        generated = false;
         parent = None;
       };
     ];
@@ -616,7 +610,6 @@ let test_define _ =
         docstring = None;
         return_annotation = None;
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -646,7 +639,6 @@ let test_define _ =
         docstring = None;
         return_annotation = None;
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -667,7 +659,6 @@ let test_define _ =
         docstring = None;
         return_annotation = None;
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -693,7 +684,6 @@ let test_define _ =
         docstring = None;
         return_annotation = None;
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -719,7 +709,6 @@ let test_define _ =
         docstring = None;
         return_annotation = None;
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -740,7 +729,6 @@ let test_define _ =
         docstring = None;
         return_annotation = None;
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -755,7 +743,6 @@ let test_define _ =
         docstring = None;
         return_annotation = None;
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -770,7 +757,6 @@ let test_define _ =
         docstring = None;
         return_annotation = None;
         async = false;
-        generated = false;
         parent = None;
       };
       +Expression (+Integer 3)
@@ -790,7 +776,6 @@ let test_define _ =
             docstring = None;
             return_annotation = None;
             async = false;
-            generated = false;
             parent = None;
           };
         ];
@@ -798,7 +783,6 @@ let test_define _ =
         docstring = None;
         return_annotation = None;
         async = false;
-        generated = false;
         parent = None;
       };
       +Expression (+Integer 3)
@@ -821,7 +805,6 @@ let test_define _ =
         docstring = None;
         return_annotation = None;
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -842,7 +825,6 @@ let test_define _ =
         docstring = None;
         return_annotation = None;
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -868,7 +850,6 @@ let test_define _ =
         docstring = None;
         return_annotation = None;
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -904,7 +885,6 @@ let test_define _ =
         docstring = None;
         return_annotation = None;
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -930,7 +910,6 @@ let test_define _ =
         docstring = None;
         return_annotation = Some !"c";
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -945,7 +924,6 @@ let test_define _ =
         docstring = None;
         return_annotation = Some !"str";
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -968,7 +946,6 @@ let test_define _ =
         docstring = None;
         return_annotation = Some (+String (StringLiteral.create "int"));
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -991,7 +968,6 @@ let test_define _ =
         docstring = None;
         return_annotation = Some (+String (StringLiteral.create "int"));
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -1015,7 +991,6 @@ let test_define _ =
         docstring = None;
         return_annotation = Some (+String (StringLiteral.create "str"));
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -1045,7 +1020,6 @@ let test_define _ =
         docstring = None;
         return_annotation = Some (+String (StringLiteral.create "str"));
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -1074,7 +1048,6 @@ let test_define _ =
         docstring = None;
         return_annotation = Some (+String (StringLiteral.create "str"));
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -1104,7 +1077,6 @@ let test_define _ =
         docstring = None;
         return_annotation = Some (+String (StringLiteral.create "str"));
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -1139,7 +1111,6 @@ let test_define _ =
         docstring = None;
         return_annotation = Some (+String (StringLiteral.create "str"));
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -1174,7 +1145,6 @@ let test_define _ =
         docstring = None;
         return_annotation = Some (+String (StringLiteral.create "str"));
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -1198,7 +1168,6 @@ let test_define _ =
         docstring = None;
         return_annotation = Some (+String (StringLiteral.create "List[str]"));
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -1210,7 +1179,7 @@ let test_define _ =
         a,  # type: bool
         b,  # type: bool
       ):  # type: (...) -> int
-        return 4
+        pass
     |})
     [
       +Define {
@@ -1224,24 +1193,81 @@ let test_define _ =
           +{
             Parameter.name = ~~"a";
             value = None;
-            annotation = None;
+            annotation = Some (+String (StringLiteral.create "bool"));
           };
           +{
             Parameter.name = ~~"b";
             value = None;
-            annotation = None;
+            annotation = Some (+String (StringLiteral.create "bool"));
           };
         ];
-        body = [
-          +Return {
-            Return.expression = Some (+Integer 4);
-            is_implicit = false;
-          }];
+        body = [+Pass];
         decorators = [];
         docstring = None;
         return_annotation = Some (+String (StringLiteral.create "int"));
         async = false;
-        generated = false;
+        parent = None;
+      };
+    ];
+  assert_parsed_equal
+    (trim_extra_indentation {|
+      def foo(
+        a,  # type: bool
+        b  # type: bool
+      ):
+        pass
+    |})
+    [
+      +Define {
+        Define.name = Access.create "foo";
+        parameters = [
+          +{
+            Parameter.name = ~~"a";
+            value = None;
+            annotation = Some (+String (StringLiteral.create "bool"));
+          };
+          +{
+            Parameter.name = ~~"b";
+            value = None;
+            annotation = Some (+String (StringLiteral.create "bool"));
+          };
+        ];
+        body = [+Pass];
+        decorators = [];
+        docstring = None;
+        return_annotation = None;
+        async = false;
+        parent = None;
+      };
+    ];
+  assert_parsed_equal
+    (trim_extra_indentation {|
+      def foo(
+        a,  # type: bool
+        **kwargs
+      ):
+        pass
+    |})
+    [
+      +Define {
+        Define.name = Access.create "foo";
+        parameters = [
+          +{
+            Parameter.name = ~~"a";
+            value = None;
+            annotation = Some (+String (StringLiteral.create "bool"));
+          };
+          +{
+            Parameter.name = ~~"**kwargs";
+            value = None;
+            annotation = None;
+          };
+        ];
+        body = [+Pass];
+        decorators = [];
+        docstring = None;
+        return_annotation = None;
+        async = false;
         parent = None;
       };
     ]
@@ -1511,7 +1537,7 @@ let test_ternary _ =
 let test_dictionary _ =
   assert_parsed_equal
     "{}"
-    [+Expression (+Dictionary { Dictionary.entries = []; keywords = None })];
+    [+Expression (+Dictionary { Dictionary.entries = []; keywords = [] })];
   assert_parsed_equal
     "{1: 2}"
     [
@@ -1520,7 +1546,7 @@ let test_dictionary _ =
            Dictionary.entries = [
              { Dictionary.key = +Integer 1; value = +Integer 2 };
            ];
-           keywords = None;
+           keywords = [];
          });
     ];
   assert_parsed_equal
@@ -1531,7 +1557,7 @@ let test_dictionary _ =
            Dictionary.entries = [
              { Dictionary.key = +Integer 1; value = +Integer 2 };
            ];
-           keywords = None;
+           keywords = [];
          });
     ];
 
@@ -1543,7 +1569,18 @@ let test_dictionary _ =
            Dictionary.entries = [
              { Dictionary.key = +Integer 1; value = +Integer 2 };
            ];
-           keywords = Some !"durp";
+           keywords = [!"durp"];
+         });
+    ];
+  assert_parsed_equal
+    "{1: 2, **durp, **hurp}"
+    [
+      +Expression
+        (+Dictionary {
+           Dictionary.entries = [
+             { Dictionary.key = +Integer 1; value = +Integer 2 };
+           ];
+           keywords = [!"durp"; !"hurp"];
          });
     ];
   assert_parsed_equal
@@ -1552,7 +1589,7 @@ let test_dictionary _ =
       +Expression
         (+Dictionary {
            Dictionary.entries = [];
-           keywords = Some (+List [+Integer 1]);
+           keywords = [+List [+Integer 1]];
          });
     ];
   assert_parsed_equal
@@ -1563,7 +1600,7 @@ let test_dictionary _ =
            Dictionary.entries = [
              { Dictionary.key = +Integer 1; value = +Integer 2 };
            ];
-           keywords = Some !"durp";
+           keywords = [!"durp"];
          });
     ];
 
@@ -1580,7 +1617,7 @@ let test_dictionary _ =
                  right = +Integer 2;
                };
              }];
-           keywords = None;
+           keywords = [];
          });
     ];
   assert_parsed_equal
@@ -1592,7 +1629,7 @@ let test_dictionary _ =
              { Dictionary.key = +Integer 1; value = +Integer 2 };
              { Dictionary.key = +Integer 2; value = +Integer 3 };
            ];
-           keywords = None;
+           keywords = [];
          });
     ];
   assert_parsed_equal
@@ -1604,7 +1641,7 @@ let test_dictionary _ =
              { Dictionary.key = +Integer 1; value = +Integer 2 };
              { Dictionary.key = +Integer 2; value = +Integer 3 };
            ];
-           keywords = None;
+           keywords = [];
          });
     ];
 
@@ -2278,7 +2315,7 @@ let test_call_arguments_location _ =
         (Option.map name ~f:(fun { Node.value; location } ->
              Format.asprintf "%a/%s"
                Identifier.pp value
-               (Location.Reference.to_string location))
+               (Location.Reference.show location))
          |> Option.value ~default:"(none)")
         Expression.pp value
     in
@@ -2416,7 +2453,6 @@ let test_class _ =
             docstring = None;
             return_annotation = None;
             async = false;
-            generated = false;
             parent = Some (Access.create "foo");
           };
         ];
@@ -2444,7 +2480,6 @@ let test_class _ =
                 docstring = None;
                 return_annotation = None;
                 async = false;
-                generated = false;
                 parent = None;
               };
             ];
@@ -2452,7 +2487,6 @@ let test_class _ =
             docstring = None;
             return_annotation = None;
             async = false;
-            generated = false;
             parent = Some (Access.create "foo");
           };
         ];
@@ -2522,7 +2556,24 @@ let test_class _ =
         docstring = None;
       };
     ];
-
+  assert_parsed_equal
+    "class foo:\n\tattribute = 1 # type: int"
+    [
+      +Class {
+        Class.name = Access.create "foo";
+        bases = [];
+        body = [
+          +Assign {
+            Assign.target = !"attribute";
+            annotation = Some (+String (StringLiteral.create "int"));
+            value = +Integer 1;
+            parent = Some (Access.create "foo");
+          };
+        ];
+        decorators = [];
+        docstring = None;
+      };
+    ];
   assert_parsed_equal
     "class foo:\n\tattribute: int"
     [
@@ -2557,7 +2608,6 @@ let test_class _ =
             docstring = None;
             return_annotation = None;
             async = false;
-            generated = false;
             parent = Some (Access.create "foo");
           };
         ];
@@ -2594,7 +2644,6 @@ let test_class _ =
             docstring = None;
             return_annotation = None;
             async = false;
-            generated = false;
             parent = Some (Access.create "foo");
           };
         ];
@@ -2627,7 +2676,6 @@ let test_class _ =
                 docstring = None;
                 return_annotation = None;
                 async = false;
-                generated = false;
                 parent = Some (Access.create "foo");
               };
             ];
@@ -2690,6 +2738,26 @@ let test_assign _ =
       +Assign {
         Assign.target = !"a";
         annotation = Some !"int";
+        value = +Integer 1;
+        parent = None;
+      };
+    ];
+  assert_parsed_equal
+    "a = 1  # type: int"
+    [
+      +Assign {
+        Assign.target = !"a";
+        annotation = Some (+String (StringLiteral.create "int"));
+        value = +Integer 1;
+        parent = None;
+      };
+    ];
+  assert_parsed_equal
+    "a = 1  # type: ignore"
+    [
+      +Assign {
+        Assign.target = !"a";
+        annotation = None;
         value = +Integer 1;
         parent = None;
       };
@@ -3760,7 +3828,7 @@ let test_stubs _ =
     [
       +Assign {
         Assign.target = !"a";
-        annotation = Some !"int";
+        annotation = Some (+String (StringLiteral.create "int"));
         value = +Ellipses;
         parent = None;
       };
@@ -3771,13 +3839,7 @@ let test_stubs _ =
     [
       +Assign {
         Assign.target = !"a";
-        annotation = Some
-            (+Access [
-               Access.Identifier ~~"Tuple";
-               Access.Identifier ~~"__getitem__";
-               Access.Call
-                 (+[{ Argument.name = None; value = +Access [Access.Identifier ~~"str"] }]);
-             ]);
+        annotation = Some (+String (StringLiteral.create "Tuple[str]"));
         value = +Ellipses;
         parent = None;
       };
@@ -3788,22 +3850,7 @@ let test_stubs _ =
     [
       +Assign {
         Assign.target = !"a";
-        annotation = Some
-            (+Access [
-               Access.Identifier ~~"Tuple";
-               Access.Identifier ~~"__getitem__";
-               Access.Call
-                 (+[
-                    {
-                      Argument.name = None;
-                      value =
-                        +Tuple [
-                          +Access [Access.Identifier ~~"str"];
-                          +Ellipses;
-                        ];
-                    };
-                  ]);
-             ]);
+        annotation = Some (+String (StringLiteral.create "Tuple[str, ...]"));
         value = +Ellipses;
         parent = None;
       };
@@ -3835,7 +3882,7 @@ let test_stubs _ =
         body = [
           +Assign {
             Assign.target = !"a";
-            annotation = Some !"int";
+            annotation = Some (+String (StringLiteral.create "int"));
             value = +Ellipses;
             parent = Some (Access.create "A");
           };
@@ -3862,7 +3909,6 @@ let test_stubs _ =
         docstring = None;
         return_annotation = None;
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -3883,7 +3929,6 @@ let test_stubs _ =
         docstring = None;
         return_annotation = None;
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -3904,7 +3949,6 @@ let test_stubs _ =
         docstring = None;
         return_annotation = None;
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -3926,7 +3970,6 @@ let test_stubs _ =
         docstring = None;
         return_annotation = None;
         async = false;
-        generated = false;
         parent = None;
       };
     ];
@@ -3991,7 +4034,6 @@ let test_ellipsis _ =
         docstring = None;
         return_annotation = None;
         async = false;
-        generated = false;
         parent = None;
       }
     ];
@@ -4054,4 +4096,4 @@ let () =
     "nonlocal">::test_nonlocal;
     "ellipsis">::test_ellipsis;
   ]
-  |> run_test_tt_main
+  |> Test.run

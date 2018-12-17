@@ -518,7 +518,7 @@ module ClientCapabilities = struct
           [@key "didSave"]
           [@default None];
     }
-    [@@deriving of_yojson]
+    [@@deriving of_yojson { strict = false }]
 
     type completion_item = {
       snippet_support: bool option
@@ -542,6 +542,13 @@ module ClientCapabilities = struct
           [@default None];
       context_support: bool option
           [@key "contextSupport"]
+          [@default None];
+    }
+    [@@deriving of_yojson { strict = false }]
+
+    type publish_diagnostics = {
+      related_information: bool option
+          [@key "relatedInformation"]
           [@default None];
     }
     [@@deriving of_yojson]
@@ -601,8 +608,14 @@ module ClientCapabilities = struct
       color_provider: DynamicRegistration.t option
           [@key "colorProvider"]
           [@default None];
+      folding_range: DynamicRegistration.t option
+          [@key "foldingRange"]
+          [@default None];
+      publish_diagnostics: publish_diagnostics option
+          [@key "publishDiagnostics"]
+          [@default None];
     }
-    [@@deriving of_yojson]
+    [@@deriving of_yojson { strict = false }]
   end
 
 
@@ -618,7 +631,7 @@ module ClientCapabilities = struct
           [@key "status"]
           [@default None];
     }
-    [@@deriving of_yojson]
+    [@@deriving of_yojson { strict = false }]
   end
 
 
@@ -650,7 +663,7 @@ module ClientCapabilities = struct
           [@default None]
     }
     and experimental = AnyExperimental.t
-    [@@deriving of_yojson]
+    [@@deriving of_yojson { strict = false }]
   end
 end
 
@@ -744,8 +757,7 @@ module ResponseMessage = struct
       id: int
           [@key "id"];
       result: result option
-          [@key "result"]
-          [@default None];
+          [@key "result"];
       error: error option
           [@key "error"]
           [@default None];
@@ -852,9 +864,7 @@ module ShutdownRequest = struct
 end
 
 
-module TextDocumentDefinitionRequest = struct
-  include RequestMessage.Make(TextDocumentPositionParams)
-end
+module TextDocumentDefinitionRequest = RequestMessage.Make(TextDocumentPositionParams)
 
 
 module RageRequest = struct
@@ -863,52 +873,24 @@ module RageRequest = struct
 end
 
 
-module HoverRequest = struct
-  include RequestMessage.Make(struct
-      type t = TextDocumentPositionParams.t
-      [@@deriving yojson]
-    end)
-end
+module HoverRequest = RequestMessage.Make(TextDocumentPositionParams)
 
 
-module DidCloseTextDocument = struct
-  include NotificationMessage.Make(struct
-      type t = DidCloseTextDocumentParams.t
-      [@@deriving yojson]
-    end)
-end
+module DidCloseTextDocument = NotificationMessage.Make(DidCloseTextDocumentParams)
 
 
-module DidSaveTextDocument = struct
-  include NotificationMessage.Make(struct
-      type t = DidSaveTextDocumentParams.t
-      [@@deriving yojson]
-    end)
-end
+module DidSaveTextDocument = NotificationMessage.Make(DidSaveTextDocumentParams)
 
 
-module DidOpenTextDocument = struct
-  include NotificationMessage.Make(struct
-      type t = DidOpenTextDocumentParams.t
-      [@@deriving yojson]
-    end)
-end
+module DidOpenTextDocument =NotificationMessage.Make(DidOpenTextDocumentParams)
 
 
-module DidChangeTextDocument = struct
-  include NotificationMessage.Make(struct
-      type t = DidChangeTextDocumentParams.t
-      [@@deriving yojson, of_yojson]
-    end)
-end
+module DidChangeTextDocument = NotificationMessage.Make(DidChangeTextDocumentParams)
 
 
-module ShowMessage = struct
-  include NotificationMessage.Make(struct
-      type t = ShowMessageParams.t
-      [@@deriving yojson]
-    end)
-end
+module ShowMessage = NotificationMessage.Make(ShowMessageParams)
+
+
 (** Responses *)
 
 
@@ -993,16 +975,7 @@ end
 
 
 (** A PublishDiagnostics Notification *)
-module PublishDiagnostics = struct
-  (* Example: A notification message requires a concrete type for "any" in the
-     parameters. For PublishDiagnostics notifications, this is
-     PublishDiagnosticsParams.t
-     cf. https://github.com/Microsoft/language-server-protocol/blob/master/protocol.md#publishdiagnostics-notification *)
-  include NotificationMessage.Make(struct
-      type t = PublishDiagnosticsParams.t
-      [@@deriving yojson]
-    end)
-end
+module PublishDiagnostics = NotificationMessage.Make(PublishDiagnosticsParams)
 
 
 (** Namespaces *)

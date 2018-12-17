@@ -7,16 +7,16 @@ import json
 import logging
 import multiprocessing
 import os
-import shlex
+import platform
 import subprocess
 import sys
 import traceback
 from argparse import Namespace
-from typing import Any, Dict, Optional, Sized
+from typing import Any, Dict, Optional
 
 from . import buck
-from .exceptions import EnvironmentException as EnvironmentException
-from .filesystem import SharedAnalysisDirectory
+from .exceptions import EnvironmentException
+from .filesystem import AnalysisDirectory, SharedAnalysisDirectory  # noqa
 
 
 LOG = logging.getLogger(__name__)
@@ -56,7 +56,7 @@ def get_binary_version(configuration) -> str:
     return "No version set"
 
 
-def _find_configuration_root(
+def find_configuration_root(
     original_directory: str, configuration_file: str
 ) -> Optional[str]:
     current_directory = original_directory
@@ -69,16 +69,20 @@ def _find_configuration_root(
 
 
 def switch_root(arguments) -> None:
-    if arguments.local_configuration is not None:
-        arguments.local_configuration = os.path.realpath(arguments.local_configuration)
-
     arguments.original_directory = os.getcwd()
-    arguments.local_configuration_directory = _find_configuration_root(
+    local_root = find_configuration_root(
         arguments.original_directory, CONFIGURATION_FILE + ".local"
     )
-    global_root = _find_configuration_root(
+    global_root = find_configuration_root(
         arguments.original_directory, CONFIGURATION_FILE
     )
+
+    # If the global configuration root is deeper than local configuration, ignore local.
+    if global_root and local_root and global_root.startswith(local_root):
+        local_root = None
+    if local_root and arguments.local_configuration is None:
+        arguments.local_configuration = local_root
+
     root = global_root or arguments.original_directory
     os.chdir(root)
     arguments.current_directory = root
@@ -108,43 +112,82 @@ def translate_arguments(commands, arguments):
         arguments.logger = translate_path(root, arguments.logger)
 
 
-def resolve_analysis_directories(arguments, configuration, prompt: bool = True):
-    analysis_directories = set(arguments.analysis_directory or [])
-    targets = set(arguments.target or [])
+def translate_paths(paths, original_directory):
+    current_directory = os.getcwd()
+    if not original_directory.startswith(current_directory):
+        return paths
+    translation = os.path.relpath(original_directory, current_directory)
+    if not translation:
+        return paths
+    return {translate_path(translation, path) for path in paths}
+
+
+def _resolve_source_directories(arguments, commands, configuration, prompt):
+    source_directories = set(arguments.source_directories or [])
+    targets = set(arguments.targets or [])
 
     # Only read configuration if no arguments were provided.
-    if not analysis_directories and not targets:
-        analysis_directories = set(configuration.analysis_directories)
+    if not source_directories and not targets:
+        source_directories = set(configuration.source_directories)
         targets = set(configuration.targets)
     else:
-        LOG.warning("Setting up a .pyre_configuration file may reduce overhead.")
+        LOG.warning(
+            "Setting up a `.pyre_configuration` with `pyre init` may reduce overhead "
+        )
 
-    analysis_directories.update(
-        buck.generate_analysis_directories(
-            targets, build=arguments.build, prompt=prompt
-        )
+    always_build = arguments.build or arguments.command in [
+        commands.Restart,
+        commands.Start,
+    ]
+    source_directories.update(
+        buck.generate_source_directories(targets, build=always_build, prompt=prompt)
     )
-    if os.path.isfile(CONFIGURATION_FILE):
-        initialization_command = "pyre init --local"
-    else:
-        initialization_command = "pyre init"
-    if len(analysis_directories) == 0:
-        raise EnvironmentException(
-            "No targets or link trees to analyze.\n"
-            "You can run `pyre init --local` to set up a local configuration, "
-            "or `pyre --help` to check valid flags.".format(initialization_command)
-        )
+    if len(source_directories) == 0:
+        raise EnvironmentException("No targets or source directories to analyze.")
 
     # Translate link trees if we switched directories earlier.
-    current_directory = os.getcwd()
-    if not arguments.original_directory.startswith(current_directory):
-        return analysis_directories
+    return translate_paths(source_directories, arguments.original_directory)
 
-    translation = os.path.relpath(arguments.original_directory, current_directory)
-    if not translation:
-        return analysis_directories
 
-    return {translate_path(translation, path) for path in analysis_directories}
+def _resolve_filter_paths(arguments, configuration):
+    filter_paths = []
+    if arguments.source_directories or arguments.targets:
+        if arguments.source_directories:
+            filter_paths += arguments.source_directories
+        if arguments.targets:
+            filter_paths += [
+                buck.presumed_target_root(target) for target in arguments.targets
+            ]
+    else:
+        local_configuration_root = configuration.local_configuration_root
+        if local_configuration_root:
+            filter_paths = [local_configuration_root]
+    return translate_paths(filter_paths, arguments.original_directory)
+
+
+def resolve_analysis_directory(
+    arguments, commands, configuration, isolate: bool = False, prompt: bool = True
+):
+    source_directories = _resolve_source_directories(
+        arguments, commands, configuration, prompt
+    )
+    if arguments.filter_directory:
+        filter_paths = [arguments.filter_directory]
+    else:
+        filter_paths = _resolve_filter_paths(arguments, configuration)
+    local_configuration_root = configuration.local_configuration_root
+    if local_configuration_root:
+        local_configuration_root = os.path.relpath(
+            local_configuration_root, arguments.current_directory
+        )
+
+    if len(source_directories) == 1:
+        analysis_directory = AnalysisDirectory(source_directories.pop(), filter_paths)
+    else:
+        analysis_directory = SharedAnalysisDirectory(
+            source_directories, filter_paths, local_configuration_root, isolate
+        )
+    return analysis_directory
 
 
 def number_of_workers() -> int:
@@ -156,38 +199,44 @@ def number_of_workers() -> int:
 
 def log_statistics(
     category: str,
-    arguments: Namespace,
+    arguments: Optional[Namespace] = None,
     # this is typed as a Any because configuration imports __init__
-    configuration: Any,
-    ints: Optional[Dict[str, int]] = None,
+    configuration: Optional[Any] = None,
+    integers: Optional[Dict[str, int]] = None,
     normals: Optional[Dict[str, str]] = None,
+    logger: Optional[str] = None,
 ) -> None:
+    integers = integers or {}
+    normals = normals or {}
+    if configuration:
+        normals = {**normals, "version": configuration.version_hash}
+        if not logger:
+            logger = configuration.logger
+    if not logger:
+        raise ValueError("Logger must either be given or in configuration")
+    if arguments:
+        normals = {
+            **normals,
+            "source_directories": str(arguments.source_directories or []),
+            "arguments": str(arguments),
+            "target": str(arguments.targets or []),
+        }
     try:
-        ints = ints or {}
-        normals = normals or {}
         statistics = {
-            "int": ints,
+            "int": integers,
             "normal": {
                 **normals,
-                "arguments": str(arguments),
                 "command_line": " ".join(sys.argv),
-                "host": os.getenv("HOSTNAME") or "",
-                "analysis_directory": str(arguments.analysis_directory or []),
-                "target": str(arguments.target or []),
-                "user": os.getenv("USER") or "",
-                "version": configuration.version_hash,
+                "host": platform.node() or "",
+                "platform": platform.system() or "",
+                "user": os.getenv("USER", ""),
             },
         }
         subprocess.run(
-            "{} {} {}".format(
-                shlex.quote(configuration.logger),
-                shlex.quote(category),
-                shlex.quote(json.dumps(statistics)),
-            ),
-            shell=True,
+            [logger, category], input=json.dumps(statistics), encoding="ascii"
         )
     except Exception:
-        LOG.warning("Unable to log using `%s`", configuration.logger)
+        LOG.warning("Unable to log using `%s`", logger)
         LOG.info(traceback.format_exc())
 
 

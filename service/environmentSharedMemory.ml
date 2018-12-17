@@ -44,7 +44,7 @@ end
 
 module LocationKey = struct
   type t = Location.t
-  let to_string = Location.Reference.to_string
+  let to_string = Location.Reference.show
   let compare = Location.Reference.compare
 end
 
@@ -146,12 +146,24 @@ module OrderKeyValue = struct
   let description = "Order keys"
 end
 
+module ConfigurationValue = struct
+  type t = Configuration.Analysis.t
+  let prefix = Prefix.make ()
+  let description = "Configuration"
+end
+
+module ErrorsValue = struct
+  type t = (File.Handle.t * (Analysis.Error.t list)) list
+  let prefix = Prefix.make ()
+  let description = "All errors"
+end
+
 (** Shared memory maps *)
 module FunctionDefinitions = SharedMemory.WithCache (AccessKey) (FunctionValue)
 
 module ClassDefinitions = SharedMemory.WithCache (TypeKey) (ClassValue)
 
-module Aliases = SharedMemory.WithCache (TypeKey) (AliasValue)
+module Aliases = SharedMemory.NoCache (TypeKey) (AliasValue)
 
 module Globals = SharedMemory.WithCache (AccessKey) (GlobalValue)
 
@@ -180,6 +192,10 @@ module OrderEdges = SharedMemory.WithCache (IntKey) (EdgeValue)
 module OrderBackedges = SharedMemory.WithCache (IntKey) (BackedgeValue)
 
 module OrderKeys = SharedMemory.WithCache (StringKey) (OrderKeyValue)
+
+module StoredConfiguration = SharedMemory.NoCache (StringKey) (ConfigurationValue)
+
+module ServerErrors = Memory.NoCache (StringKey) (ErrorsValue)
 
 let heap_size () =
   SharedMemory.heap_size ()

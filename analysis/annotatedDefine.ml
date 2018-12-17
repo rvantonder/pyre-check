@@ -6,14 +6,11 @@
 open Core
 
 open Ast
-open Expression
 open Pyre
 open Statement
 
 module Callable = AnnotatedCallable
 module Class = AnnotatedClass
-module Attribute = Class.Attribute
-module Method = Class.Method
 
 
 type t = Define.t
@@ -66,15 +63,9 @@ let parent_definition { Define.parent; _ } ~resolution =
   match parent with
   | Some parent ->
       let annotation =
-        Resolution.parse_annotation
-          resolution
-          (Node.create_with_default_location (Access parent))
+        Access.expression parent
+        |> Resolution.parse_annotation resolution
       in
       Resolution.class_definition resolution annotation
       >>| Class.create
   | _ -> None
-
-
-let method_definition define ~resolution =
-  parent_definition define ~resolution
-  >>| fun parent -> Class.Method.create ~define ~parent

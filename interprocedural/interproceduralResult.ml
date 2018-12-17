@@ -25,7 +25,8 @@ module type ANALYSIS_PROVIDED = sig
   val reached_fixpoint: iteration:int -> previous:call_model -> next:call_model -> bool
 
   val get_errors: result -> InterproceduralError.t list
-  val summaries: Callable.t -> result option -> call_model -> Yojson.Safe.json list
+  val externalize: Callable.t -> result option -> call_model -> Yojson.Safe.json list
+  val metadata: unit -> Yojson.Safe.json
 
   val show_call_model: call_model -> string
 end
@@ -54,7 +55,9 @@ type 'a kind = 'a Kind.kind
    from the analysis data without having to write new code to package and access the new
    parts. *)
 type model = MK
+[@@deriving show]
 type result = RK
+[@@deriving show]
 
 
 (* Abstract a full kind to just the part necessary. The model and result markers
@@ -74,18 +77,14 @@ type 'part pkg = Pkg: {
   } -> 'part pkg
 
 
-type result_pkg = result pkg
-type model_pkg = model pkg
-
-
-type model_t = model_pkg Kind.Map.t
-type result_t = result_pkg Kind.Map.t
-
-
 module type ANALYZER = sig
   type result
   type call_model
-  val analyze: Callable.real_target -> Define.t Node.t -> result * call_model
+  val analyze
+    :  callable: Callable.real_target
+    -> environment:(module Analysis.Environment.Handler)
+    -> define: Define.t Node.t
+    -> result * call_model
 
   (* Called once on master before analysis of individual callables. *)
   val init: types:string list -> functions:Callable.t list -> unit
@@ -165,14 +164,11 @@ module Make(Analysis : ANALYSIS_PROVIDED) = struct
       Analyzer : ANALYZER
       with type result := Analysis.result
        and type call_model := Analysis.call_model
-    ) =
-  struct
-    include Register(struct
-        include Analysis
-        let kind = kind
-        include Analyzer
-      end)
-  end
+    ) = Register(struct
+      include Analysis
+      let kind = kind
+      include Analyzer
+    end)
 
   include Analysis
 end
@@ -251,9 +247,66 @@ let get (type part a)
   apply_to_partial_kind partial_kind { f = get }
 
 
-let get_model kind models =
+let pp_pkg _pp_part formatter pkg =
+  let show_value (type a b) (kind: (a, b) partial_kind) (value: b) =
+    match kind with
+    | ModelPart kind ->
+        let module Analysis = (val get_analysis kind) in
+        Format.fprintf formatter "%s" (Analysis.show_call_model value)
+    | ResultPart _kind ->
+        Format.fprintf formatter "<no show for result>"
+
+  in
+  match pkg with
+  | Pkg { kind; value } ->
+      show_value kind value
+
+
+let show_pkg _part pkg =
+  Format.asprintf "%a" (pp_pkg ()) pkg
+
+
+type result_pkg = result pkg
+[@@deriving show]
+type model_pkg = model pkg
+[@@deriving show]
+
+
+type model_t = {
+  models: model_pkg Kind.Map.t;
+  is_obscure: bool;
+}
+
+
+let pp_model_t formatter { models; is_obscure } =
+  Format.fprintf formatter "is_obscure: %b\n" is_obscure;
+  Kind.Map.bindings models
+  |> Core.List.unzip
+  |> snd
+  |> Format.pp_print_list pp_model_pkg formatter
+
+
+let show_model_t model =
+  Format.asprintf "%a" pp_model_t model
+
+
+type result_t = result_pkg Kind.Map.t
+
+
+let pp_result_t formatter results =
+  Kind.Map.bindings results
+  |> Core.List.unzip
+  |> snd
+  |> Format.pp_print_list pp_result_pkg formatter
+
+
+let show_result_t result =
+  Format.asprintf "%a" pp_result_t result
+
+
+let get_model kind model =
   let kind = Kind.cast kind in
-  get (ModelPart kind) models
+  get (ModelPart kind) model.models
 
 
 let get_result kind results =
@@ -261,12 +314,26 @@ let get_result kind results =
   get (ResultPart kind) results
 
 
-let empty_model = Kind.Map.empty
+let empty_model = {
+  models = Kind.Map.empty;
+  is_obscure = false;
+}
+
+
+let obscure_model = {
+  models = Kind.Map.empty;
+  is_obscure = true;
+}
+
+
 let empty_result = Kind.Map.empty
 
 
-let with_model kind model models =
+let with_model kind analysis_model overall_model =
   let kind = Kind.cast kind in
-  let model = Pkg { kind = ModelPart kind; value = model }
+  let package = Pkg { kind = ModelPart kind; value = analysis_model }
   in
-  Kind.Map.add (Kind.abstract kind) model models
+  {
+    overall_model with
+    models = Kind.Map.add (Kind.abstract kind) package overall_model.models;
+  }

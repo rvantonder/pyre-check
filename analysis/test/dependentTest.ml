@@ -12,12 +12,13 @@ open Expression
 open Test
 
 
-let configuration = Configuration.create ()
+let configuration = Configuration.Analysis.create ()
 
 
 let populate source =
   let environment = Environment.Builder.create () in
   Service.Environment.populate
+    ~configuration
     (Environment.handler ~configuration environment)
     [parse source];
   environment
@@ -40,6 +41,7 @@ let test_index _ =
     |}
   in
   Service.Environment.populate
+    ~configuration
     (Environment.handler ~configuration environment)
     [parse ~handle:"test.py" source];
   let {
@@ -137,8 +139,8 @@ let test_transitive_dependent_of_list _ =
     ~handles:["c.py"]
     ~expected:["a.py"; "b.py"; "test.py"];
   assert_dependencies
-     ~handles:["test.py"]
-     ~expected:[]
+    ~handles:["test.py"]
+    ~expected:[]
 
 
 let test_transitive_dependents _ =
@@ -177,4 +179,4 @@ let () =
     "transitive_dependent_of_list">::test_transitive_dependent_of_list;
     "dependent_of_list">::test_dependent_of_list;
   ]
-  |> run_test_tt_main
+  |> Test.run

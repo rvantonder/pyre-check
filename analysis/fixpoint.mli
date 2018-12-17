@@ -14,8 +14,8 @@ module type State = sig
   val less_or_equal: left: t -> right: t -> bool
   val join: t -> t -> t
   val widen: previous: t -> next: t -> iteration: int -> t
-  val forward: ?key:int -> t -> statement: Statement.t -> t
-  val backward: ?key:int -> t -> statement: Statement.t -> t
+  val forward: ?key: int -> t -> statement: Statement.t -> t
+  val backward: ?key: int -> t -> statement: Statement.t -> t
 end
 
 module type Fixpoint = sig
@@ -25,6 +25,7 @@ module type Fixpoint = sig
   [@@deriving show]
 
   val entry: t -> state option
+  val normal_exit: t -> state option
   val exit: t -> state option
 
   val forward: cfg: Cfg.t -> initial: state -> t

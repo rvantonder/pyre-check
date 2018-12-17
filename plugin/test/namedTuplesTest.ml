@@ -126,7 +126,20 @@ let test_transform_ast _ =
          pass
     |};
 
-  (* Don't transform non-toplevel statements. *)
+  assert_expand
+    {|
+      class Foo:
+        T = collections.namedtuple('T', ("a", "b"))
+    |}
+    {|
+      class Foo:
+        class T(typing.NamedTuple):
+          def T.__init__(self, $parameter$a: typing.Any, $parameter$b: typing.Any): ...
+          T.a: typing.Any
+          T.b: typing.Any
+    |};
+
+  (* Don't transform namedtuples nested in functions. *)
   assert_expand
     {|
       def foo():
@@ -142,4 +155,4 @@ let () =
   "plugin_named_tuples">:::[
     "transform_ast">::test_transform_ast;
   ]
-  |> run_test_tt_main
+  |> Test.run

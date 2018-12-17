@@ -126,7 +126,7 @@ module Make (Transformer : Transformer) = struct
                 transform_list
                   entries
                   ~f:(transform_entry ~transform_expression);
-              keywords = keywords >>| transform_expression;
+              keywords = transform_list keywords ~f:(transform_expression)
             }
         | DictionaryComprehension { Comprehension.element; generators } ->
             DictionaryComprehension {
@@ -254,7 +254,6 @@ module Make (Transformer : Transformer) = struct
             decorators;
             return_annotation;
             async;
-            generated;
             parent;
             docstring;
           } ->
@@ -267,7 +266,6 @@ module Make (Transformer : Transformer) = struct
               decorators = transform_list decorators ~f:transform_expression;
               return_annotation = return_annotation >>| transform_expression;
               async;
-              generated;
               parent;
               docstring;
             }

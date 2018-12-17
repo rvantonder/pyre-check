@@ -11,13 +11,14 @@ open Test
 
 
 let configuration =
-  Configuration.create ()
+  Configuration.Analysis.create ()
 
 
 let populate_with_sources sources =
   let environment =
     let environment = Environment.Builder.create () in
     Service.Environment.populate
+      ~configuration
       (Environment.handler ~configuration environment)
       sources;
     environment
@@ -29,6 +30,7 @@ let populate source =
   let environment =
     let environment = Environment.Builder.create () in
     Service.Environment.populate
+      ~configuration
       (Environment.handler ~configuration environment)
       (parse source :: typeshed_stubs);
     environment

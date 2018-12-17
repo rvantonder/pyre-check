@@ -13,9 +13,9 @@ open Service
 
 let test_coverage _ =
   let coverage =
-    let handles =
+    let { Service.Parser.parsed; _ } =
       Service.Parser.parse_sources
-        ~configuration:(Configuration.create ())
+        ~configuration:(Configuration.Analysis.create ())
         ~scheduler:(Scheduler.mock ())
         ~files:[
           File.create
@@ -25,11 +25,11 @@ let test_coverage _ =
             ~content:"#pyre-strict\ndef foo()->int:\n    return 1\n"
             (Path.create_relative ~root:(Path.current_working_directory ()) ~relative:"b.py");
           File.create
-            ~content:"#pyre-do-not-check\ndef foo()->int:\n    return 1\n"
+            ~content:"#pyre-ignore-all-errors\ndef foo()->int:\n    return 1\n"
             (Path.create_relative ~root:(Path.current_working_directory ()) ~relative:"c.py");
         ]
     in
-    Service.Coverage.coverage ~number_of_files:3 ~sources:handles
+    Service.Coverage.coverage ~number_of_files:3 ~sources:parsed
   in
   assert_equal
     coverage
@@ -40,4 +40,4 @@ let () =
   "coverage">:::[
     "compute_coverage">::test_coverage;
   ]
-  |> run_test_tt_main
+  |> Test.run

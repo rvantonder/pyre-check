@@ -31,14 +31,17 @@ module SimpleAnalysis = Interprocedural.Result.Make(struct
     let reached_fixpoint ~iteration:_ ~previous ~next =
       next <= previous
 
-    let summaries _ _ _ = []
+    let externalize _ _ _ = []
+
+    let metadata () = `Assoc ["foo", `String "bar"]
   end)
 
 
 include SimpleAnalysis.Register(struct
     let init ~types:_ ~functions:_ = ()
 
-    let analyze _callable _body = "some result", 5
+    let analyze ~callable:_ ~environment:_ ~define:_ =
+      "some result", 5
   end)
 
 
@@ -57,4 +60,4 @@ let () =
   "interproceduralRegistration">:::[
     "test_simple_analysis">::test_simple_analysis;
   ]
-  |> run_test_tt_main
+  |> Test.run

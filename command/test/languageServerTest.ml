@@ -13,20 +13,45 @@ open Pyre
 open Server
 
 
+type test_files = {
+  root: PyrePath.t;
+  relative: string;
+  absolute: string;
+  symlink_source: string;
+  symlink_target: string;
+}
+
+
 let files context =
-  let root = Path.create_absolute Filename.temp_dir_name in
+  let root = bracket_tmpdir context |> Filename.realpath in
+  let root_path = Path.create_absolute root in
   let relative =
-    bracket_tmpfile ~suffix:".py" context
-    |> fst
+    Filename.temp_file ~in_dir:root "filename" ".py"
     |> Path.create_absolute
-    |> (fun path -> Path.get_relative_to_root ~root ~path)
+    |> (fun path -> Path.get_relative_to_root ~root:root_path ~path)
     |> (fun relative -> Option.value_exn relative)
   in
   let absolute =
-    Path.create_relative ~root ~relative
+    Path.create_relative ~root:root_path ~relative
     |> Path.show
   in
-  root, relative, absolute
+
+  let symlink_target =
+    let symlink_root = bracket_tmpdir context |> Filename.realpath in
+    Filename.temp_file ~in_dir:symlink_root "target" ".py"
+    |> Path.create_absolute
+    |> Path.show
+  in
+  let symlink_source =
+    let source = Filename.temp_file ~in_dir:root "symlink" ".py" in
+    Unix.unlink source;
+    Unix.symlink ~src:symlink_target ~dst:source;
+    source
+  in
+  Ast.SharedMemory.SymlinksToPaths.add
+    symlink_target
+    (Path.create_absolute ~follow_symbolic_links:false symlink_source);
+  { root = root_path; relative; absolute; symlink_source; symlink_target; }
 
 
 let test_language_server_protocol_message_format _ =
@@ -268,12 +293,158 @@ let test_initialize_request_parses _ =
      "trace": "off",
      "workspaceFolders": [
        {
-         "uri":
-           "file:///data/users/sinancepel/instagram/instagram-server/distillery",
-         "name": "distillery"
+         "uri": "file:///test/directory",
+         "name": "test"
        }
      ]
    }
+  }
+  |};
+  assert_parses {|
+  {
+   "jsonrpc": "2.0",
+   "id": 0,
+   "method": "initialize",
+   "params": {
+     "processId": null,
+     "rootPath": "/test/directory",
+     "rootUri": "file:///test/directory",
+     "capabilities": {
+       "workspace": {
+         "applyEdit": true,
+         "workspaceEdit": {
+           "documentChanges": true,
+           "resourceOperations": [ "create", "rename", "delete" ],
+           "failureHandling": "textOnlyTransactional"
+         },
+         "didChangeConfiguration": { "dynamicRegistration": true },
+         "didChangeWatchedFiles": { "dynamicRegistration": true },
+         "symbol": {
+           "dynamicRegistration": true,
+           "symbolKind": {
+             "valueSet": [
+               1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+               19, 20, 21, 22, 23, 24, 25, 26
+             ]
+           }
+         },
+         "executeCommand": { "dynamicRegistration": true },
+         "configuration": true,
+         "workspaceFolders": true
+       },
+       "textDocument": {
+         "publishDiagnostics": { "relatedInformation": true },
+         "synchronization": {
+           "dynamicRegistration": true,
+           "willSave": true,
+           "willSaveWaitUntil": true,
+           "didSave": true
+         },
+         "completion": {
+           "dynamicRegistration": true,
+           "contextSupport": true,
+           "completionItem": {
+             "snippetSupport": true,
+             "commitCharactersSupport": true,
+             "documentationFormat": [ "markdown", "plaintext" ],
+             "deprecatedSupport": true,
+             "preselectSupport": true
+           },
+           "completionItemKind": {
+             "valueSet": [
+               1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+               19, 20, 21, 22, 23, 24, 25
+             ]
+           }
+         },
+         "hover": {
+           "dynamicRegistration": true,
+           "contentFormat": [ "markdown", "plaintext" ]
+         },
+         "signatureHelp": {
+           "dynamicRegistration": true,
+           "signatureInformation": {
+             "documentationFormat": [ "markdown", "plaintext" ]
+           }
+         },
+         "definition": { "dynamicRegistration": true },
+         "references": { "dynamicRegistration": true },
+         "documentHighlight": { "dynamicRegistration": true },
+         "documentSymbol": {
+           "dynamicRegistration": true,
+           "symbolKind": {
+             "valueSet": [
+               1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+               19, 20, 21, 22, 23, 24, 25, 26
+             ]
+           },
+           "hierarchicalDocumentSymbolSupport": true
+         },
+         "codeAction": {
+           "dynamicRegistration": true,
+           "codeActionLiteralSupport": {
+             "codeActionKind": {
+               "valueSet": [
+                 "", "quickfix", "refactor", "refactor.extract",
+                 "refactor.inline", "refactor.rewrite", "source",
+                 "source.organizeImports"
+               ]
+             }
+           }
+         },
+         "codeLens": { "dynamicRegistration": true },
+         "formatting": { "dynamicRegistration": true },
+         "rangeFormatting": { "dynamicRegistration": true },
+         "onTypeFormatting": { "dynamicRegistration": true },
+         "rename": { "dynamicRegistration": true, "prepareSupport": true },
+         "documentLink": { "dynamicRegistration": true },
+         "typeDefinition": { "dynamicRegistration": true },
+         "implementation": { "dynamicRegistration": true },
+         "colorProvider": { "dynamicRegistration": true },
+         "foldingRange": {
+           "dynamicRegistration": true,
+           "rangeLimit": 5000,
+           "lineFoldingOnly": true
+         }
+       },
+       "window": { "status": { "dynamicRegistration": false } }
+     },
+     "trace": "verbose",
+     "workspaceFolders": [
+       {
+         "uri":
+           "file:///test/directory",
+         "name": "test"
+       }
+     ]
+   }
+  }
+  |};
+  (* Handle non-existent fields. *)
+  assert_parses {|
+  {
+    "jsonrpc": "2.0",
+    "id": 0,
+    "method": "initialize",
+    "params": {
+      "processId": 2160986,
+      "rootPath": "/repo/path",
+      "rootUri": "file:///repo/path",
+      "capabilities": {
+        "workspace": {
+          "zorpThree": true
+        },
+        "textDocument": {
+          "zorp": true
+        },
+        "window": {
+          "zorpTwo": true
+        },
+        "unknownCapability": {}
+      },
+      "initializationOptions": {},
+      "trace": "verbose"
+    }
   }
   |}
 
@@ -407,7 +578,7 @@ let test_show_message_notification _ =
 
 
 let test_did_save_notification context =
-  let root, relative, absolute = files context in
+  let { root; relative; absolute; _ }= files context in
   let linkname = relative ^ "link" in
   Unix.symlink ~src:absolute ~dst:((Path.absolute root) ^/ linkname);
   let message =
@@ -440,9 +611,15 @@ let test_did_save_notification context =
 
 let test_language_server_definition_response context =
   let open Ast.Location in
+  let local_root =
+    bracket_tmpdir context
+    |> Path.create_absolute
+  in
   let assert_response ~id ~location ~expected =
     let message =
+      let configuration = Configuration.Analysis.create ~local_root () in
       TextDocumentDefinitionResponse.create
+        ~configuration
         ~id
         ~location
       |> TextDocumentDefinitionResponse.to_yojson
@@ -461,27 +638,25 @@ let test_language_server_definition_response context =
         "result", `List [];
       ]);
 
-  let add_paths handles_to_paths =
-    List.map handles_to_paths ~f:fst
-    |> fun handles -> Ast.SharedMemory.Sources.remove ~handles;
+  let add_paths handles =
+    Ast.SharedMemory.Sources.remove ~handles;
 
-    let add_source (handle, path) =
-      let source = Ast.Source.create ~handle ~path [] in
+    let add_source handle =
+      let source = Ast.Source.create ~handle [] in
       Ast.SharedMemory.Sources.add handle source
     in
-    List.iter handles_to_paths ~f:add_source
+    List.iter handles ~f:add_source
   in
-  let symlink_filename, _ = bracket_tmpfile ~suffix:".py" context in
-  let filename = Path.create_absolute symlink_filename in
-  let symlink_stub, _ = bracket_tmpfile ~suffix:".pyi" context in
-  let stub = Path.create_absolute symlink_stub in
-  let handles_to_paths =
-    [
-      File.Handle.create "a.py", filename;
-      File.Handle.create "b.pyi", stub;
-    ]
+  let touch path =
+    File.create ~content:"" path
+    |> File.write
   in
-  add_paths handles_to_paths;
+  let file = Path.create_relative ~root:local_root ~relative:"a.py" in
+  touch file;
+  let stub = Path.create_relative ~root:local_root ~relative:"b.pyi" in
+  touch stub;
+  let handles = [File.Handle.create "a.py"; File.Handle.create "b.pyi"] in
+  add_paths handles;
 
   assert_response
     ~id:1
@@ -498,7 +673,7 @@ let test_language_server_definition_response context =
         "id", `Int 1;
         "result", `List [
           `Assoc [
-            "uri", `String (Format.sprintf "file://%s" (Path.absolute filename));
+            "uri", `String (Format.sprintf "file://%s" (Path.absolute file));
             "range", `Assoc [
               "start", `Assoc ["line", `Int 0; "character", `Int 0];
               "end", `Assoc ["line", `Int 1; "character", `Int 0];
@@ -616,8 +791,9 @@ let test_language_server_hover_response _ =
 
 
 let test_request_parser context =
-  let root, relative, absolute = files context in
-  let open_message =
+  let { root; relative; absolute; symlink_source; symlink_target } = files context in
+  let configuration = Configuration.Analysis.create ~local_root:root () in
+  let open_message absolute =
     {
       DidOpenTextDocument.jsonrpc = "2.0";
       method_ = "textDocument/didOpen";
@@ -671,14 +847,24 @@ let test_request_parser context =
       ~cmp:(Option.equal Protocol.Request.equal)
       ~printer:(function | Some request -> Protocol.Request.show request | _ -> "None")
       request
-      (Request.parse ~root:(PyrePath.create_absolute Filename.temp_dir_name) ~request:message)
+      (Request.parse_lsp ~configuration ~request:message)
   in
 
   assert_parsed_request_equals
-    open_message
+    (open_message absolute)
     (Some
        (Protocol.Request.OpenDocument
           (Path.create_absolute absolute |> File.create)));
+  assert_parsed_request_equals
+    (open_message symlink_source)
+    (Some
+       (Protocol.Request.OpenDocument
+          (Path.create_absolute ~follow_symbolic_links:false symlink_source |> File.create)));
+  assert_parsed_request_equals
+    (open_message symlink_target)
+    (Some
+       (Protocol.Request.OpenDocument
+          (Path.create_absolute ~follow_symbolic_links:false symlink_source |> File.create)));
   assert_parsed_request_equals
     close_message
     (Some
@@ -695,7 +881,6 @@ let test_request_parser context =
 
 
 let () =
-  Log.initialize_for_tests ();
   "language_server">:::
   [
     "language_server_protocol_message_format">::test_language_server_protocol_message_format;
@@ -711,4 +896,4 @@ let () =
     "did_save_notification">::test_did_save_notification;
     "request_parser">::test_request_parser;
   ]
-  |> run_test_tt_main
+  |> Test.run

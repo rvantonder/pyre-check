@@ -5,12 +5,16 @@
 
 
 type t =
+  | Demo
+  | GetAttr
   | LocalReturn  (* Special marker to infer function in-out behavior *)
+  | Logging
   | RemoteCodeExecution
-  | TestSink
+  | SQL
+  | Test
+  | Thrift
+  | XMLParser
+  | XSS
 [@@deriving compare, eq, sexp, show, hash]
 
-
 val create: string -> t
-
-val to_string: t -> string
