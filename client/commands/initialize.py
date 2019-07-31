@@ -8,9 +8,11 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 from typing import Any, Dict
 
-from .. import BINARY_NAME, CONFIGURATION_FILE, EnvironmentException, find_typeshed, log
+from .. import BINARY_NAME, CONFIGURATION_FILE, find_typeshed, log
+from ..exceptions import EnvironmentException
 from .command import Command
 
 
@@ -40,17 +42,21 @@ class Initialize(Command):
 
         binary_path = shutil.which(BINARY_NAME)
         if binary_path is None:
+            binary_path = shutil.which(
+                os.path.join(os.path.dirname(sys.argv[0]), BINARY_NAME)
+            )
+        if binary_path is None:
             binary_path = os.path.abspath(
                 log.get_input(
-                    "No {} found, enter the path manually: ".format(BINARY_NAME)
+                    "No `{}` found, enter the path manually: ".format(BINARY_NAME)
                 )
             )
             if not os.path.isfile(binary_path):
                 raise EnvironmentException(
-                    "Unable to locate binary at {}.".format(binary_path)
+                    "Unable to locate binary at `{}`.".format(binary_path)
                 )
         else:
-            LOG.info("Binary found at {}".format(binary_path))
+            LOG.info("Binary found at `{}`".format(binary_path))
         configuration["binary"] = binary_path
 
         typeshed = find_typeshed()
@@ -60,7 +66,7 @@ class Initialize(Command):
             )
             if not os.path.isdir(typeshed):
                 raise EnvironmentException(
-                    "No typeshed directory found at {}.".format(typeshed)
+                    "No typeshed directory found at `{}`.".format(typeshed)
                 )
         configuration["typeshed"] = typeshed
 
@@ -72,30 +78,44 @@ class Initialize(Command):
         return configuration
 
     def _get_local_configuration(self) -> Dict[str, Any]:
-        configuration = {}
+        configuration = {}  # type: Dict[str, Any]
         targets = log.get_input(
-            "Which buck target(s) should pyre analyze? (//target:a,//target/b/...) "
+            "Which buck target(s) should pyre analyze? (//target:a,//target/b/...)\n"
         )
         configuration["targets"] = [target.strip() for target in targets.split(",")]
-        push_blocking = log.get_yes_no_input(
-            "Would you like pyre to enable pyre's push blocking integration?"
+        continuous = log.get_yes_no_input(
+            "Would you like to enable Pyre's continuous integration for your changes?"
         )
-        configuration["push_blocking"] = push_blocking
-        if push_blocking:
-            configuration["differential"] = log.get_yes_no_input(
-                "Should pyre only be push-blocking on newly introduced errors?"
+        configuration["continuous"] = continuous
+        if continuous:
+            push_blocking = log.get_yes_no_input(
+                "Would you like the continuous integration to be push blocking?"
             )
+            configuration["push_blocking"] = push_blocking
+            if push_blocking:
+                # Push blocking implies continuous, it's confusing to have both.
+                del configuration["continuous"]
+                configuration["differential"] = log.get_yes_no_input(
+                    "Should pyre only be push-blocking on newly introduced errors?"
+                )
         return configuration
 
     def _run(self) -> None:
         configuration_path = os.path.join(self._original_directory, CONFIGURATION_FILE)
         if os.path.isfile(configuration_path):
-            raise EnvironmentException(
-                "A pyre configuration already exists at {}.".format(configuration_path)
-            )
+            if self._local:
+                error = "Local configurations must be created in subdirectories of `{}`"
+                "as it already contains a `.pyre_configuration`.".format(
+                    self._original_directory
+                )
+            else:
+                error = "A pyre configuration already exists at `{}`.".format(
+                    configuration_path
+                )
+            raise EnvironmentException(error)
         if os.path.isfile(configuration_path + ".local"):
             raise EnvironmentException(
-                "A local pyre configuration already exists at {}.".format(
+                "A local pyre configuration already exists at `{}`.".format(
                     configuration_path + ".local"
                 )
             )
@@ -107,6 +127,7 @@ class Initialize(Command):
 
         with open(configuration_path, "w+") as configuration_file:
             json.dump(configuration, configuration_file, sort_keys=True, indent=2)
+            configuration_file.write("\n")
         LOG.info(
             "Successfully initialized pyre! "
             + "You can view the configuration at `{}`.".format(configuration_path)

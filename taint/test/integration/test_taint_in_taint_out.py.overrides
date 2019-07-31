@@ -1,2 +1,0 @@
-Overrides
-object::__init__ (override) -> [qualifier.Data::__init__ (override)]

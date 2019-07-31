@@ -1,10 +1,11 @@
 (tests
  (names
-  codexTest
   expressionTest
   identifierTest
   moduleTest
   nodeTest
+  referenceTest
+  sharedMemoryTest
   sourceTest
   statementTest
   transformTest
@@ -24,4 +25,3 @@
   ppx_deriving
   pyrelib.test
   pyrelib.ast))
-

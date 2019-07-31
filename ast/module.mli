@@ -1,30 +1,25 @@
-(** Copyright (c) 2016-present, Facebook, Inc.
+(* Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree. *)
 
-    This source code is licensed under the MIT license found in the
-    LICENSE file in the root directory of this source tree. *)
+type t [@@deriving eq, sexp, show]
 
+val empty_stub : t -> bool
 
-open Statement
+val from_empty_stub : reference:Reference.t -> module_definition:(Reference.t -> t option) -> bool
 
+val wildcard_exports : t -> Reference.t list
 
-type t
-[@@deriving compare, eq, sexp, show]
+val aliased_export : t -> Reference.t -> Reference.t option
 
-val create
-  :  qualifier: Access.t
-  -> local_mode: Source.mode
-  -> ?handle: File.Handle.t
-  -> stub: bool
-  -> Statement.t list
-  -> t
+module Cache : sig
+  val clear : unit -> unit
+end
 
-val empty_stub: t -> bool
-val from_empty_stub: access: Access.t -> module_definition: (Access.t -> t option) -> bool
+val create : Source.t -> t
 
-val handle: t -> File.Handle.t option
+val create_implicit : ?empty_stub:bool -> unit -> t
 
-val wildcard_exports: t -> Access.t list
-
-val aliased_export: t -> Access.t -> Access.t option
-
-val in_wildcard_exports: t -> Access.t -> bool
+(* Exposed for testing only *)
+val create_for_testing : local_mode:Source.mode -> stub:bool -> t

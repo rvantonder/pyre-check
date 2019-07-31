@@ -3,21 +3,23 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+import hashlib
 import json
 import logging
 import os
 import shutil
+import site
 import sys
 from typing import Dict, List, Optional, Union
 
 from . import (
     BINARY_NAME,
     CONFIGURATION_FILE,
-    EnvironmentException,
     assert_readable_directory,
     find_typeshed,
     number_of_workers,
 )
+from .exceptions import EnvironmentException
 
 
 LOG = logging.getLogger(__name__)
@@ -28,17 +30,9 @@ class InvalidConfiguration(Exception):
 
 
 class SearchPathElement:
-    def __init__(self, element: Union[Dict[str, str], str]) -> None:
-        if isinstance(element, str):
-            self.root = os.path.abspath(element)
-            self.subdirectory = None
-        else:
-            if "root" not in element or "subdirectory" not in element:
-                raise InvalidConfiguration(
-                    "Search path elements must have `root` and `subdirectory` specified."
-                )
-            self.root = os.path.abspath(element["root"])
-            self.subdirectory = element["subdirectory"]
+    def __init__(self, root: str, subdirectory: Optional[str] = None) -> None:
+        self.root = os.path.expanduser(root)
+        self.subdirectory = subdirectory
 
     def path(self) -> str:
         subdirectory = self.subdirectory
@@ -62,10 +56,30 @@ class SearchPathElement:
             return self.root == other.root and self.subdirectory == other.subdirectory
 
 
+def expand_search_path(path: Union[Dict[str, str], str]) -> List[SearchPathElement]:
+    if isinstance(path, str):
+        return [SearchPathElement(path)]
+    else:
+        if "root" in path and "subdirectory" in path:
+            root = path["root"]
+            subdirectory = path["subdirectory"]
+            return [SearchPathElement(root, subdirectory)]
+        elif "site-package" in path:
+            site_root = site.getsitepackages()
+            subdirectory = path["site-package"]
+            return [SearchPathElement(root, subdirectory) for root in site_root]
+        else:
+            raise InvalidConfiguration(
+                "Search path elements must have `root` and `subdirectory` specified."
+            )
+
+
 class _ConfigurationFile:
     def __init__(self, file):
         self._deprecated = {"do_not_check": "ignore_all_errors"}
-        self._configuration = json.load(file)
+        contents = file.read()
+        self.file_hash = hashlib.sha1(contents.encode("utf-8")).hexdigest()
+        self._configuration = json.loads(contents)
 
     def consume(self, key, default=None, current=None, print_on_success=False):
         """
@@ -97,6 +111,7 @@ class _ConfigurationFile:
         """
 
         return self._configuration.keys() - {
+            "buck_builder_binary",
             "continuous",
             "coverage",
             "differential",
@@ -106,13 +121,21 @@ class _ConfigurationFile:
         }
 
 
+def expand_relative_path(root: str, path: str) -> str:
+    path = os.path.expanduser(path)
+    if os.path.isabs(path):
+        return path
+    else:
+        return os.path.join(root, path)
+
+
 class Configuration:
     disabled = False  # type: bool
 
     def __init__(
         self,
         local_configuration: Optional[str] = None,
-        search_path: Optional[List[SearchPathElement]] = None,
+        search_path: Optional[List[str]] = None,
         binary: Optional[str] = None,
         typeshed: Optional[str] = None,
         preserve_pythonpath=False,
@@ -124,11 +147,16 @@ class Configuration:
         self.ignore_all_errors = []
         self.number_of_workers = None
         self.local_configuration = None  # type: Optional[str]
-        self.taint_models_path = None
+        self.taint_models_path = []  # type: List[str]
+        self.file_hash = None  # type: Optional[str]
+        self.extensions = []  # type: List[str]
 
         self._version_hash = None  # type: Optional[str]
         self._binary = None  # type: Optional[str]
         self._typeshed = None  # type: Optional[str]
+        self.strict = False  # type: bool
+
+        self._use_buck_builder = None  # type: Optional[bool]
 
         # Handle search path from multiple sources
         self._search_path = []
@@ -149,7 +177,12 @@ class Configuration:
             ]
             self._search_path.extend(sys_path)
         if search_path:
-            self._search_path.extend(search_path)
+            search_path_elements = [
+                expanded_search_path
+                for path in search_path
+                for expanded_search_path in expand_search_path(path)
+            ]
+            self._search_path.extend(search_path_elements)
         # We will extend the search path further, with the config file
         # items, inside _read().
 
@@ -171,7 +204,6 @@ class Configuration:
             )
 
         # Order matters. The values will only be updated if a field is None.
-        self._read(CONFIGURATION_FILE + ".local")
         self._read(CONFIGURATION_FILE)
         self._override_version_hash()
         self._resolve_versioned_paths()
@@ -201,12 +233,25 @@ class Configuration:
                     "`ignore_all_errors` field must be a list of strings."
                 )
 
+            if not is_list_of_strings(self.extensions):
+                raise InvalidConfiguration(
+                    "`extensions` field must be a list of strings."
+                )
+            if not all(
+                extension.startswith(".") or not extension
+                for extension in self.extensions
+            ):
+                raise InvalidConfiguration(
+                    "`extensions` must only contain strings formatted as `.EXT`"
+                )
+
             if not os.path.exists(self.binary):
                 raise InvalidConfiguration(
                     "Binary at `{}` does not exist.".format(self.binary)
                 )
 
-            if self.number_of_workers < 1:
+            number_of_workers = self.number_of_workers
+            if number_of_workers and number_of_workers < 1:
                 raise InvalidConfiguration("Number of workers must be greater than 0.")
 
             # Validate typeshed path and sub-elements.
@@ -219,6 +264,15 @@ class Configuration:
                     "Please note that the `typeshed` configuration must point at "
                     "the root of the `typeshed` directory.".format(self.typeshed)
                 )
+
+            for element in self.ignore_all_errors:
+                if not os.path.exists(element):
+                    LOG.warning(
+                        "Nonexistent path passed in to `ignore_all_errors` \
+                        field: `{}`".format(
+                            element
+                        )
+                    )
 
             typeshed_subdirectories = os.listdir(self.typeshed)
             if "stdlib" not in typeshed_subdirectories:
@@ -276,6 +330,10 @@ class Configuration:
         return self._typeshed
 
     @property
+    def use_buck_builder(self) -> bool:
+        return self._use_buck_builder or False
+
+    @property
     def search_path(self) -> List[str]:
         if not self._search_path:
             return []
@@ -316,11 +374,10 @@ class Configuration:
             self.local_configuration = local_configuration
         self._read(local_configuration)
 
-    def _read(self, path) -> None:
+    def _read(self, path: str) -> None:
         try:
             with open(path) as file:
                 LOG.debug("Reading configuration `%s`...", path)
-
                 configuration = _ConfigurationFile(file)
 
                 source_directories = configuration.consume(
@@ -336,7 +393,10 @@ class Configuration:
                         for directory in source_directories
                     ]
                 else:
-                    self.source_directories = source_directories
+                    self.source_directories = [
+                        os.path.expanduser(directory)
+                        for directory in source_directories
+                    ]
 
                 self.targets = configuration.consume(
                     "targets", default=[], current=self.targets, print_on_success=True
@@ -347,6 +407,7 @@ class Configuration:
 
                 self.logger = configuration.consume("logger", current=self.logger)
 
+                self.strict = configuration.consume("strict", default=self.strict)
                 ignore_all_errors = configuration.consume(
                     "ignore_all_errors", default=[]
                 )
@@ -354,15 +415,10 @@ class Configuration:
                 ignore_all_errors += configuration.consume("do_not_check", default=[])
                 configuration_path = os.path.dirname(os.path.realpath(path))
                 self.ignore_all_errors.extend(
-                    map(
-                        lambda do_not_check_relative_to_configuration: os.path.realpath(
-                            os.path.join(
-                                configuration_path,
-                                do_not_check_relative_to_configuration,
-                            )
-                        ),
-                        ignore_all_errors,
-                    )
+                    [
+                        expand_relative_path(root=configuration_path, path=path)
+                        for path in ignore_all_errors
+                    ]
                 )
 
                 self.number_of_workers = int(
@@ -373,6 +429,8 @@ class Configuration:
 
                 binary = configuration.consume("binary", current=self._binary)
                 assert binary is None or isinstance(binary, str)
+                if binary is not None:
+                    binary = expand_relative_path(configuration_path, binary)
                 self._binary = binary
 
                 additional_search_path = configuration.consume(
@@ -382,8 +440,9 @@ class Configuration:
                 if isinstance(additional_search_path, list):
                     self._search_path.extend(
                         [
-                            SearchPathElement(element)
-                            for element in additional_search_path
+                            expanded_path
+                            for path in additional_search_path
+                            for expanded_path in expand_search_path(path)
                         ]
                     )
                 else:
@@ -397,13 +456,28 @@ class Configuration:
 
                 typeshed = configuration.consume("typeshed", current=self._typeshed)
                 assert typeshed is None or isinstance(typeshed, str)
+                if typeshed is not None:
+                    typeshed = expand_relative_path(configuration_path, typeshed)
                 self._typeshed = typeshed
 
-                taint_models_path = configuration.consume(
-                    "taint_models_path", current=self.taint_models_path
+                taint_models_path = configuration.consume("taint_models_path")
+                assert (
+                    taint_models_path is None
+                    or isinstance(taint_models_path, str)
+                    or isinstance(taint_models_path, list)
                 )
-                assert taint_models_path is None or isinstance(taint_models_path, str)
-                self.taint_models_path = taint_models_path
+                configuration_directory = os.path.dirname(os.path.realpath(path))
+                if isinstance(taint_models_path, str):
+                    self.taint_models_path.append(
+                        os.path.join(configuration_directory, taint_models_path)
+                    )
+                elif isinstance(taint_models_path, list):
+                    self.taint_models_path.extend(
+                        [
+                            os.path.join(configuration_directory, path)
+                            for path in taint_models_path
+                        ]
+                    )
 
                 excludes = configuration.consume("exclude", default=[])
                 if isinstance(excludes, list):
@@ -411,16 +485,28 @@ class Configuration:
                 else:
                     self.excludes.append(excludes)
 
+                extensions = configuration.consume("extensions", default=[])
+                self.extensions.extend(extensions)
+
+                # We rely on the configuration SHA1 to make
+                if configuration.consume("saved_state"):
+                    self.file_hash = configuration.file_hash
+
+                use_buck_builder = configuration.consume("use_buck_builder")
+                if self._use_buck_builder is None:
+                    self._use_buck_builder = use_buck_builder
+
                 # This block should be at the bottom to be effective.
                 unused_keys = configuration.unused_keys()
                 if unused_keys:
                     LOG.warning(
-                        "Some configuration items were not recognized in {}: {}".format(
-                            path, ", ".join(unused_keys)
-                        )
+                        "Some configuration items were not recognized in "
+                        "`{}`: {}".format(path, ", ".join(unused_keys))
                     )
         except IOError:
-            LOG.debug("No configuration found at `{}`.".format(path))
+            # To avoid TOCTTOU bugs, handle IOErrors here silently.
+            # We error elsewhere if there weren't enough parameters passed into pyre.
+            pass
         except json.JSONDecodeError as error:
             raise EnvironmentException(
                 "Configuration file at `{}` is invalid: {}.".format(path, str(error))
@@ -454,6 +540,11 @@ class Configuration:
                 "No binary specified, looking for `{}` in PATH".format(BINARY_NAME)
             )
             self._binary = shutil.which(BINARY_NAME)
+            if not self._binary:
+                binary_candidate = os.path.join(
+                    os.path.dirname(sys.argv[0]), BINARY_NAME
+                )
+                self._binary = shutil.which(binary_candidate)
             if not self._binary:
                 LOG.warning("Could not find `{}` in PATH".format(BINARY_NAME))
             else:

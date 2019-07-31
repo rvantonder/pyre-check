@@ -1,150 +1,170 @@
-(** Copyright (c) 2016-present, Facebook, Inc.
-
-    This source code is licensed under the MIT license found in the
-    LICENSE file in the root directory of this source tree. *)
+(* Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree. *)
 
 open Core
-
 open Pyre
-
 open Ast
 open Statement
 
+let is_generator { Define.body; _ } =
+  let module YieldVisit = Visit.Make (struct
+    type t = bool
 
-let return_annotation ~define:({ Define.return_annotation; async; _ } as define) ~resolution =
+    let expression result expression =
+      match result, expression with
+      | true, _ -> true
+      | false, { Node.value = Expression.Yield _; _ } -> true
+      | false, _ -> false
+
+
+    let statement result statement =
+      match result, statement with
+      | true, _ -> true
+      | false, { Node.value = Statement.Yield _; _ } -> true
+      | false, { Node.value = Statement.YieldFrom _; _ } -> true
+      | false, _ -> false
+  end)
+  in
+  YieldVisit.visit false (Source.create body)
+
+
+let return_annotation
+    ~define:({ Define.signature = { Define.return_annotation; async; _ }; _ } as define)
+    ~resolution
+  =
   let annotation =
     Option.value_map
       return_annotation
-      ~f:(Resolution.parse_annotation resolution)
+      ~f:(GlobalResolution.parse_annotation resolution)
       ~default:Type.Top
   in
-  if async then
-    Type.awaitable annotation
+  if async && not (is_generator define) then
+    Type.coroutine (Concrete [Type.Any; Type.Any; annotation])
   else if Define.is_coroutine define then
-    begin
-      match annotation with
-      | Type.Parametric { name; parameters = [_; _; return_annotation] }
-        when Identifier.show name = "typing.Generator" ->
-          Type.awaitable return_annotation
-      | _ ->
-          Type.Top
-    end
+    match annotation with
+    | Type.Parametric
+        { name = "typing.Generator"; parameters = Concrete [_; _; return_annotation] } ->
+        Type.awaitable return_annotation
+    | _ -> Type.Top
   else
     annotation
 
 
-let apply_decorators ~define ~resolution =
-  let return_annotation = return_annotation ~define ~resolution in
-  if Define.has_decorator define "contextlib.contextmanager" then
-    let joined =
-      try
-        Resolution.join resolution return_annotation (Type.iterator Type.Bottom)
-      with
-        TypeOrder.Untracked _ ->
-          (* Apply_decorators gets called when building the environment,
-             which is unsound and can raise. *)
-          Type.Object
-    in
-    if Type.is_iterator joined then
-      {
-        define with
-        Define.return_annotation =
-          Type.parametric "contextlib.GeneratorContextManager" [Type.single_parameter joined]
-          |> Type.expression
-          |> Option.some
-      }
-    else
-      define
-  else
-    define
-
-
-let create ~parent ~resolution defines =
+let create_overload ?location ~resolution ({ Define.signature = { parameters; _ }; _ } as define) =
   let open Type.Callable in
-  let { Define.name; _ } = List.hd_exn defines in
-  let parameter { Node.value = { Ast.Parameter.name; annotation; value }; _ } =
-    let name = Identifier.show name in
-    let access =
-      String.lstrip ~drop:(function | '*' -> true | _ -> false) name
-      |> Access.create
+  let parameters =
+    let parameter { Node.value = { Ast.Parameter.name; annotation; value }; _ } =
+      let default = Option.is_some value in
+      { Parameter.name; annotation; default }
     in
-    let annotation =
-      annotation
-      >>| Resolution.parse_annotation resolution
-      |> Option.value ~default:Type.Top
+    let parse_as_annotation annotation =
+      annotation >>| GlobalResolution.parse_annotation resolution |> Option.value ~default:Type.Top
     in
-    if String.is_prefix ~prefix:"**" name then
-      Parameter.Keywords { Parameter.name = access; annotation; default = false }
-    else if String.is_prefix ~prefix:"*" name then
-      Parameter.Variable { Parameter.name = access; annotation; default = false }
-    else
-      Parameter.Named { Parameter.name = access; annotation; default = Option.is_some value }
-  in
-  let implementation, overloads =
-    let to_signature (implementation, overloads) ({ Define.parameters; _ } as define) =
-      let signature =
-        {
-          annotation = return_annotation ~define ~resolution;
-          parameters = Defined (List.map parameters ~f:parameter);
-        }
+    let parse_parameters parameters =
+      let parse = function
+        | Type.Callable.Parameter.Anonymous ({ annotation; _ } as anonymous) ->
+            Type.Callable.Parameter.Anonymous
+              { anonymous with annotation = parse_as_annotation annotation }
+        | Named ({ annotation; _ } as named) ->
+            Named { named with annotation = parse_as_annotation annotation }
+        | KeywordOnly ({ annotation; _ } as named) ->
+            KeywordOnly { named with annotation = parse_as_annotation annotation }
+        | Variable (Map _)
+        | Variable (Variadic _) ->
+            failwith "impossible"
+        | Variable (Concrete annotation) -> (
+            let parsed_as_list_variadic () =
+              annotation >>= GlobalResolution.parse_as_list_variadic resolution
+            in
+            let parsed_as_map_operator () =
+              annotation >>= GlobalResolution.parse_as_list_variadic_map_operator resolution
+            in
+            match parsed_as_list_variadic () with
+            | Some variable -> Parameter.Variable (Variadic variable)
+            | None -> (
+              match parsed_as_map_operator () with
+              | Some map -> Parameter.Variable (Map map)
+              | None -> Parameter.Variable (Concrete (parse_as_annotation annotation)) ) )
+        | Keywords annotation -> Keywords (parse_as_annotation annotation)
       in
-      if Define.is_overloaded_method define then
+      match parameters with
+      | [ Type.Callable.Parameter.Variable (Concrete (Some variable_parameter_annotation));
+          Type.Callable.Parameter.Keywords (Some keywords_parameter_annotation) ] -> (
+        match
+          GlobalResolution.parse_as_parameter_specification_instance_annotation
+            resolution
+            ~variable_parameter_annotation
+            ~keywords_parameter_annotation
+        with
+        | Some variable -> ParameterVariadicTypeVariable variable
+        | None -> Defined (List.map parameters ~f:parse) )
+      | _ -> Defined (List.map parameters ~f:parse)
+    in
+    List.map parameters ~f:parameter |> Parameter.create |> parse_parameters
+  in
+  { annotation = return_annotation ~define ~resolution; parameters; define_location = location }
+
+
+let create ~resolution ~parent ~name overloads =
+  let open Type.Callable in
+  let implementation, overloads =
+    let to_signature (implementation, overloads) (is_overload, signature) =
+      if is_overload then
         implementation, signature :: overloads
       else
         signature, overloads
     in
     List.fold
-      ~init:({ annotation = Type.Top; parameters = Type.Callable.Undefined }, [])
+      ~init:
+        ( { annotation = Type.Top; parameters = Type.Callable.Undefined; define_location = None },
+          [] )
       ~f:to_signature
-      defines
+      overloads
   in
   let callable =
-    {
-      kind = Named name;
-      implementation;
-      overloads;
-      implicit = None;
-    }
+    { kind = Named (Reference.create name); implementation; overloads; implicit = None }
   in
   match parent with
   | Some parent ->
       let { Type.Callable.kind; implementation; overloads; implicit } =
         match implementation with
-        | { parameters = Defined (self_parameter :: _); _ } ->
+        | { parameters = Defined (Named { name; annotation; _ } :: _); _ } -> (
             let callable =
-              let implicit = {
-                implicit_annotation = parent;
-                name = [Access.Identifier (Type.Callable.Parameter.name self_parameter)];
-              }
-              in
+              let implicit = { implicit_annotation = parent; name } in
               { callable with implicit = Some implicit }
             in
-            let constraints =
-              TypeOrder.diff_variables
-                Type.Map.empty
-                (Parameter.annotation self_parameter)
-                parent
+            let solution =
+              try
+                GlobalResolution.solve_less_or_equal
+                  resolution
+                  ~any_is_bottom:true
+                  ~left:parent
+                  ~right:annotation
+                  ~constraints:TypeConstraints.empty
+                |> List.filter_map
+                     ~f:(GlobalResolution.solve_constraints ~any_is_bottom:true resolution)
+                |> List.hd
+                |> Option.value ~default:TypeConstraints.Solution.empty
+              with
+              | ClassHierarchy.Untracked _ -> TypeConstraints.Solution.empty
             in
             let instantiated =
-              Type.instantiate (Type.Callable callable) ~constraints:(Map.find constraints)
+              TypeConstraints.Solution.instantiate solution (Type.Callable callable)
             in
-            begin
-              match instantiated with
-              | Type.Callable callable -> callable
-              | _ -> callable
-            end
-        | _ ->
-            callable
+            match instantiated with
+            | Type.Callable callable -> callable
+            | _ -> callable )
+        | _ -> callable
       in
-      let drop_self { Type.Callable.annotation; parameters } =
+      let drop_self { Type.Callable.annotation; parameters; define_location } =
         let parameters =
           match parameters with
-          | Type.Callable.Defined (_ :: parameters) ->
-              Type.Callable.Defined parameters
-          | _ ->
-              parameters
+          | Type.Callable.Defined (_ :: parameters) -> Type.Callable.Defined parameters
+          | _ -> parameters
         in
-        { Type.Callable.annotation; parameters }
+        { Type.Callable.annotation; parameters; define_location }
       in
       {
         Type.Callable.kind;
@@ -152,5 +172,113 @@ let create ~parent ~resolution defines =
         overloads = List.map overloads ~f:drop_self;
         implicit;
       }
-  | None ->
-      callable
+  | None -> callable
+
+
+let apply_decorators
+    ?location
+    ~resolution
+    ({ Define.signature = { Define.decorators; _ }; _ } as define)
+  =
+  let apply_decorator
+      ({ Type.Callable.annotation; parameters; _ } as overload)
+      { Node.value = decorator; _ }
+    =
+    let resolve_decorators name =
+      match name with
+      | "click.command"
+      | "click.group"
+      | "click.pass_context"
+      | "click.pass_obj" ->
+          (* Suppress caller/callee parameter matching by altering the click entry point to have a
+             generic parameter list. *)
+          let parameters =
+            Type.Callable.Defined
+              [ Type.Callable.Parameter.Variable (Concrete Type.Any);
+                Type.Callable.Parameter.Keywords Type.Any ]
+          in
+          { overload with Type.Callable.parameters }
+      | name when Set.mem Recognized.asyncio_contextmanager_decorators name ->
+          let joined =
+            try GlobalResolution.join resolution annotation (Type.async_iterator Type.Bottom) with
+            | ClassHierarchy.Untracked _ ->
+                (* Apply_decorators gets called when building the environment, which is unsound and
+                   can raise. *)
+                Type.Any
+          in
+          if Type.is_async_iterator joined then
+            {
+              overload with
+              Type.Callable.annotation =
+                Type.parametric
+                  "typing.AsyncContextManager"
+                  (Concrete [Type.single_parameter joined]);
+            }
+          else
+            overload
+      | name when Set.mem Decorators.special_decorators name ->
+          Decorators.apply ~overload ~resolution ~name
+      | name -> (
+        match GlobalResolution.undecorated_signature resolution (Reference.create name) with
+        | Some
+            {
+              Type.Callable.annotation = return_annotation;
+              parameters =
+                Type.Callable.Defined
+                  [Type.Callable.Parameter.Named { annotation = parameter_annotation; _ }];
+              _;
+            } -> (
+            let decorated_annotation =
+              GlobalResolution.solve_less_or_equal
+                resolution
+                ~constraints:TypeConstraints.empty
+                ~left:(Type.Callable.create ~parameters ~annotation ())
+                ~right:parameter_annotation
+              |> List.filter_map ~f:(GlobalResolution.solve_constraints resolution)
+              |> List.hd
+              >>| (fun solution -> TypeConstraints.Solution.instantiate solution return_annotation)
+              (* If we failed, just default to the old annotation. *)
+              |> Option.value ~default:annotation
+            in
+            match decorated_annotation with
+            (* Note that @property decorators can't properly be handled in this fashion. The
+               problem stems from the need to use `apply_decorators` to individual overloaded
+               defines - if an overloaded define could become Not An Overload, it's not clear what
+               we should do. Defer the problem by now by only inferring a limited set of
+               decorators. *)
+            | Type.Callable
+                {
+                  Type.Callable.implementation =
+                    {
+                      Type.Callable.parameters = decorated_parameters;
+                      annotation = decorated_annotation;
+                      define_location;
+                    };
+                  _;
+                } -> (
+              (* Typeshed currently exhibits the common behavior of decorating with `Callable[...,
+                 T] -> Modified[T]` when the parameters are meant to be left alone. Support this by
+                 hard coding :( *)
+              match decorated_parameters with
+              | Undefined -> { overload with Type.Callable.annotation = decorated_annotation }
+              | _ ->
+                  {
+                    Type.Callable.annotation = decorated_annotation;
+                    parameters = decorated_parameters;
+                    define_location;
+                  } )
+            | _ -> overload )
+        | _ -> overload )
+    in
+    match decorator with
+    | Expression.Call { callee = { Node.value = Expression.Name name; _ }; _ }
+    | Expression.Name name ->
+        Expression.name_to_identifiers name
+        >>| String.concat ~sep:"."
+        >>| resolve_decorators
+        |> Option.value ~default:overload
+    | _ -> overload
+  in
+  decorators
+  |> List.rev
+  |> List.fold ~init:(create_overload define ~resolution ?location) ~f:apply_decorator

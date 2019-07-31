@@ -1,4 +1,0 @@
-Call dependencies
-qualifier.dictionary_entry_sink (fun) -> [__testSink (fun)]
-qualifier.dictionary_source (fun) -> [__testSource (fun)]
-qualifier.dictionary_tito (fun) -> []

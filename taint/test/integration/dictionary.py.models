@@ -1,0 +1,311 @@
+@generated
+{
+  "kind": "issue",
+  "data": {
+    "callable": "dictionary.indirect_flow_from_source_to_global_dictionary",
+    "callable_line": 66,
+    "code": 5002,
+    "line": 67,
+    "start": 33,
+    "end": 55,
+    "filename": "dictionary.py",
+    "message":
+      "Test flow. Data from [Test] source(s) may reach [Test] sink(s)",
+    "traces": [
+      {
+        "name": "forward",
+        "roots": [
+          {
+            "root": {
+              "filename": "dictionary.py",
+              "line": 67,
+              "start": 52,
+              "end": 54
+            },
+            "leaves": [ { "kind": "Test", "name": "__test_source" } ],
+            "features": [ { "via": "special_source" } ]
+          }
+        ]
+      },
+      {
+        "name": "backward",
+        "roots": [
+          {
+            "call": {
+              "position": {
+                "filename": "dictionary.py",
+                "line": 67,
+                "start": 33,
+                "end": 55
+              },
+              "resolves_to": [ "dictionary.update_dictionary_indirectly" ],
+              "port": "formal(arg)",
+              "length": 1
+            },
+            "leaves": [
+              { "kind": "Test", "name": "dictionary.tainted_dictionary" }
+            ],
+            "features": [ { "via": "tito" } ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "issue",
+  "data": {
+    "callable": "dictionary.update_tainted_dictionary",
+    "callable_line": 58,
+    "code": 5002,
+    "line": 59,
+    "start": 4,
+    "end": 22,
+    "filename": "dictionary.py",
+    "message":
+      "Test flow. Data from [Test] source(s) may reach [Test] sink(s)",
+    "traces": [
+      {
+        "name": "forward",
+        "roots": [
+          {
+            "root": {
+              "filename": "dictionary.py",
+              "line": 59,
+              "start": 49,
+              "end": 51
+            },
+            "tito": [ { "line": 59, "start": 30, "end": 52 } ],
+            "leaves": [ { "kind": "Test", "name": "__test_source" } ],
+            "features": [ { "via": "tito" }, { "via": "special_source" } ]
+          }
+        ]
+      },
+      {
+        "name": "backward",
+        "roots": [
+          {
+            "root": {
+              "filename": "dictionary.py",
+              "line": 59,
+              "start": 4,
+              "end": 22
+            },
+            "leaves": [
+              { "kind": "Test", "name": "dictionary.tainted_dictionary" }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "dictionary.dictionary_assign_to_index",
+    "sources": [
+      {
+        "port": "result[a]",
+        "taint": [
+          {
+            "root": {
+              "filename": "dictionary.py",
+              "line": 33,
+              "start": 26,
+              "end": 28
+            },
+            "leaves": [ { "kind": "Test", "name": "__test_source" } ],
+            "features": [ { "via": "special_source" } ]
+          }
+        ]
+      }
+    ],
+    "sinks": [],
+    "tito": []
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "dictionary.dictionary_assignment_source",
+    "sources": [
+      {
+        "port": "result",
+        "taint": [
+          {
+            "root": {
+              "filename": "dictionary.py",
+              "line": 21,
+              "start": 26,
+              "end": 28
+            },
+            "leaves": [ { "kind": "Test", "name": "__test_source" } ],
+            "features": [
+              { "via": "special_source" },
+              { "has": "first-index" },
+              { "first-index": "a" }
+            ]
+          }
+        ]
+      }
+    ],
+    "sinks": [],
+    "tito": []
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "dictionary.dictionary_entry_sink",
+    "sources": [],
+    "sinks": [
+      {
+        "port": "formal(arg)",
+        "taint": [
+          {
+            "root": {
+              "filename": "dictionary.py",
+              "line": 11,
+              "start": 31,
+              "end": 34
+            },
+            "leaves": [ { "kind": "Test", "name": "__test_sink" } ],
+            "features": [ { "via": "special_sink" } ]
+          }
+        ]
+      }
+    ],
+    "tito": []
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "dictionary.dictionary_nested_assignment_1",
+    "sources": [
+      {
+        "port": "result",
+        "taint": [
+          {
+            "root": {
+              "filename": "dictionary.py",
+              "line": 39,
+              "start": 31,
+              "end": 33
+            },
+            "leaves": [ { "kind": "Test", "name": "__test_source" } ],
+            "features": [
+              { "via": "special_source" },
+              { "has": "first-index" },
+              { "first-index": "a" }
+            ]
+          }
+        ]
+      }
+    ],
+    "sinks": [],
+    "tito": []
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "dictionary.dictionary_nested_assignment_2",
+    "sources": [
+      {
+        "port": "result[b]",
+        "taint": [
+          {
+            "root": {
+              "filename": "dictionary.py",
+              "line": 45,
+              "start": 31,
+              "end": 33
+            },
+            "leaves": [ { "kind": "Test", "name": "__test_source" } ],
+            "features": [
+              { "via": "special_source" },
+              { "has": "first-index" },
+              { "first-index": "a" }
+            ]
+          }
+        ]
+      }
+    ],
+    "sinks": [],
+    "tito": []
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "dictionary.dictionary_source",
+    "sources": [
+      {
+        "port": "result[a]",
+        "taint": [
+          {
+            "root": {
+              "filename": "dictionary.py",
+              "line": 6,
+              "start": 32,
+              "end": 34
+            },
+            "leaves": [ { "kind": "Test", "name": "__test_source" } ],
+            "features": [ { "via": "special_source" } ]
+          }
+        ]
+      }
+    ],
+    "sinks": [],
+    "tito": []
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "dictionary.dictionary_tito",
+    "sources": [],
+    "sinks": [],
+    "tito": [
+      {
+        "port": "formal(arg)",
+        "taint": [
+          {
+            "decl": null,
+            "leaves": [ { "kind": "LocalReturn", "name": "[a]" } ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "dictionary.update_dictionary_indirectly",
+    "sources": [],
+    "sinks": [
+      {
+        "port": "formal(arg)",
+        "taint": [
+          {
+            "root": {
+              "filename": "dictionary.py",
+              "line": 63,
+              "start": 4,
+              "end": 22
+            },
+            "tito": [ { "line": 63, "start": 30, "end": 33 } ],
+            "leaves": [
+              { "kind": "Test", "name": "dictionary.tainted_dictionary" }
+            ],
+            "features": [ { "via": "tito" } ]
+          }
+        ]
+      }
+    ],
+    "tito": []
+  }
+}

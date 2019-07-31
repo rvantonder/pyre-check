@@ -13,15 +13,10 @@ die() {
   exit 1
 }
 
-COMPILER_VERSION="4.06.0"
+COMPILER_VERSION="4.08.0"
 DEVELOPMENT_COMPILER="${COMPILER_VERSION}"
 RELEASE_COMPILER="${COMPILER_VERSION}+flambda"
-MAKE_ARGUMENTS=""
-
-# Compatibility settings with MacOS.
-if [[ "${MACHTYPE}" = *apple* ]]; then
-  export MACOSX_DEPLOYMENT_TARGET=10.11
-fi
+MAKE_ARGUMENTS="dev"
 
 # Switch to pyre directory.
 cd "$(dirname "$0")/.."
@@ -149,37 +144,25 @@ if [[ ${opam_version:0:1} == "2" ]] ; then
     && opam update \
     && ocaml_succeeded=1
 else
-  opam init --yes --compiler "$COMPILER" --root "$OPAM_ROOT" default "$OPAM_REPOSITORY" \
-    && eval "$(opam config --root "$OPAM_ROOT" env)" \
-    && opam update \
-    && ocaml_succeeded=1
+    echo "Pyre only supports opam 2.0.0 and above, please update your opam version."
+    exit 1
 fi
 test "$ocaml_succeeded" = 1 \
   || die 'Unable to setup OCaml environment'
 
 opam install --yes \
-  core \
-  dune \
-  yojson \
-  ppx_deriving \
-  ppx_deriving_yojson \
-  ppx_compare \
-  ppx_hash \
-  ounit \
+  base64.3.1.0 \
+  conf-sqlite3 \
+  core.v0.12.3 \
+  dune.1.10.0 \
+  yojson.1.7.0 \
+  ppx_deriving_yojson.3.5.1 \
+  ounit.2.0.8 \
   menhir \
   utop \
   && opam_install_dependencies_succeeded=1
 test "$opam_install_dependencies_succeeded" = 1 \
   || die 'Could not install dependencies'
-
-# Build and install hack parallel.
-(cd hack_parallel \
-  && OCAMLPARAM=_,annot=1,bin-annot=1,g=1 make \
-  && make remove \
-  && make install) \
-  && install_hack_parallel=1
-test "$install_hack_parallel" = 1 \
-  || die 'Could not install hack_parallel'
 
 if [[ -n "${ENVIRONMENT_ONLY}" ]]; then
   echo 'Environment built successfully, stopping here as requested.'
@@ -192,4 +175,10 @@ jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
 make ${MAKE_ARGUMENTS} --jobs "$jobs" || die 'Could not build pyre'
 make --jobs "$jobs" test || die 'Pyre tests failed'
 make python_tests || die 'Python tests for Pyre failed'
-make server_integration_test || die 'Server integration test failed'
+if [[ "${BUILD}" == 'external' ]] && ! command -v watchman; then
+  echo 'Skipping integration test in external mode, since watchman is not installed'
+else
+  make server_integration_test || die 'Server integration test failed'
+fi
+
+exit 0

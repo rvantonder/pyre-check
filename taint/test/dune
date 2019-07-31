@@ -8,14 +8,17 @@
   oUnit
   pyrelib.test
   pyrelib.ast
+  pyrelib.analysis
   pyrelib.interprocedural
   pyrelib.taint))
 
 (tests
  (names
   accessPathTest
+  configurationTest
   domainTest
-  taintAnalysisTest
+  integrationTest
+  fixpointTest
   flowTest
   forwardAnalysisTest
   backwardAnalysisTest
@@ -27,6 +30,7 @@
   oUnit
   pyrelib.test
   pyrelib.ast
+  pyrelib.analysis
   pyrelib.interprocedural
   pyrelib.taint
   pyrelib.taintTestHelper

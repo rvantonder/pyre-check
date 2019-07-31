@@ -1,0 +1,418 @@
+@generated
+{
+  "kind": "issue",
+  "data": {
+    "callable": "global_flows.append_directly",
+    "callable_line": 59,
+    "code": 5002,
+    "line": 60,
+    "start": 4,
+    "end": 5,
+    "filename": "global_flows.py",
+    "message":
+      "Test flow. Data from [Test] source(s) may reach [Test] sink(s)",
+    "traces": [
+      {
+        "name": "forward",
+        "roots": [
+          {
+            "root": {
+              "filename": "global_flows.py",
+              "line": 60,
+              "start": 26,
+              "end": 28
+            },
+            "tito": [ { "line": 60, "start": 13, "end": 28 } ],
+            "leaves": [ { "kind": "Test", "name": "__test_source" } ],
+            "features": [ { "via": "tito" }, { "via": "special_source" } ]
+          }
+        ]
+      },
+      {
+        "name": "backward",
+        "roots": [
+          {
+            "root": {
+              "filename": "global_flows.py",
+              "line": 60,
+              "start": 4,
+              "end": 5
+            },
+            "leaves": [ { "kind": "Test", "name": "global_flows.l" } ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "issue",
+  "data": {
+    "callable": "global_flows.append_indirectly",
+    "callable_line": 67,
+    "code": 5002,
+    "line": 68,
+    "start": 20,
+    "end": 35,
+    "filename": "global_flows.py",
+    "message":
+      "Test flow. Data from [Test] source(s) may reach [Test] sink(s)",
+    "traces": [
+      {
+        "name": "forward",
+        "roots": [
+          {
+            "root": {
+              "filename": "global_flows.py",
+              "line": 68,
+              "start": 33,
+              "end": 35
+            },
+            "leaves": [ { "kind": "Test", "name": "__test_source" } ],
+            "features": [ { "via": "special_source" } ]
+          }
+        ]
+      },
+      {
+        "name": "backward",
+        "roots": [
+          {
+            "call": {
+              "position": {
+                "filename": "global_flows.py",
+                "line": 68,
+                "start": 20,
+                "end": 35
+              },
+              "resolves_to": [ "global_flows.append_argument" ],
+              "port": "formal(arg)",
+              "length": 1
+            },
+            "leaves": [ { "kind": "Test", "name": "global_flows.l" } ],
+            "features": [ { "via": "tito" } ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "issue",
+  "data": {
+    "callable": "global_flows.update_x_at_arg1",
+    "callable_line": 15,
+    "code": 5002,
+    "line": 16,
+    "start": 16,
+    "end": 17,
+    "filename": "global_flows.py",
+    "message":
+      "Test flow. Data from [Test] source(s) may reach [Test] sink(s)",
+    "traces": [
+      {
+        "name": "forward",
+        "roots": [
+          {
+            "root": {
+              "filename": "global_flows.py",
+              "line": 16,
+              "start": 32,
+              "end": 34
+            },
+            "tito": [ { "line": 16, "start": 19, "end": 34 } ],
+            "leaves": [ { "kind": "Test", "name": "__test_source" } ],
+            "features": [ { "via": "tito" }, { "via": "special_source" } ]
+          }
+        ]
+      },
+      {
+        "name": "backward",
+        "roots": [
+          {
+            "root": {
+              "filename": "global_flows.py",
+              "line": 16,
+              "start": 16,
+              "end": 17
+            },
+            "leaves": [ { "kind": "Test", "name": "global_flows.x" } ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "issue",
+  "data": {
+    "callable": "global_flows.update_x_at_arg2",
+    "callable_line": 23,
+    "code": 5002,
+    "line": 24,
+    "start": 33,
+    "end": 34,
+    "filename": "global_flows.py",
+    "message":
+      "Test flow. Data from [Test] source(s) may reach [Test] sink(s)",
+    "traces": [
+      {
+        "name": "forward",
+        "roots": [
+          {
+            "root": {
+              "filename": "global_flows.py",
+              "line": 24,
+              "start": 29,
+              "end": 31
+            },
+            "tito": [ { "line": 24, "start": 16, "end": 31 } ],
+            "leaves": [ { "kind": "Test", "name": "__test_source" } ],
+            "features": [ { "via": "tito" }, { "via": "special_source" } ]
+          }
+        ]
+      },
+      {
+        "name": "backward",
+        "roots": [
+          {
+            "root": {
+              "filename": "global_flows.py",
+              "line": 24,
+              "start": 33,
+              "end": 34
+            },
+            "leaves": [ { "kind": "Test", "name": "global_flows.x" } ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "issue",
+  "data": {
+    "callable": "global_flows.x_tainted_indirectly_arg1",
+    "callable_line": 35,
+    "code": 5002,
+    "line": 36,
+    "start": 29,
+    "end": 44,
+    "filename": "global_flows.py",
+    "message":
+      "Test flow. Data from [Test] source(s) may reach [Test] sink(s)",
+    "traces": [
+      {
+        "name": "forward",
+        "roots": [
+          {
+            "root": {
+              "filename": "global_flows.py",
+              "line": 36,
+              "start": 42,
+              "end": 44
+            },
+            "leaves": [ { "kind": "Test", "name": "__test_source" } ],
+            "features": [ { "via": "special_source" } ]
+          }
+        ]
+      },
+      {
+        "name": "backward",
+        "roots": [
+          {
+            "call": {
+              "position": {
+                "filename": "global_flows.py",
+                "line": 36,
+                "start": 29,
+                "end": 44
+              },
+              "resolves_to": [ "global_flows.indirectly_update_x_arg1" ],
+              "port": "formal(arg)",
+              "length": 1
+            },
+            "leaves": [ { "kind": "Test", "name": "global_flows.x" } ],
+            "features": [ { "via": "tito" } ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "issue",
+  "data": {
+    "callable": "global_flows.x_tainted_indirectly_arg2",
+    "callable_line": 47,
+    "code": 5002,
+    "line": 48,
+    "start": 29,
+    "end": 44,
+    "filename": "global_flows.py",
+    "message":
+      "Test flow. Data from [Test] source(s) may reach [Test] sink(s)",
+    "traces": [
+      {
+        "name": "forward",
+        "roots": [
+          {
+            "root": {
+              "filename": "global_flows.py",
+              "line": 48,
+              "start": 42,
+              "end": 44
+            },
+            "leaves": [ { "kind": "Test", "name": "__test_source" } ],
+            "features": [ { "via": "special_source" } ]
+          }
+        ]
+      },
+      {
+        "name": "backward",
+        "roots": [
+          {
+            "call": {
+              "position": {
+                "filename": "global_flows.py",
+                "line": 48,
+                "start": 29,
+                "end": 44
+              },
+              "resolves_to": [ "global_flows.indirectly_update_x_arg2" ],
+              "port": "formal(arg)",
+              "length": 1
+            },
+            "leaves": [ { "kind": "Test", "name": "global_flows.x" } ],
+            "features": [ { "via": "tito" } ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "global_flows.MyList.append",
+    "sources": [],
+    "sinks": [],
+    "tito": [
+      {
+        "port": "formal(item)",
+        "taint": [
+          { "decl": null, "leaves": [ { "kind": "ParameterUpdate0" } ] }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "global_flows.append_argument",
+    "sources": [],
+    "sinks": [
+      {
+        "port": "formal(arg)",
+        "taint": [
+          {
+            "root": {
+              "filename": "global_flows.py",
+              "line": 64,
+              "start": 4,
+              "end": 5
+            },
+            "tito": [ { "line": 64, "start": 13, "end": 16 } ],
+            "leaves": [ { "kind": "Test", "name": "global_flows.l" } ],
+            "features": [ { "via": "tito" } ]
+          }
+        ]
+      }
+    ],
+    "tito": []
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "global_flows.indirectly_update_x_arg1",
+    "sources": [],
+    "sinks": [
+      {
+        "port": "formal(arg)",
+        "taint": [
+          {
+            "root": {
+              "filename": "global_flows.py",
+              "line": 32,
+              "start": 16,
+              "end": 17
+            },
+            "tito": [ { "line": 32, "start": 19, "end": 22 } ],
+            "leaves": [ { "kind": "Test", "name": "global_flows.x" } ],
+            "features": [ { "via": "tito" } ]
+          }
+        ]
+      }
+    ],
+    "tito": []
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "global_flows.indirectly_update_x_arg2",
+    "sources": [],
+    "sinks": [
+      {
+        "port": "formal(arg)",
+        "taint": [
+          {
+            "root": {
+              "filename": "global_flows.py",
+              "line": 44,
+              "start": 21,
+              "end": 22
+            },
+            "tito": [ { "line": 44, "start": 16, "end": 19 } ],
+            "leaves": [ { "kind": "Test", "name": "global_flows.x" } ],
+            "features": [ { "via": "tito" } ]
+          }
+        ]
+      }
+    ],
+    "tito": []
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "global_flows.update_arg1",
+    "sources": [],
+    "sinks": [],
+    "tito": [
+      {
+        "port": "formal(arg2)",
+        "taint": [
+          { "decl": null, "leaves": [ { "kind": "ParameterUpdate0" } ] }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "global_flows.update_arg2",
+    "sources": [],
+    "sinks": [],
+    "tito": [
+      {
+        "port": "formal(arg1)",
+        "taint": [
+          { "decl": null, "leaves": [ { "kind": "ParameterUpdate1" } ] }
+        ]
+      }
+    ]
+  }
+}

@@ -1,76 +1,65 @@
-(** Copyright (c) 2016-present, Facebook, Inc.
-
-    This source code is licensed under the MIT license found in the
-    LICENSE file in the root directory of this source tree. *)
+(* Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree. *)
 
 open OUnit2
-
-open Ast
 open Core
-open Expression
+open Analysis
 open Taint
 open Test
 
-
-let test_normalize_access _ =
-  let assert_normalized ?(modules = []) access expected =
-    let access = Test.parse_single_access access in
-    let resolution =
-      let sources =
-        if List.is_empty modules then
-          None
-        else
-          List.map
-            modules
-            ~f:(fun name -> Source.create ~qualifier:(Access.create name) [])
-          |> Option.some
-      in
-      Test.resolution ?sources ()
-    in
-    let normalized = AccessPath.normalize_access access ~resolution in
-    let re_accessed = AccessPath.as_access normalized in
-    assert_equal ~cmp:Access.equal ~printer:Access.show access re_accessed;
-    assert_equal
-      ~cmp:AccessPath.equal_normalized_expression
-      ~printer:AccessPath.show_normalized_expression
+let test_of_expression _ =
+  let ( !+ ) expression = Test.parse_single_expression expression in
+  let assert_of_expression
+      ?(resolution = Test.resolution ~configuration:Test.mock_configuration ())
+      expression
       expected
-      normalized
+    =
+    assert_equal
+      ~cmp:(Option.equal AccessPath.equal)
+      ~printer:(function
+        | None -> "None"
+        | Some access_path -> AccessPath.show access_path)
+      expected
+      (AccessPath.of_expression ~resolution expression)
   in
+  assert_of_expression !+"a" (Some { AccessPath.root = AccessPath.Root.Variable "a"; path = [] });
+  assert_of_expression
+    !+"a.b"
+    (Some
+       {
+         AccessPath.root = AccessPath.Root.Variable "a";
+         path = [AbstractTreeDomain.Label.Field "b"];
+       });
+  assert_of_expression
+    !+"a.b.c"
+    (Some
+       {
+         AccessPath.root = AccessPath.Root.Variable "a";
+         path = [AbstractTreeDomain.Label.Field "b"; AbstractTreeDomain.Label.Field "c"];
+       });
+  assert_of_expression !+"a.b.call()" None;
 
-  let local name = AccessPath.Local (Identifier.create name) in
-  let global access = AccessPath.Global (Access.create access) in
-
-  assert_normalized "a" (global "a");
-  assert_normalized "a()" (AccessPath.Call { callee = global "a"; arguments = +[] });
-  assert_normalized
-    ~modules:["a"]
-    "a.b.c"
-    (AccessPath.Access { expression = global "a.b"; member = Identifier.create "c" });
-  assert_normalized ~modules:["a"; "a.b"] "a.b.c" (global "a.b.c");
-  assert_normalized
-    ~modules:["a"; "a.b"]
-    "a.b.c()"
-    (AccessPath.Call { callee = global "a.b.c"; arguments = +[] });
-  assert_normalized
-    ~modules:["a"; "a.b"]
-    "a.b.c.d.e"
-    (AccessPath.Access {
-        expression = AccessPath.Access {
-            expression = global "a.b.c";
-            member = Identifier.create "d";
-          };
-        member = Identifier.create "e";
-      });
-
-  assert_normalized "$a" (local "$a");
-  assert_normalized "$a()" (AccessPath.Call { callee = local "$a"; arguments = +[] });
-  assert_normalized
-    "$a.b"
-    (AccessPath.Access { expression = local "$a"; member = Identifier.create "b" })
+  let resolution =
+    Test.resolution
+      ~sources:
+        [ Test.parse ~handle:"qualifier.py" "unannotated = unknown_value()"
+          |> Preprocessing.preprocess ]
+      ()
+  in
+  assert_of_expression
+    ~resolution
+    !"$local_qualifier$unannotated"
+    (Some
+       {
+         AccessPath.root = AccessPath.Root.Variable "qualifier";
+         path = [AbstractTreeDomain.Label.Field "unannotated"];
+       });
+  assert_of_expression
+    ~resolution
+    !"$local_qualifier$missing"
+    (Some { AccessPath.root = AccessPath.Root.Variable "$local_qualifier$missing"; path = [] })
 
 
-let () =
-  "taintaccesspath">:::[
-    "normalize">::test_normalize_access;
-  ]
-  |> Test.run
+let () = "taintaccesspath" >::: ["of_expression" >:: test_of_expression] |> Test.run

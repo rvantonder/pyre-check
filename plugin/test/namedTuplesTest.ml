@@ -1,34 +1,26 @@
-(** Copyright (c) 2016-present, Facebook, Inc.
-
-    This source code is licensed under the MIT license found in the
-    LICENSE file in the root directory of this source tree. *)
+(* Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree. *)
 
 open Core
 open OUnit2
-
-open Ast
 open Plugin
-
 open Test
 
-
 let test_transform_ast _ =
-  let assert_expand ?(qualifier = "qualifier") source expected =
-    let handle = File.Handle.create qualifier in
-    let parse =
-      parse ~qualifier:(Source.qualifier ~handle)
-    in
-    assert_source_equal
-      (parse expected)
-      (NamedTuples.transform_ast (parse source))
+  let assert_expand ?(handle = "qualifier.py") source expected =
+    let parse source = parse source ~handle |> Analysis.Preprocessing.preprocess in
+    assert_source_equal (parse expected) (NamedTuples.transform_ast (parse source))
   in
   assert_expand
     {|
-      $local_qualifier$T = typing.NamedTuple('T')
+      T = typing.NamedTuple('T')
     |}
     {|
-      class qualifier.T(typing.NamedTuple):
-        def qualifier.T.__init__(self): ...
+      class T(typing.NamedTuple):
+        def __new__(cls): ...
+        _fields: typing.Tuple[()] = ()
     |};
   assert_expand
     {|
@@ -36,8 +28,9 @@ let test_transform_ast _ =
     |}
     {|
       class T(typing.NamedTuple):
-        def T.__init__(self, $parameter$a: typing.Any): ...
-        T.a: typing.Any
+        def __new__(cls, a: typing.Any): ...
+        _fields: typing.Tuple[str] = ('a',)
+        a: typing.Any
     |};
   assert_expand
     {|
@@ -45,9 +38,10 @@ let test_transform_ast _ =
     |}
     {|
       class T(typing.NamedTuple):
-        def T.__init__(self, $parameter$one: typing.Any, $parameter$two: typing.Any): ...
-        T.one: typing.Any
-        T.two: typing.Any
+        def __new__(cls, one: typing.Any, two: typing.Any): ...
+        _fields: typing.Tuple[str, str] = ('one', 'two')
+        one: typing.Any
+        two: typing.Any
     |};
   assert_expand
     {|
@@ -55,9 +49,10 @@ let test_transform_ast _ =
     |}
     {|
       class T(typing.NamedTuple):
-        def T.__init__(self, $parameter$one: int, $parameter$two: str): ...
-        T.one: int
-        T.two: str
+        def __new__(cls, one: int, two: str): ...
+        _fields: typing.Tuple[str, str] = ('one', 'two')
+        one: int
+        two: str
     |};
   assert_expand
     {|
@@ -65,44 +60,44 @@ let test_transform_ast _ =
     |}
     {|
       class T(typing.NamedTuple):
-        def T.__init__(
-          self,
-          $parameter$a: typing.Any,
-          $parameter$b: typing.Any,
-          $parameter$c: typing.Any): ...
-        T.a: typing.Any
-        T.b: typing.Any
-        T.c: typing.Any
+        def __new__(
+          cls,
+          a: typing.Any,
+          b: typing.Any,
+          c: typing.Any): ...
+        _fields: typing.Tuple[str, str, str] = ('a', 'b', 'c')
+        a: typing.Any
+        b: typing.Any
+        c: typing.Any
     |};
-
   assert_expand
     {|
       class Foo(Bar, collections.namedtuple('T', ['one', 'two'])):
-        Foo.three: int = 1
+        three: int = 1
     |}
     {|
       class Foo(Bar, typing.NamedTuple):
-        def Foo.__init__(self, $parameter$one: typing.Any, $parameter$two: typing.Any): ...
-        Foo.one: typing.Any
-        Foo.two: typing.Any
-        Foo.three: int = 1
+        def __new__(cls, one: typing.Any, two: typing.Any): ...
+        _fields: typing.Tuple[str, str] = ('one', 'two')
+        one: typing.Any
+        two: typing.Any
+        three: int = 1
     |};
-
   assert_expand
     {|
       class Foo(typing.NamedTuple):
-        Foo.a: int
-        Foo.b: str
-        Foo.c: int = 3
+        a: int
+        b: str
+        c: int = 3
     |}
     {|
       class Foo(typing.NamedTuple):
-        def Foo.__init__(self, $parameter$a: int, $parameter$b: str, $parameter$c: int = 3): ...
-        Foo.a: int
-        Foo.b: str
-        Foo.c: int = 3
+        def __new__(cls, a: int, b: str, c: int = 3): ...
+        _fields: typing.Tuple[str, str, str] = ('a', 'b', 'c')
+        a: int
+        b: str
+        c: int = 3
     |};
-
   assert_expand
     {|
       class Foo(collections.namedtuple("PatchDocument", ("op", "path", "value", "ts", "lazy"))):
@@ -110,22 +105,22 @@ let test_transform_ast _ =
     |}
     {|
       class Foo(typing.NamedTuple):
-         def Foo.__init__(
-           self,
-           $parameter$op: typing.Any,
-           $parameter$path: typing.Any,
-           $parameter$value: typing.Any,
-           $parameter$ts: typing.Any,
-           $parameter$lazy: typing.Any):
+         def __new__(
+           cls,
+           op: typing.Any,
+           path: typing.Any,
+           value: typing.Any,
+           ts: typing.Any,
+           lazy: typing.Any):
            ...
-         Foo.op: typing.Any
-         Foo.path: typing.Any
-         Foo.value: typing.Any
-         Foo.ts: typing.Any
-         Foo.lazy: typing.Any
+         _fields: typing.Tuple[str, str, str, str, str] = ('op', 'path', 'value', 'ts', 'lazy')
+         op: typing.Any
+         path: typing.Any
+         value: typing.Any
+         ts: typing.Any
+         lazy: typing.Any
          pass
     |};
-
   assert_expand
     {|
       class Foo:
@@ -134,12 +129,11 @@ let test_transform_ast _ =
     {|
       class Foo:
         class T(typing.NamedTuple):
-          def T.__init__(self, $parameter$a: typing.Any, $parameter$b: typing.Any): ...
-          T.a: typing.Any
-          T.b: typing.Any
+          def __new__(cls, a: typing.Any, b: typing.Any): ...
+          _fields: typing.Tuple[str, str] = ('a', 'b')
+          a: typing.Any
+          b: typing.Any
     |};
-
-  (* Don't transform namedtuples nested in functions. *)
   assert_expand
     {|
       def foo():
@@ -147,12 +141,35 @@ let test_transform_ast _ =
     |}
     {|
       def foo():
-        T = typing.NamedTuple('T')
+        class T(typing.NamedTuple):
+          def __new__(cls): ...
+          _fields: typing.Tuple[()] = ()
+    |};
+  assert_expand
+    {|
+      class Foo:
+        def __new__(cls):
+          cls.t = typing.NamedTuple('T', 'a')
+    |}
+    {|
+      class Foo:
+        def __new__(cls):
+          cls.t = typing.NamedTuple('T', 'a')
+    |};
+  assert_expand
+    {|
+      class Foo(collections.namedtuple('T', ['one', 'two'])):
+        def __new__(cls, one):
+          return super(Foo, cls).__new__(cls, one, two=0)
+    |}
+    {|
+      class Foo(typing.NamedTuple):
+        _fields: typing.Tuple[str, str] = ('one', 'two')
+        one: typing.Any
+        two: typing.Any
+        def __new__(cls, one):
+          return super(Foo, cls).__new__(cls, one, two=0)
     |}
 
 
-let () =
-  "plugin_named_tuples">:::[
-    "transform_ast">::test_transform_ast;
-  ]
-  |> Test.run
+let () = "plugin_named_tuples" >::: ["transform_ast" >:: test_transform_ast] |> Test.run

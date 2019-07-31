@@ -1,6 +1,0 @@
-Call dependencies
-qualifier.bad (fun) -> [qualifier.qux (fun)]
-qualifier.bar (fun) -> [__testSource (fun)]
-qualifier.match_flows (fun) -> [qualifier.bad (fun) qualifier.some_source (fun)]
-qualifier.qux (fun) -> [__testSink (fun)]
-qualifier.some_source (fun) -> [qualifier.bar (fun)]

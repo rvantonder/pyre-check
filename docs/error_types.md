@@ -143,7 +143,8 @@ my_list = to_seconds(my_list) # Type checks!
 Here are some immutable variants for commonly used containers:
 
 ```
-typing.List → typing.Iterable
+typing.List → typing.Sequence (if you need random access via my_list[id])
+typing.List → typing.Iterable (if you're just iterating over the list in a loop and want to support sets as well)
 typing.Dict → typing.Mapping
 typing.Set → typing.AbstractSet
 ```
@@ -162,4 +163,43 @@ What happened above is that Pyre inferred a type of `List[int]` for a, and invar
 def zeroes(number_of_elements: int) -> List[float]:
   a: List[float] = [0] * number_of_elements
   return a # Type checks!
+```
+
+## [35]: Invalid type variance
+
+In brief, read-only data types can be covariant, write-only data types can be contravariant, and data types that support both reads and writes must be invariant.
+If a data type implements any functions accepting parameters of that type, we cannot guarantee that writes are not happening. If a data type implements any functions returning values of that type, we cannot guarantee that reads are not happening.
+For example (note: int is a subclass of float in the type system and in these examples):
+Writes taking covariants:
+
+```
+_T_co = typing.TypeVar("_T_co", covariant=True)
+
+class MyList(typing.Generic[_T_co]):
+    def write(self, element: _T_co) -> None:
+        ... # adds element to list
+
+def takes_float_list(float_list: MyList[float]) -> None:
+    float_list.write(1.0)
+
+int_list: MyList[int] = ...
+takes_float_list(int_list)  # this call is OK because MyList is covariant: MyList[int] < MyList[float]
+# int_list contains floats
+```
+
+Reads returning contravariants:
+
+```
+_T_cont = typing.TypeVar("_T_cont", contravariant=True)
+
+class MyList(typing.Generic[_T_cont]):
+    def read(self) -> _T_cont:
+        ... # returns first element from list
+
+def takes_int_list(int_list: MyList[int]) -> int:
+   return int_list.read()
+
+float_list: MyList[float] = ...
+takes_int_list(float_list)  # this call is OK because MyList is contravariant: MyList[float] < MyList[int]
+# problem with return above is clear
 ```

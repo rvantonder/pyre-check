@@ -1,7 +1,7 @@
-(** Copyright (c) 2016-present, Facebook, Inc.
-
-    This source code is licensed under the MIT license found in the
-    LICENSE file in the root directory of this source tree. *)
+(* Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree. *)
 
 type kind =
   | TypeIgnore
@@ -17,15 +17,16 @@ type t = {
 }
 [@@deriving compare, eq, show, sexp, hash]
 
-val create
-  :  ignored_line: int
-  -> codes: int list
-  -> location: Location.t
-  -> kind: kind
-  -> t
+val create : ignored_line:int -> codes:int list -> location:Location.t -> kind:kind -> t
 
-val ignored_line: t -> int
-val codes: t -> int list
-val location: t -> Location.t
-val kind: t -> kind
-val key: t -> Location.t
+val ignored_line : t -> int
+
+val codes : t -> int list
+
+val location : t -> Location.t
+
+val kind : t -> kind
+
+val increment : t -> t
+
+val key : t -> Location.t

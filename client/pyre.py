@@ -3,6 +3,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import argparse
 import logging
 import os
@@ -10,34 +12,32 @@ import shutil
 import sys
 import time
 import traceback
+from typing import Type  # noqa
 
 from . import (
-    EnvironmentException,
-    assert_readable_directory,
+    assert_writable_directory,
     buck,
     commands,
     get_binary_version,
     is_capable_terminal,
     log,
     log_statistics,
+    readable_directory,
     resolve_analysis_directory,
     switch_root,
     translate_arguments,
 )
-from .commands import ExitCode
+from .commands import Command, ExitCode  # noqa
 from .configuration import Configuration
+from .exceptions import EnvironmentException
 from .filesystem import AnalysisDirectory
 from .version import __version__
 
 
-LOG = logging.getLogger(__name__)
+LOG = logging.getLogger(__name__)  # type: logging.Logger
 
 
 def main() -> int:
-    def readable_directory(directory: str) -> str:
-        assert_readable_directory(directory)
-        return directory
-
     def executable_file(file_path: str) -> str:
         if not os.path.isfile(file_path):
             raise EnvironmentException("%s is not a valid file" % file_path)
@@ -45,8 +45,18 @@ def main() -> int:
             raise EnvironmentException("%s is not an executable file" % file_path)
         return file_path
 
-    def writable_path(path: str) -> str:
-        assert_readable_directory(os.path.dirname(path))
+    def writable_directory(path: str) -> str:
+        # Create the directory if it does not exist.
+        try:
+            os.makedirs(path)
+        except FileExistsError:
+            pass
+        assert_writable_directory(path)
+        return path
+
+    def file_exists(path: str) -> str:
+        if not os.path.exists(path):
+            raise argparse.ArgumentTypeError("ERROR: " + str(path) + " does not exist")
         return path
 
     parser = argparse.ArgumentParser(
@@ -63,20 +73,15 @@ def main() -> int:
     )
 
     parser.add_argument(
-        "--version", action="version", version="%(prog)s version " + __version__
-    )
-    parser.add_argument(
-        "--binary-version",
+        "--version",
         action="store_true",
-        help="Print the pyre.bin version to be used",
+        help="Print the client and binary versions of Pyre.",
     )
 
     parser.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--sequential", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--strict", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument(
-        "--run-additional-checks", action="store_true", help=argparse.SUPPRESS
-    )
+    parser.add_argument("--additional-check", action="append", help=argparse.SUPPRESS)
 
     parser.add_argument(
         "--show-error-traces",
@@ -93,12 +98,23 @@ def main() -> int:
     )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     parser.add_argument(
-        "--noninteractive", action="store_true", help="Disable interactive logging"
+        "--enable-profiling", action="store_true", help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "-n",
+        "--noninteractive",
+        action="store_true",
+        help="Disable interactive logging",
+    )
+    parser.add_argument(
+        "--hide-parse-errors",
+        action="store_true",
+        help="Hide detailed information about parse errors",
     )
     parser.add_argument(
         "--show-parse-errors",
         action="store_true",
-        help="Display detailed information about parse errors",
+        help="[DEPRECATED] Show detailed information about parse errors",
     )
     parser.add_argument(
         "--logging-sections", help=argparse.SUPPRESS  # Enable sectional logging.
@@ -122,6 +138,19 @@ def main() -> int:
         action="store_true",
         help="Freshly build all the necessary artifacts.",
     )
+    buck_arguments.add_argument(
+        "--use-buck-builder",
+        action="store_true",
+        help="Use Pyre's experimental builder for Buck projects.",
+    )
+    buck_arguments.add_argument(
+        "--use-legacy-builder",
+        action="store_true",
+        help="Use Pyre's legacy builder for Buck projects.",
+    )
+    buck_arguments.add_argument(
+        "--buck-builder-debug", action="store_true", help=argparse.SUPPRESS
+    )
 
     source_directories = parser.add_argument_group("source-directories")
     source_directories.add_argument(
@@ -129,6 +158,7 @@ def main() -> int:
         action="append",
         dest="source_directories",
         help="The source directory to check",
+        type=os.path.abspath,
     )
     source_directories.add_argument(
         "--filter-directory", help=argparse.SUPPRESS  # override filter directory
@@ -138,6 +168,11 @@ def main() -> int:
         "--use-global-shared-analysis-directory",
         action="store_true",
         help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--no-saved-state",
+        action="store_true",
+        help="Don't attempt to load Pyre from a saved state.",
     )
 
     # Handling of search path
@@ -153,7 +188,7 @@ def main() -> int:
         "--preserve-pythonpath",
         action="store_true",
         default=False,
-        help="Preserve the value of the PYTHONPATH environment variable and"
+        help="Preserve the value of the PYTHONPATH environment variable and "
         "inherit the current python environment's search path",
     )
 
@@ -162,6 +197,12 @@ def main() -> int:
         default=None,
         type=executable_file,
         help="Location of the pyre binary",
+    )
+
+    parser.add_argument(
+        "--buck-builder-binary",
+        default=None,
+        help="Location of the buck builder binary",
     )
 
     parser.add_argument(
@@ -195,36 +236,90 @@ def main() -> int:
 
     # Subcommands.
     parsed_commands = parser.add_subparsers(
-        metavar="{analyze, check, kill, incremental, initialize (init), "
-        "query, rage, restart, start, stop}"
+        metavar="{analyze, check, color, kill, incremental, initialize (init), "
+        "query, rage, restart, start, stop}",
+        help="""
+        The pyre command to run; defaults to `incremental`.
+        Run `pyre command --help` for documentation on a specific command.
+        """,
     )
 
-    incremental = parsed_commands.add_parser(commands.Incremental.NAME)
-    incremental.set_defaults(command=commands.incremental.Incremental)
+    incremental_help = """
+    Connects to a running Pyre server and returns the current type errors for your
+    project. If no server exists for your projects, starts a new one. Running `pyre`
+    implicitly runs `pyre incremental`.
 
-    rage = parsed_commands.add_parser(commands.Rage.NAME)
+    By default, incremental checks ensure that all dependencies of changed files are
+    analyzed before returning results. If you'd like to get partial type checking
+    results eagerly, you can run `pyre incremental --nonblocking`.
+    """
+    incremental = parsed_commands.add_parser(
+        commands.Incremental.NAME, epilog=incremental_help
+    )
+    incremental.set_defaults(command=commands.Incremental)
+    incremental.add_argument(
+        "--nonblocking",
+        action="store_true",
+        help=(
+            "Ask the server to return partial results immediately, "
+            "even if analysis is still in progress."
+        ),
+    )
+    incremental.add_argument(
+        "--transitive",
+        action="store_true",
+        help="Calculate transitive dependencies of changed files.",
+    )
+    rage = parsed_commands.add_parser(
+        commands.Rage.NAME,
+        epilog="""
+        Collects troubleshooting diagnostics for Pyre, and writes this information to
+        the terminal.
+        """,
+    )
     rage.set_defaults(command=commands.Rage)
 
-    check = parsed_commands.add_parser(commands.Check.NAME)
+    check = parsed_commands.add_parser(
+        commands.Check.NAME,
+        epilog="""
+      Runs a one-time check of a project without initializing a type check server.
+    """,
+    )
     check.set_defaults(command=commands.Check)
+
+    color = parsed_commands.add_parser(commands.Color.NAME)
+    color.add_argument("path")
+    color.set_defaults(command=commands.Color)
+
+    deobfuscate = parsed_commands.add_parser(commands.Deobfuscate.NAME)
+
+    deobfuscate.set_defaults(command=commands.Deobfuscate)
 
     analyze = parsed_commands.add_parser(commands.Analyze.NAME)
     analyze.set_defaults(command=commands.Analyze)
     analyze.add_argument(
         "--taint-models-path",
-        default=None,
+        action="append",
+        default=[],
         type=readable_directory,
         help="Location of taint models",
     )
     analyze.add_argument(
         "--save-results-to",
         default=None,
-        type=writable_path,
-        help="JSON file to write analysis results to.",
+        type=writable_directory,
+        help="Directory to write analysis results to.",
     )
     analyze.add_argument("--dump-call-graph", action="store_true")
 
-    persistent = parsed_commands.add_parser(commands.Persistent.NAME)
+    persistent = parsed_commands.add_parser(
+        commands.Persistent.NAME,
+        epilog="""
+        Entry point for IDE integration to Pyre. Communicates with a
+        Pyre server using the Language Server Protocol, accepts input from stdin and
+        writing diagnostics and responses from the Pyre server to stdout.
+        """,
+    )
     persistent.add_argument(
         "--no-watchman",
         action="store_true",
@@ -232,28 +327,55 @@ def main() -> int:
     )
     persistent.set_defaults(command=commands.Persistent, noninteractive=True)
 
-    start = parsed_commands.add_parser(commands.Start.NAME)
+    start = parsed_commands.add_parser(
+        commands.Start.NAME, epilog="Starts a pyre server as a daemon."
+    )
     start.add_argument(
         "--terminal", action="store_true", help="Run the server in the terminal."
+    )
+    start.add_argument(
+        "--store-type-check-resolution",
+        action="store_true",
+        help="Store extra information for `types` queries.",
     )
     start.add_argument(
         "--no-watchman",
         action="store_true",
         help="Do not spawn a watchman client in the background.",
+    )
+    start.add_argument(
+        "--transitive",
+        action="store_true",
+        help="Calculate transitive dependencies of changed files.",
     )
     start.set_defaults(command=commands.Start)
 
-    stop = parsed_commands.add_parser(commands.Stop.NAME)
+    stop = parsed_commands.add_parser(
+        commands.Stop.NAME, epilog="Signals the Pyre server to stop."
+    )
     stop.set_defaults(command=commands.Stop)
 
-    restart = parsed_commands.add_parser(commands.Restart.NAME)
+    restart = parsed_commands.add_parser(
+        commands.Restart.NAME,
+        epilog="Restarts a server. Equivalent to `pyre stop && pyre start`.",
+    )
     restart.add_argument(
         "--terminal", action="store_true", help="Run the server in the terminal."
+    )
+    restart.add_argument(
+        "--store-type-check-resolution",
+        action="store_true",
+        help="Store extra information for `types` queries.",
     )
     restart.add_argument(
         "--no-watchman",
         action="store_true",
         help="Do not spawn a watchman client in the background.",
+    )
+    restart.add_argument(
+        "--transitive",
+        action="store_true",
+        help="Calculate transitive dependencies of changed files.",
     )
     restart.set_defaults(command=commands.Restart)
 
@@ -271,24 +393,70 @@ def main() -> int:
     )
     initialize.set_defaults(command=commands.Initialize)
 
-    query = parsed_commands.add_parser(commands.Query.NAME)
-    query_message = """One of:
-    `help`,
-    `type_check(path, ...)`,
-    `less_or_equal(left, right)`,
-    `meet(left, right)`,
-    `join(left, right)`,
-    `normalize_type(type)`,
-    `superclasses(type)`
+    query_message = """
+    `https://pyre-check.org/docs/querying-pyre.html` contains examples and documentation
+    for this command, which queries a running pyre server for type, function and
+    attribute information.
+
+    To get a full list of queries, you can run `pyre query help`.
     """
-    query.add_argument("query", help=query_message)
+    query = parsed_commands.add_parser(commands.Query.NAME, epilog=query_message)
+    query_argument_message = """
+    `pyre query help` will give a full list of available queries for the running Pyre.
+     Example: `pyre query "superclasses(int)"`.
+    """
+    query.add_argument("query", help=query_argument_message)
     query.set_defaults(command=commands.Query)
+
+    infer = parsed_commands.add_parser(commands.Infer.NAME)
+    infer.add_argument(
+        "-p",
+        "--print-only",
+        action="store_true",
+        help="Print raw JSON errors to standard output, "
+        + "without converting to stubs or annnotating.",
+    )
+    infer.add_argument(
+        "-f",
+        "--full-only",
+        action="store_true",
+        help="Only output fully annotated functions. Requires infer flag.",
+    )
+    infer.add_argument(
+        "-r",
+        "--recursive",
+        action="store_true",
+        help="Recursively run infer until no new annotations are generated."
+        + " Requires infer flag.",
+    )
+    infer.add_argument(
+        "-i",
+        "--in-place",
+        nargs="*",
+        metavar="path",
+        type=file_exists,
+        help="Add annotations to functions in selected paths."
+        + " Takes a set of files and folders to add annotations to."
+        + " If no paths are given, all functions are annotated."
+        + " WARNING: Modifies original files and requires infer flag and retype",
+    )
+    infer.add_argument(
+        "--json",
+        action="store_true",
+        help="Accept JSON input instead of running full check.",
+    )
+    infer.set_defaults(command=commands.Infer)
 
     arguments = parser.parse_args()
 
     if not hasattr(arguments, "command"):
         if shutil.which("watchman"):
+            # pyre-fixme[16]: `Namespace` has no attribute `command`.
             arguments.command = commands.Incremental
+            # pyre-fixme[16]: `Namespace` has no attribute `nonblocking`.
+            arguments.nonblocking = False
+            # pyre-fixme[16]: `Namespace` has no attribute `transitive`.
+            arguments.transitive = False
         else:
             watchman_link = "https://facebook.github.io/watchman/docs/install.html"
             LOG.warning(
@@ -300,22 +468,25 @@ def main() -> int:
             arguments.command = commands.Check
 
     configuration = None
-    shared_analysis_directory = None
+    analysis_directory = None
     # Having this as a fails-by-default helps flag unexpected exit
     # from exception flows.
     exit_code = ExitCode.FAILURE
+    start = time.time()
     try:
-        start = time.time()
-
+        # pyre-fixme[16]: `Namespace` has no attribute `capable_terminal`.
         arguments.capable_terminal = is_capable_terminal()
         if arguments.debug or not arguments.capable_terminal:
+            # pyre-fixme[16]: `Namespace` has no attribute `noninteractive`.
             arguments.noninteractive = True
 
         switch_root(arguments)
         translate_arguments(commands, arguments)
         log.initialize(arguments)
 
-        if arguments.command not in [commands.Initialize]:
+        if arguments.command in [commands.Initialize]:
+            analysis_directory = AnalysisDirectory(".")
+        else:
             configuration = Configuration(
                 local_configuration=arguments.local_configuration,
                 search_path=arguments.search_path,
@@ -330,29 +501,39 @@ def main() -> int:
                 )
                 return ExitCode.SUCCESS
 
-            if arguments.binary_version:
-                log.stdout.write(get_binary_version(configuration))
+            if arguments.version:
+                binary_version = get_binary_version(configuration)
+                log.stdout.write(
+                    "binary version: {}\nclient version: {}".format(
+                        binary_version, __version__
+                    )
+                )
                 return ExitCode.SUCCESS
 
             if arguments.command in [commands.Kill]:
                 analysis_directory = AnalysisDirectory(".")
             else:
-                prompt = arguments.command not in [commands.Incremental, commands.Check]
                 isolate = (
-                    arguments.command in [commands.Check]
+                    arguments.command in [commands.Analyze, commands.Check]
                     and not arguments.use_global_shared_analysis_directory
                 )
                 analysis_directory = resolve_analysis_directory(
-                    arguments, commands, configuration, isolate=isolate, prompt=prompt
+                    arguments, commands, configuration, isolate=isolate
                 )
 
+        command = arguments.command  # type: Type[Command]
         exit_code = (
-            # pyre-fixme: commands.Initialize doesn't take an analysis_directory
-            arguments.command(arguments, configuration, analysis_directory)
+            # pyre-fixme: need to disentangle the initialize command.
+            command(arguments, configuration, analysis_directory)
             .run()
             .exit_code()
         )
-    except (buck.BuckException, EnvironmentException) as error:
+    except buck.BuckException as error:
+        LOG.error(str(error))
+        if arguments.command == commands.Persistent:
+            commands.Persistent.run_null_server(timeout=3600 * 12)
+        exit_code = ExitCode.BUCK_ERROR
+    except EnvironmentException as error:
         LOG.error(str(error))
         if arguments.command == commands.Persistent:
             commands.Persistent.run_null_server(timeout=3600 * 12)
@@ -370,8 +551,8 @@ def main() -> int:
         exit_code = ExitCode.SUCCESS
     finally:
         log.cleanup(arguments)
-        if shared_analysis_directory:
-            shared_analysis_directory.cleanup()
+        if analysis_directory:
+            analysis_directory.cleanup()
         if configuration and configuration.logger:
             log_statistics(
                 "perfpipe_pyre_usage",
@@ -389,7 +570,7 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         os.getcwd()
-    except FileNotFoundError as error:
+    except FileNotFoundError:
         print(
             "Pyre could not determine the current working directory. "
             "Has it been removed?\nExiting."

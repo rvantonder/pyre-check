@@ -1,296 +1,171 @@
-(** Copyright (c) 2016-present, Facebook, Inc.
-
-    This source code is licensed under the MIT license found in the
-    LICENSE file in the root directory of this source tree. *)
+(* Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree. *)
 
 open Core
-
 open Pyre
-
 open Ast
-open Statement
-
-
-type global = Annotation.t Node.t
-[@@deriving eq, show]
-
-
-type class_representation = {
-  class_definition: Class.t Node.t;
-  successors: Type.t list;
-  explicit_attributes: Attribute.t Access.SerializableMap.t;
-  implicit_attributes: Attribute.t Access.SerializableMap.t;
-  is_test: bool;
-  methods: Type.t list;
-}
-
 
 type t = {
-  annotations: Annotation.t Access.Map.t;
-  order: (module TypeOrder.Handler);
-
-  resolve: resolution: t -> Expression.t -> Type.t;
-  parse_annotation: Expression.t -> Type.t;
-
-  global: Access.t -> global option;
-  module_definition: Access.t -> Module.t option;
-  class_definition: Type.t -> (Class.t Node.t) option;
-  class_representation: Type.t -> class_representation option;
-
-  parent: Access.t option;
+  global_resolution: GlobalResolution.t;
+  annotations: Annotation.t Reference.Map.t;
+  type_variables: Type.Variable.Set.t;
+  resolve: resolution:t -> Expression.t -> Annotation.t;
+  parent: Reference.t option;
 }
 
-
-let create
-    ~annotations
-    ~order
-    ~resolve
-    ~parse_annotation
-    ~global
-    ~module_definition
-    ~class_definition
-    ~class_representation
-    ?parent
-    () =
-  {
-    annotations;
-    order;
-    resolve;
-    parse_annotation;
-    global;
-    module_definition;
-    class_definition;
-    class_representation;
-    parent;
-  }
+let create ~global_resolution ~annotations ~resolve ?parent () =
+  { global_resolution; annotations; type_variables = Type.Variable.Set.empty; resolve; parent }
 
 
-let pp format { annotations; _ } =
-  let annotation_map_entry (access, annotation) =
-    Format.asprintf
-      "%a -> %a"
-      Access.pp access
-      Annotation.pp annotation;
+let pp format { annotations; type_variables; _ } =
+  let annotation_map_entry (reference, annotation) =
+    Format.asprintf "%a -> %a" Reference.pp reference Annotation.pp annotation
   in
+  Type.Variable.Set.to_list type_variables
+  |> List.map ~f:Type.Variable.show
+  |> String.concat ~sep:", "
+  |> Format.fprintf format "Type variables: [%s]\n";
   Map.to_alist annotations
   |> List.map ~f:annotation_map_entry
   |> String.concat ~sep:", "
-  |> Format.fprintf format "[%s]"
+  |> Format.fprintf format "Annotations: [%s]"
 
 
-let show resolution =
-  Format.asprintf "%a" pp resolution
+let show resolution = Format.asprintf "%a" pp resolution
+
+let set_local ({ annotations; _ } as resolution) ~reference ~annotation =
+  { resolution with annotations = Map.set annotations ~key:reference ~data:annotation }
 
 
-let set_local ({ annotations; _ } as resolution) ~access ~annotation =
-  { resolution with annotations = Map.set annotations ~key:access ~data:annotation }
+let get_local ?(global_fallback = true) ~reference { annotations; global_resolution; _ } =
+  let global = GlobalResolution.global global_resolution in
+  match Map.find annotations reference with
+  | Some result -> Some result
+  | _ when global_fallback -> Reference.delocalize reference |> global >>| Node.value
+  | _ -> None
 
 
-let get_local ?(global_fallback=true) ~access { annotations; global; _ } =
-  match Map.find annotations access with
-  | Some ({ Annotation.annotation; _ } as result) when not (Type.equal annotation Type.Deleted) ->
-      Some result
-  | _ when global_fallback ->
-      Access.delocalize access
-      |> global
-      >>| Node.value
-  | _ ->
-      None
+let unset_local ({ annotations; _ } as resolution) ~reference =
+  { resolution with annotations = Map.remove annotations reference }
 
 
-let annotations { annotations; _ } =
-  annotations
+let is_global { annotations; global_resolution; _ } ~reference =
+  let global = GlobalResolution.global global_resolution in
+  match Map.find annotations reference with
+  | Some annotation -> Annotation.is_global annotation
+  | _ -> Reference.delocalize reference |> global |> Option.is_some
 
 
-let with_annotations resolution ~annotations =
-  { resolution with annotations }
+let add_type_variable ({ type_variables; _ } as resolution) ~variable =
+  { resolution with type_variables = Type.Variable.Set.add type_variables variable }
 
 
-let parent { parent; _ } =
-  parent
+let type_variable_exists { type_variables; _ } ~variable =
+  Type.Variable.Set.mem type_variables variable
 
 
-let with_parent resolution ~parent =
-  { resolution with parent }
+let all_type_variables_in_scope { type_variables; _ } = Type.Variable.Set.to_list type_variables
+
+let annotations { annotations; _ } = annotations
+
+let with_annotations resolution ~annotations = { resolution with annotations }
+
+let parent { parent; _ } = parent
+
+let with_parent resolution ~parent = { resolution with parent }
+
+let resolve ({ resolve; _ } as resolution) expression =
+  resolve ~resolution expression |> Annotation.annotation
 
 
-let order { order; _ } =
-  order
+let resolve_to_annotation ({ resolve; _ } as resolution) expression =
+  resolve ~resolution expression
 
 
-let resolve ({ resolve; _  } as resolution) =
-  resolve ~resolution
+let resolve_reference ({ resolve; _ } as resolution) reference =
+  Expression.from_reference ~location:Location.Reference.any reference
+  |> resolve ~resolution
+  |> Annotation.annotation
 
 
-let parse_annotation { parse_annotation; module_definition; _ } expression =
-  let expression =
-    let is_local_access =
-      Expression.show expression
-      |> String.is_substring ~substring:"$local_"
-    in
-    if is_local_access then
-      Expression.delocalize expression
-    else
-      expression
-  in
-  let parsed = parse_annotation expression in
-  let constraints = function
-    | Type.Primitive name ->
-        let originates_from_empty_stub =
-          Identifier.show name
-          |> Access.create
-          |> fun access -> Module.from_empty_stub ~access ~module_definition
-        in
-        if originates_from_empty_stub then
-          Some Type.Object
-        else
-          None
-    | _ ->
-        None
-  in
-  Type.instantiate parsed ~constraints
-
-
-let parse_meta_annotation resolution expression =
-  match parse_annotation resolution expression with
-  | Type.Top ->
-      (* Try to resolve meta-types. *)
-      let annotation = resolve resolution expression in
-      if Type.is_meta annotation then
-        Some (Type.single_parameter annotation)
-      else
-        None
-  | annotation ->
-      Some annotation
-
-
-let global { global; _ } =
-  global
-
-
-let module_definition { module_definition; _ } =
-  module_definition
-
-
-let class_definition { class_definition; _ } =
-  class_definition
-
-
-let class_representation { class_representation; _ } =
-  class_representation
-
-
-let less_or_equal { order; _ } =
-  TypeOrder.less_or_equal order
-
-
-let join { order; _ } =
-  TypeOrder.join order
-
-
-let meet { order; _ } =
-  TypeOrder.meet order
-
-
-let widen { order; _ } =
-  TypeOrder.widen order
-
-
-let is_instantiated { order; _ } =
-  TypeOrder.is_instantiated order
-
-
-let is_tracked { order; _ } annotation =
-  TypeOrder.contains order annotation
-
-
-let is_invariance_mismatch { order; _ } ~left ~right =
-  match left, right with
-  | Type.Parametric { name = left_name; parameters = left_parameters },
-    Type.Parametric { name = right_name; parameters = right_parameters }
-    when Identifier.equal left_name right_name ->
-      let zipped =
-        TypeOrder.variables order left
-        >>= fun variables ->
-        (List.map3
-           variables
-           left_parameters
-           right_parameters
-           ~f:(fun variable left right -> (variable, left, right))
-         |> function
-         | List.Or_unequal_lengths.Ok list -> Some list
-         | _ -> None)
+let weaken_mutable_literals resolution ~expression ~resolved ~expected ~comparator =
+  match expression, expected with
+  | Some { Node.value = Expression.List _; _ }, _
+  | Some { Node.value = Expression.ListComprehension _; _ }, _ -> (
+    match resolved, expected with
+    | ( Type.Parametric { name = "list"; parameters = Concrete [actual] },
+        Type.Parametric { name = "list"; parameters = Concrete [expected_parameter] } )
+      when comparator ~left:actual ~right:expected_parameter ->
+        expected
+    | _ -> resolved )
+  | Some { Node.value = Expression.Set _; _ }, _
+  | Some { Node.value = Expression.SetComprehension _; _ }, _ -> (
+    match resolved, expected with
+    | ( Type.Parametric { name = "set"; parameters = Concrete [actual] },
+        Type.Parametric { name = "set"; parameters = Concrete [expected_parameter] } )
+      when comparator ~left:actual ~right:expected_parameter ->
+        expected
+    | _ -> resolved )
+  | ( Some { Node.value = Expression.Dictionary { entries; keywords = [] }; _ },
+      Type.TypedDictionary { total; fields; _ } ) ->
+      let find_matching_field ~name =
+        let matching_name { Type.name = expected_name; _ } = String.equal name expected_name in
+        List.find ~f:matching_name
       in
-      let due_to_invariant_variable (variable, left, right) =
-        match variable with
-        | Type.Variable { variance = Type.Invariant; _ } ->
-            TypeOrder.less_or_equal order ~left ~right
-        | _ ->
-            false
+      let resolve_entry { Expression.Dictionary.key; value } =
+        let key = resolve resolution key in
+        match key with
+        | Type.Literal (Type.String name) ->
+            let annotation =
+              let resolved = resolve resolution value in
+              let relax { Type.annotation; _ } =
+                if comparator ~left:resolved ~right:annotation then
+                  annotation
+                else
+                  resolved
+              in
+              find_matching_field fields ~name >>| relax |> Option.value ~default:resolved
+            in
+            Some { Type.name; annotation }
+        | _ -> None
       in
-      zipped
-      >>| List.exists ~f:due_to_invariant_variable
-      |> Option.value ~default:false
-  | _ ->
-      false
+      let add_missing_fields sofar =
+        let is_missing { Type.name; _ } = Option.is_none (find_matching_field sofar ~name) in
+        sofar @ List.filter fields ~f:is_missing
+      in
+      List.map entries ~f:resolve_entry
+      |> Option.all
+      >>| (if total then Fn.id else add_missing_fields)
+      >>| Type.TypedDictionary.anonymous ~total
+      |> Option.value ~default:resolved
+  | Some { Node.value = Expression.Dictionary _; _ }, _
+  | Some { Node.value = Expression.DictionaryComprehension _; _ }, _ -> (
+    match resolved, expected with
+    | ( Type.Parametric { name = "dict"; parameters = Concrete [actual_key; actual_value] },
+        Type.Parametric { name = "dict"; parameters = Concrete [expected_key; expected_value] } )
+      when comparator ~left:actual_key ~right:expected_key
+           && comparator ~left:actual_value ~right:expected_value ->
+        expected
+    | _ -> resolved )
+  | _ -> resolved
 
 
-(* In general, python expressions can be self-referential. This non-recursive resolution only checks
-   literals and annotations found in the resolution map, without any resolutions/joins. *)
-let rec resolve_literal resolution expression =
-  let open Ast.Expression in
-  match Node.value expression with
-  | Access access ->
-      begin
-        match Expression.Access.name_and_arguments ~call:access with
-        | Some { Expression.Access.callee; _ } ->
-            let class_name =
-              Expression.Access.create callee
-              |> Expression.Access.expression
-              |> parse_annotation resolution
-            in
-            let is_defined =
-              class_definition resolution class_name
-              |> Option.is_some
-            in
-            if is_defined then
-              class_name
-            else
-              Type.Top
-        | None ->
-            Type.Top
-      end
-  | Await expression ->
-      resolve_literal resolution expression
-      |> Type.awaitable_value
+let resolve_mutable_literals ({ global_resolution; _ } as resolution) =
+  weaken_mutable_literals
+    resolution
+    ~comparator:(GlobalResolution.constraints_solution_exists global_resolution)
 
-  | Complex _ ->
-      Type.complex
 
-  | False ->
-      Type.bool
+let is_consistent_with ({ global_resolution; _ } as resolution) left right ~expression =
+  let comparator ~left ~right =
+    GlobalResolution.consistent_solution_exists global_resolution left right
+  in
+  let left =
+    weaken_mutable_literals resolution ~expression ~resolved:left ~expected:right ~comparator
+  in
+  comparator ~left ~right
 
-  | Float _ ->
-      Type.float
 
-  | Integer _ ->
-      Type.integer
-
-  | String { StringLiteral.kind; _ } ->
-      begin
-        match kind with
-        | StringLiteral.Bytes -> Type.bytes
-        | _ -> Type.string
-      end
-
-  | True ->
-      Type.bool
-
-  | Tuple elements ->
-      Type.tuple (List.map elements ~f:(resolve_literal resolution))
-
-  | Expression.Yield _ ->
-      Type.yield Type.Top
-
-  | _ ->
-      Type.Top
+let global_resolution { global_resolution; _ } = global_resolution

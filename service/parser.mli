@@ -1,27 +1,24 @@
-(** Copyright (c) 2016-present, Facebook, Inc.
-
-    This source code is licensed under the MIT license found in the
-    LICENSE file in the root directory of this source tree. *)
-
-
-val find_sources: ?filter: (string -> bool) -> Configuration.Analysis.t -> Pyre.Path.t list
-val find_stubs: configuration: Configuration.Analysis.t -> Pyre.Path.t list
+(* Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree. *)
 
 type parse_sources_result = {
-  parsed: File.Handle.t list;
-  syntax_error: File.Handle.t list;
-  system_error: File.Handle.t list;
+  parsed: Ast.SourcePath.t list;
+  syntax_error: Ast.SourcePath.t list;
+  system_error: Ast.SourcePath.t list;
 }
 
 val parse_sources
-  :  configuration: Configuration.Analysis.t
-  -> scheduler: Scheduler.t
-  -> files: File.t list
-  -> parse_sources_result
+  :  configuration:Configuration.Analysis.t ->
+  scheduler:Scheduler.t ->
+  preprocessing_state:ProjectSpecificPreprocessing.state option ->
+  ast_environment:Analysis.AstEnvironment.t ->
+  Ast.SourcePath.t list ->
+  parse_sources_result
 
-type result = {
-  stubs: File.Handle.t list;
-  sources: File.Handle.t list;
-}
-
-val parse_all: Scheduler.t -> configuration: Configuration.Analysis.t -> result
+val parse_all
+  :  scheduler:Scheduler.t ->
+  configuration:Configuration.Analysis.t ->
+  Analysis.ModuleTracker.t ->
+  Ast.SourcePath.t list * Analysis.AstEnvironment.t

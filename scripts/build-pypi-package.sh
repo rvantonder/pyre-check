@@ -18,7 +18,8 @@ URL='https://pyre-check.org/'
 DOWNLOAD_URL='https://github.com/facebook/pyre-check'
 # https://www.python.org/dev/peps/pep-0008/#package-and-module-names
 MODULE_NAME="pyre_check"
-RUNTIME_DEPENDENCIES="'typeshed'"
+
+RUNTIME_DEPENDENCIES="'typeshed', 'pywatchman'"
 
 # helpers
 die() {
@@ -27,6 +28,7 @@ die() {
 }
 error_trap () {
   die "Command '${BASH_COMMAND}' failed at ${BASH_SOURCE[0]}:${BASH_LINENO[0]}"
+
 }
 
 trap error_trap ERR
@@ -50,7 +52,7 @@ while [[ $# -gt 0 ]]; do
       if [[ -n "$1" && -d "$1" ]]; then
         echo "Selected typeshed location for bundling: ${1}"
         BUNDLE_TYPESHED="${1}"
-        RUNTIME_DEPENDENCIES=""
+        RUNTIME_DEPENDENCIES="'pywatchman'"
 
         # Attempt a basic validation of the provided directory.
         if [[ ! -d "${BUNDLE_TYPESHED}/stdlib" ]]; then
@@ -85,6 +87,7 @@ done
 
 # Create build tree.
 SCRIPTS_DIRECTORY="$(dirname "$("${READLINK}" -f "$0")")"
+
 cd "${SCRIPTS_DIRECTORY}/"
 BUILD_ROOT="$(mktemp -d)"
 cd "${BUILD_ROOT}"
@@ -94,6 +97,7 @@ echo "Using build root: ${BUILD_ROOT}"
 mkdir "${MODULE_NAME}"
 # i.e. copy all *.py files from all directories, except "tests"
 rsync -avm --filter='- tests/' --filter='+ */' --filter='-! *.py' "${SCRIPTS_DIRECTORY}/../client/" "${BUILD_ROOT}/${MODULE_NAME}"
+rsync -avm --filter='- tests/' --filter='+ */' --filter='-! *.py' "${SCRIPTS_DIRECTORY}/../tools/upgrade/" "${BUILD_ROOT}/${MODULE_NAME}"
 # Patch version number.
 sed -i -e "/__version__/s/= \".*\"/= \"${PACKAGE_VERSION}\"/" "${BUILD_ROOT}/${MODULE_NAME}/version.py"
 
@@ -149,6 +153,7 @@ def find_typeshed_files(base):
 with open('README.md') as f:
     long_description = f.read()
 
+
 setup(
     name='${PACKAGE_NAME}',
     version='${PACKAGE_VERSION}',
@@ -186,6 +191,7 @@ setup(
     entry_points={
         'console_scripts': [
             'pyre = ${MODULE_NAME}.pyre:main',
+            'pyre-upgrade = ${MODULE_NAME}.upgrade:main',
         ],
     }
 )
@@ -205,20 +211,29 @@ fi
 
 # Build.
 python3 setup.py bdist_wheel
+python3 setup.py sdist
 
 # Move artifact outside the build directory.
 mkdir -p "${SCRIPTS_DIRECTORY}/dist"
 files_count="$(find "${BUILD_ROOT}/dist/" -type f | wc -l | tr -d ' ')"
-[[ "${files_count}" == '1' ]] || \
-  die "${files_count} files created in ${BUILD_ROOT}/dist, but only one was expected"
-source_file="$(find "${BUILD_ROOT}/dist/" -type f)"
-destination="$(basename "${source_file}")"
-destination="${destination/%-any.whl/-${WHEEL_DISTRIBUTION_PLATFORM}.whl}"
-mv "${source_file}" "${SCRIPTS_DIRECTORY}/dist/${destination}"
+[[ "${files_count}" == '2' ]] || \
+  die "${files_count} files created in ${BUILD_ROOT}/dist, but only two were expected"
+wheel_source_file="$(find "${BUILD_ROOT}/dist/" -type f | grep any)"
+wheel_destination="$(basename "${wheel_source_file}")"
+wheel_destination="${wheel_destination/%-any.whl/-${WHEEL_DISTRIBUTION_PLATFORM}.whl}"
+mv "${wheel_source_file}" "${SCRIPTS_DIRECTORY}/dist/${wheel_destination}"
+
+source_distribution_file="$(find "${BUILD_ROOT}/dist/" -type f | grep pyre-check)"
+source_distribution_destination="$(basename "${source_distribution_file}")"
+source_distribution_destination="${source_distribution_destination/%.tar.gz/-${WHEEL_DISTRIBUTION_PLATFORM}.tar.gz}"
+mv "${source_distribution_file}" "${SCRIPTS_DIRECTORY}/dist/${source_distribution_destination}"
 
 # Cleanup.
 cd "${SCRIPTS_DIRECTORY}"
 rm -rf "${BUILD_ROOT}"
 
-printf '\nAll done. Build artifact available at:\n  %s\n' "${SCRIPTS_DIRECTORY}/dist/${destination}"
+
+printf '\nAll done.'
+printf '\n Build artifact available at:\n  %s\n' "${SCRIPTS_DIRECTORY}/dist/${wheel_destination}"
+printf '\n Source distribution available at:\n   %s\n' "${SCRIPTS_DIRECTORY}/dist/${source_distribution_destination}"
 exit 0

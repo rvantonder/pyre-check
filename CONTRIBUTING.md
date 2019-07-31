@@ -43,8 +43,7 @@ clear and has sufficient instructions to be able to reproduce the issue.
 ## Coding Style
 We value consistent code. Please follow the style of the surrounding code. Useful rules of thumb for all languages are
 * avoid abbreviations.
-* avoid variable indentations (e.g. lining up parameters with the opening parenthesis of a function). It tends to mess up the git blame and quickly results with conflicts with the line length limit.
-* add a trailing colon/semi-colon for multi-line lists and records, and have the closing bracket on the line after the semicolon.
+* use autoformatters to minimize debates about spacing, indentation and line breaks.
 * prefer snake_case over camelCase for variables and function names, and prefer CamelCase over Snake_case for modules and classes.
 
 ### Python
@@ -57,8 +56,8 @@ You can install the latest release via `pip install black`, and you run it over 
 More information are available at: https://github.com/ambv/black
 
 ### OCaml
-- we don't use type annotations outside of interface files unless necessary
-- use ocp-indent for formatting
+We use the `ocamlformat` code formatter for all OCaml files.
+You can install the latest release via `opam install ocamlformat`, and run it on changed files via `ocamlformat -i affectedFile.ml`.
 
 ## Architecture
 On a high level, Pyre goes through the following steps to when "pyre" is called from the command line:
@@ -67,11 +66,11 @@ On a high level, Pyre goes through the following steps to when "pyre" is called 
 
 2. Determine which pyre command to run. The commands include some which handle the lifetime and state of a persistent pyre server for a project, as well as a standalone run command called `pyre check`. The implementation of these commands are found under `commands/`. `main.ml` aggregates these commands, and handles the parsing of the command-line arguments. Most steps will eventually call the TypeCheckService.
 
-3. The TypeCheckService module will call the ParseService, which will locate all sources in the given source root and all dependencies, and parse, preprocess & add the sources into shared memory. ParseService and TypeCheckService both live under `service/`, whereas the parser itself is located in `parser/`, and the preprocessor is under `analysis/analysisPreprocessing.ml`. The AST (abstract syntax tree) that the source code is parsed into is specified in files under the `ast/` directory.
+3. The TypeCheckService module will call the ParseService, which will locate all sources in the given source root and all dependencies, and parse, preprocess & add the sources into shared memory. ParseService and TypeCheckService both live under `service/`, whereas the parser itself is located in `parser/`, and the preprocessor is under `analysis/preprocessing.ml`. The AST (abstract syntax tree) that the source code is parsed into is specified in files under the `ast/` directory.
 
 4. Next, pyre will populate the global type environment with the project's sources as well as that of the dependencies. Note that we don't recursively analyze the imports of the project's files, but instead add all sources to the environment at once. This choice makes it easier to parallelize the building of the type environment, but comes at the cost of not being able to depend on a file's dependencies being analyzed when adding it to the type environment. The type environment can be thought of as a collection of hash tables, mapping function, class, global, etc. names into their implementations that can be accessed from shared memory. The type order, which is explained in more detail in a section below, is also built here.
 
-The modules that do the heavy lifting here can be found under `analysis/analysisEnvironment.ml` and `analysis/analysisTypeOrder.ml`.
+The modules that do the heavy lifting here can be found under `analysis/environment.ml` and `analysis/typeOrder.ml`.
 
 5. Once the environment is built, pyre will start type checking all files under the source root in parallel. The key property here is that building the environment in the above step allows pyre to type check each function in parallel. The type checker will not go beyond function call boundaries, which is possible because we will have accumulated the parameter and return annotations of all functions before this step.
 

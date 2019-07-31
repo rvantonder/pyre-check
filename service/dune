@@ -11,11 +11,13 @@
    ppx_sexp_conv
    ppx_deriving_yojson))
  (libraries
+  base64
   core
   sexplib
   ppxlib
   pyrelib.ast
   pyrelib.analysis
+  pyrelib.projectSpecificPreprocessing
   pyrelib.interprocedural
   pyrelib.path
   pyrelib.plugin
@@ -35,11 +37,13 @@
    ppx_deriving.show
    ppx_hash
    ppx_compare
-   ppx_sexp_conv))
+   ppx_sexp_conv
+   ppx_deriving_yojson))
  (libraries
   core
   sexplib
   ppxlib
+  pyrelib.analysis
   pyrelib.configuration
   pyrelib.memory
   pyrelib.statistics
@@ -55,8 +59,10 @@
    ppx_deriving.show
    ppx_hash
    ppx_compare
-   ppx_sexp_conv))
+   ppx_sexp_conv
+   ppx_deriving_yojson))
  (libraries
+  base64
   core
   sexplib
   ppxlib

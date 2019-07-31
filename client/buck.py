@@ -1,14 +1,18 @@
 # Copyright 2004-present Facebook.  All rights reserved.
 
+import functools
 import glob
+import json
 import logging
 import os
 import subprocess
 import sys
+import tempfile
+import threading
 from collections import namedtuple
-from typing import Dict, List  # noqa
+from typing import Dict, Iterable, List, Optional, Set, Tuple, cast  # noqa
 
-from . import log
+from .filesystem import BuckBuilder, find_root
 
 
 LOG = logging.getLogger(__name__)
@@ -21,6 +25,104 @@ class BuckException(Exception):
     pass
 
 
+class FastBuckBuilder(BuckBuilder):
+    def __init__(
+        self,
+        buck_root: str,
+        output_directory: Optional[str] = None,
+        buck_builder_binary: Optional[str] = None,
+        debug_mode=False,
+    ) -> None:
+        self._buck_root = buck_root
+        self._output_directory = output_directory or tempfile.mkdtemp(
+            prefix="pyre_tmp_"
+        )
+        self._buck_builder_binary = buck_builder_binary
+        self._debug_mode = debug_mode
+        self.conflicting_files = []
+        self.unsupported_files = []
+
+    def build(self, targets: Iterable[str]) -> List[str]:
+        if self._debug_mode:
+            executable_parts = [
+                "buck",
+                "run",
+                "//tools/pyre/tools/buck_project_builder",
+                "--",
+                "--debug",
+            ]
+        else:
+            builder_binary = self._buck_builder_binary
+            executable_parts = (
+                [builder_binary]
+                if builder_binary
+                else ["buck", "run", "//tools/pyre/tools/buck_project_builder", "--"]
+            )
+        command = (
+            executable_parts
+            + [
+                "--buck_root",
+                self._buck_root,
+                "--output_directory",
+                self._output_directory,
+            ]
+            + list(targets)
+        )
+        with subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        ) as buck_builder_process:
+            # Java's logging conflicts with Python's logging, we capture the
+            # logs and re-log them with python's logger.
+            log_processor = threading.Thread(
+                target=self._read_stderr, args=(buck_builder_process.stderr,)
+            )
+            log_processor.daemon = True
+            log_processor.start()
+            return_code = buck_builder_process.wait()
+            # Wait until all stderr have been printed.
+            log_processor.join()
+            if return_code == 0:
+                LOG.info("Finished building targets.")
+                if self._debug_mode:
+                    debug_output = json.loads(
+                        "".join([line.decode() for line in buck_builder_process.stdout])
+                    )
+                    self.conflicting_files += debug_output["conflictingFiles"]
+                    self.unsupported_files += debug_output["unsupportedFiles"]
+                return [self._output_directory]
+            else:
+                raise BuckException(
+                    "Could not build targets. Check the paths or run `buck clean`."
+                )
+
+    def _read_stderr(self, stream: Iterable[bytes]) -> None:
+        for line in stream:
+            line = line.decode().rstrip()
+            if line.startswith("INFO: "):
+                LOG.info(line[6:])
+            elif line.startswith("WARNING: "):
+                LOG.warning(line[9:])
+            elif line.startswith("ERROR: "):
+                LOG.error(line[7:])
+            elif line.startswith("[WARNING:"):
+                # Filter away thrift warnings.
+                pass
+            else:
+                LOG.error(line)
+
+
+class SimpleBuckBuilder(BuckBuilder):
+    def __init__(self, build: bool = True) -> None:
+        self._build = build
+
+    def build(self, targets: Iterable[str]) -> Iterable[str]:
+        """
+            Shell out to buck to build the targets, then yield the paths to the
+            link trees.
+        """
+        return generate_source_directories(targets, build=self._build)
+
+
 def presumed_target_root(target):
     root_index = target.find("//")
     if root_index != -1:
@@ -30,25 +132,26 @@ def presumed_target_root(target):
     return target
 
 
-def _find_source_directories(targets_map) -> BuckOut:
-    targets = list(targets_map.keys())
+# Expects the targets to be already normalized.
+def _find_built_source_directories(
+    targets_to_destinations: Iterable[Tuple[str, str]]
+) -> BuckOut:
     targets_not_found = []
     source_directories = []
-    for target in targets:
-        target_path = target
-        target_prefix_index = target_path.find("//")
-        if target_prefix_index != -1:
-            target_path = target_path[target_prefix_index + 2 :]
-        target_path = target_path.replace(":", "/")
+    buck_root = find_buck_root(os.getcwd())
+    if buck_root is None:
+        raise Exception("No .buckconfig found in ancestors of the current directory.")
 
+    directories = set()
+    for target, destination in targets_to_destinations:
+        directories.add((target, os.path.dirname(destination)))
+
+    for target, directory in directories:
+        target_name = target.split(":")[1]
         discovered_source_directories = glob.glob(
-            os.path.join("buck-out/gen/", target_path + "#*link-tree")
+            os.path.join(buck_root, directory, "{}#*link-tree".format(target_name))
         )
-        target_destination = targets_map[target]
-        built = target_destination is not None and (
-            target_destination == "" or len(glob.glob(target_destination)) > 0
-        )
-        if not built and len(discovered_source_directories) == 0:
+        if len(discovered_source_directories) == 0:
             targets_not_found.append(target)
         source_directories.extend(
             [
@@ -63,10 +166,10 @@ def _find_source_directories(targets_map) -> BuckOut:
                 )
             ]
         )
-    return BuckOut(source_directories, targets_not_found)
+    return BuckOut(set(source_directories), set(targets_not_found))
 
 
-def _normalize(targets: List[str]) -> List[str]:
+def _normalize(targets: List[str]) -> List[Tuple[str, str]]:
     LOG.info(
         "Normalizing target%s `%s`",
         "s:" if len(targets) > 1 else "",
@@ -84,19 +187,27 @@ def _normalize(targets: List[str]) -> List[str]:
             .strip()
             .split("\n")
         )
-        targets_to_destinations = list(filter(bool, targets_to_destinations))
-        if not targets_to_destinations:
+        targets_to_destinations = cast(
+            List[str], list(filter(bool, targets_to_destinations))
+        )
+        # The output is of the form //target //corresponding.par
+        result = []
+        for target in targets_to_destinations:
+            pair = target.split(" ")
+            if len(pair) != 2:
+                pass
+            else:
+                result.append((pair[0], pair[1]))
+        if not result:
             LOG.warning(
                 "Provided targets do not contain any binary or unittest targets."
             )
             return []
         else:
             LOG.info(
-                "Found %d buck target%s.",
-                len(targets_to_destinations),
-                "s" if len(targets_to_destinations) > 1 else "",
+                "Found %d buck target%s.", len(result), "s" if len(result) > 1 else ""
             )
-        return targets_to_destinations
+        return result
     except subprocess.TimeoutExpired as error:
         LOG.error("Buck output so far: %s", error.stderr.decode().strip())
         raise BuckException(
@@ -113,9 +224,11 @@ def _normalize(targets: List[str]) -> List[str]:
         )
 
 
-def _build_targets(targets: List[str]) -> None:
+def _build_targets(targets: List[str], original_targets: List[str]) -> None:
     LOG.info(
-        "Building target%s `%s`", "s:" if len(targets) > 1 else "", "`, `".join(targets)
+        "Building target%s `%s`",
+        "s:" if len(original_targets) > 1 else "",
+        "`, `".join(original_targets),
     )
     command = ["buck", "build"] + targets
     try:
@@ -130,60 +243,120 @@ def _build_targets(targets: List[str]) -> None:
         )
 
 
-def generate_source_directories(original_targets, build, prompt: bool = True):
-    buck_out = _find_source_directories({target: None for target in original_targets})
+def _map_normalized_targets_to_original(
+    unbuilt_targets: Iterable[str], original_targets: Iterable[str]
+) -> List[str]:
+    mapped_targets = set()
+    for target in unbuilt_targets:
+        # Each original target is either a `/...` glob or a proper target.
+        # If it's a glob, we're looking for the glob to be a prefix of the unbuilt
+        # target. Otherwise, we care about exact matches.
+        name = None
+        for original in original_targets:
+            if original.endswith("/..."):
+                if target.startswith(original[:-4]):
+                    name = original
+            else:
+                if target == original:
+                    name = original
+        # No original target matched, fallback to normalized.
+        if name is None:
+            name = target
+        mapped_targets.add(name)
+    return list(mapped_targets)
+
+
+@functools.lru_cache()
+def find_buck_root(path: str) -> Optional[str]:
+    return find_root(path, ".buckconfig")
+
+
+def resolve_relative_paths(paths: List[str]) -> Dict[str, str]:
+    """
+        Query buck to obtain a mapping from each absolute path to the relative
+        location in the analysis directory.
+    """
+    buck_root = find_buck_root(os.getcwd())
+    if buck_root is None:
+        LOG.error(
+            "Buck root couldn't be found. Returning empty analysis directory mapping."
+        )
+        return {}
+    command = [
+        "buck",
+        "query",
+        "--json",
+        "--output-attribute",
+        ".*",
+        "owner(%s)",
+        *paths,
+    ]
+    try:
+        output = json.loads(
+            subprocess.check_output(command, timeout=30, stderr=subprocess.DEVNULL)
+            .decode()
+            .strip()
+        )
+    except (
+        subprocess.TimeoutExpired,
+        subprocess.CalledProcessError,
+        json.decoder.JSONDecodeError,
+    ) as error:
+        raise BuckException("Querying buck for relative paths failed: {}".format(error))
+    # TODO(T40580762) we should use the owner name to determine which files are a
+    # part of the pyre project
+    results = {}
+    for path in paths:
+        # For each path, search for the target that owns it.
+        for owner in output.values():
+            prefix = os.path.join(buck_root, owner["buck.base_path"]) + os.sep
+
+            if not path.startswith(prefix):
+                continue
+
+            suffix = path[len(prefix) :]
+
+            if suffix not in owner["srcs"]:
+                continue
+
+            if "buck.base_module" in owner:
+                base_path = os.path.join(*owner["buck.base_module"].split("."))
+            else:
+                base_path = owner["buck.base_path"]
+
+            results[path] = os.path.join(base_path, owner["srcs"][suffix])
+            break  # move on to next path
+    return results
+
+
+def generate_source_directories(
+    original_targets: Iterable[str], build: bool
+) -> Set[str]:
+    original_targets = list(original_targets)
+    targets_to_destinations = _normalize(original_targets)
+    targets = [pair[0] for pair in targets_to_destinations]
+    if build:
+        _build_targets(targets, original_targets)
+    buck_out = _find_built_source_directories(targets_to_destinations)
     source_directories = buck_out.source_directories
 
-    full_targets_map = {}
     if buck_out.targets_not_found:
-        targets_to_destinations = _normalize(buck_out.targets_not_found)
+        if not build:
+            # Build all targets to ensure buck doesn't remove some link trees as we go.
+            _build_targets(targets, original_targets)
+            buck_out = _find_built_source_directories(targets_to_destinations)
+            source_directories = buck_out.source_directories
 
-        for original_target in buck_out.targets_not_found:
-            normalized_targets_map = {}
-            for target_destination_pair in targets_to_destinations:
-                pair = target_destination_pair.split(" ")
-                if presumed_target_root(pair[0]).startswith(
-                    presumed_target_root(original_target)
-                ):
-                    if len(pair) > 1:
-                        normalized_targets_map[pair[0]] = pair[1]
-                    else:
-                        normalized_targets_map[pair[0]] = ""
-            full_targets_map[original_target] = normalized_targets_map
+    if buck_out.targets_not_found:
+        message_targets = _map_normalized_targets_to_original(
+            buck_out.targets_not_found, original_targets
+        )
 
-    if build and full_targets_map:
-        _build_targets(list(full_targets_map.keys()))
-
-    unbuilt_targets = []
-    for target_name, normalized_targets_map in full_targets_map.items():
-        buck_out = _find_source_directories(normalized_targets_map)
-        # Add anything that is unbuilt or only partially built
-        if len(buck_out.targets_not_found) > 0:
-            unbuilt_targets.append(target_name)
-        source_directories.extend(buck_out.source_directories)
-
-    if len(unbuilt_targets) > 0:
-        if build:
-            raise BuckException(
-                "Could not find link trees for:\n    `{}`.\n   "
-                "See `{} --help` for more information.".format(
-                    "    \n".join(unbuilt_targets), sys.argv[0]
-                )
+        raise BuckException(
+            "Could not find link trees for:\n    `{}`.\n   "
+            "See `{} --help` for more information.".format(
+                "    \n".join(message_targets), sys.argv[0]
             )
-        else:
-            LOG.error(
-                "Could not find link trees for:\n    `%s`.\n   "
-                "These targets might be unbuilt or only partially built.",
-                "    \n".join(unbuilt_targets),
-            )
-            if not prompt or log.get_yes_no_input("Build target?"):
-                return generate_source_directories(
-                    original_targets, build=True, prompt=False
-                )
-            raise BuckException(
-                "Could not find link trees for:\n    `{}`.\n   "
-                "See `{} --help` for more information.".format(
-                    "    \n".join(unbuilt_targets), sys.argv[0]
-                )
-            )
+        )
+
     return source_directories

@@ -13,14 +13,10 @@
 
 (tests
  (names
-  codexGeneratorTest
   languageServerTest
   persistentClientTest
-  queryTest
-  savedStateTest
   serverProtocolTest
-  serverTest
-  WatchmanTest)
+  serverTest)
  (modules :standard \ commandTest)
  (libraries
   oUnit

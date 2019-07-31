@@ -5,7 +5,7 @@
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the "hack" directory of this source tree.
  *
- *)
+*)
 
 open Hack_core
 
@@ -27,12 +27,6 @@ type handle = private {
   h_global_size: int;
   h_heap_size: int;
 }
-
-(* note: types are in the same kind as classes *)
-let int_of_kind kind = match kind with
-  | `ConstantK -> 0
-  | `ClassK -> 1
-  | `FuncK -> 2
 
 let kind_of_int x = match x with
   | 0 -> `ConstantK
@@ -151,11 +145,6 @@ let init config =
     then Hh_logger.log "Failed to use anonymous memfd init";
     shm_dir_init config config.shm_dirs
 
-external allow_removes : bool -> unit = "hh_allow_removes"
-
-external allow_hashtable_writes_by_current_process : bool -> unit
-  = "hh_allow_hashtable_writes_by_current_process"
-
 external connect : handle -> is_master:bool -> unit = "hh_connect"
 
 (*****************************************************************************)
@@ -163,7 +152,6 @@ external connect : handle -> is_master:bool -> unit = "hh_connect"
  * free data (cf hh_shared.c for the underlying C implementation).
 *)
 (*****************************************************************************)
-external hh_should_collect: bool -> bool = "hh_should_collect" [@@noalloc]
 
 external hh_collect: bool -> unit = "hh_collect" [@@noalloc]
 
@@ -172,9 +160,6 @@ external hh_collect: bool -> unit = "hh_collect" [@@noalloc]
 (*****************************************************************************)
 
 external loaded_dep_table_filename_c: unit -> string = "hh_get_loaded_dep_table_filename"
-
-external get_in_memory_dep_table_entry_count: unit -> int =
-  "hh_get_in_memory_dep_table_entry_count"
 
 let loaded_dep_table_filename () =
   let fn = loaded_dep_table_filename_c () in
@@ -186,34 +171,11 @@ let loaded_dep_table_filename () =
 (** Returns number of dependency edges added. *)
 external save_dep_table_sqlite_c: string -> string -> int = "hh_save_dep_table_sqlite"
 
-(** Returns number of dependency edges added. *)
-external update_dep_table_sqlite_c: string -> string -> int ="hh_update_dep_table_sqlite"
-
 let save_dep_table_sqlite : string -> string -> int = fun fn build_revision ->
   if (loaded_dep_table_filename ()) <> None then
     failwith "save_dep_table_sqlite not supported when server is loaded from a saved state";
   Hh_logger.log "Dumping a saved state deptable.";
   save_dep_table_sqlite_c fn build_revision
-
-let update_dep_table_sqlite : string -> string -> int = fun fn build_revision ->
-  Hh_logger.log "Updating given saved state deptable.";
-  update_dep_table_sqlite_c fn build_revision
-
-(*****************************************************************************)
-(* Serializes the dependency table and writes it to a file *)
-(*****************************************************************************)
-external hh_save_file_info_sqlite: string -> string -> int -> string -> unit =
-  "hh_save_file_info_sqlite"
-let save_file_info_sqlite ~hash ~name kind filespec =
-  hh_save_file_info_sqlite hash name (int_of_kind kind) filespec
-
-external hh_save_file_info_init : string -> unit =
-  "hh_save_file_info_init"
-let save_file_info_init path = hh_save_file_info_init path
-
-external hh_save_file_info_free : unit -> unit =
-  "hh_save_file_info_free"
-let save_file_info_free = hh_save_file_info_free
 
 (*****************************************************************************)
 (* Loads the dependency table by reading from a file *)
@@ -292,21 +254,9 @@ external dep_slots : unit -> int = "hh_dep_slots"
  * (cf serverInit.ml). *)
 (*****************************************************************************)
 
-external hh_removed_count : unit -> int = "hh_removed_count"
-
 external hh_init_done: unit -> unit = "hh_call_after_init"
 
 external hh_check_heap_overflow: unit -> bool  = "hh_check_heap_overflow"
-
-external get_file_info_on_disk : unit -> bool = "get_file_info_on_disk"
-
-external get_file_info_on_disk_path : unit -> string =
-  "get_file_info_on_disk_path"
-
-external set_file_info_on_disk_path : string -> unit =
-  "set_file_info_on_disk_path"
-
-external open_file_info_db : unit -> unit = "open_file_info_db"
 
 let init_done () =
   hh_init_done ();
@@ -334,9 +284,6 @@ let hash_stats () =
     slots = hash_slots ();
   }
 
-let should_collect (effort : [ `gentle | `aggressive ]) =
-  hh_should_collect (effort = `aggressive)
-
 let collect (effort : [ `gentle | `aggressive ]) =
   let old_size = heap_size () in
   Stats.update_max_heap_size old_size;
@@ -346,9 +293,6 @@ let collect (effort : [ `gentle | `aggressive ]) =
   let new_size = heap_size () in
   let time_taken = Unix.gettimeofday () -. start_t in
   if old_size <> new_size then begin
-    Hh_logger.log
-      "Sharedmem GC: %d bytes before; %d bytes after; in %f seconds"
-      old_size new_size time_taken;
     EventLogger.sharedmem_gc_ran effort old_size new_size time_taken
   end
 
@@ -602,8 +546,8 @@ end = struct
      *    No local changes and key has an associated value in previous stack
      *  *Error*:
      *    This means an exception will occur
-     **)
-    (**
+     *
+     *
      * Transitions table:
      *   Remove  -> *Error*
      *   Replace -> Remove
@@ -1030,7 +974,7 @@ module FreqCache (Key : sig type t end) (Config:ConfigType) :
         l := (key, !freq, v) :: !l
       end cache;
       Hashtbl.clear cache;
-      l := List.sort (fun (_, x, _) (_, y, _) -> y - x) !l;
+      l := List.sort ~cmp:(fun (_, x, _) (_, y, _) -> y - x) !l;
       let i = ref 0 in
       while !i < Config.capacity do
         match !l with
@@ -1132,7 +1076,7 @@ end
 
 let invalidate_callback_list = ref []
 let invalidate_caches () =
-  List.iter !invalidate_callback_list begin fun callback -> callback() end
+  List.iter !invalidate_callback_list ~f:begin fun callback -> callback() end
 
 module LocalCache (UserKeyType : UserKeyType) (Value : Value.Type) = struct
 

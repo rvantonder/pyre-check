@@ -39,17 +39,17 @@ let line_breaks buffer string =
     line_break buffer
   done
 
-let string position prefix value =
+let string string_position content_position prefix value =
   let is_byte_prefix prefix =
     String.contains prefix 'b' || String.contains prefix 'B' in
   let is_format_prefix prefix =
     String.contains prefix 'f' || String.contains prefix 'F' in
   if is_byte_prefix prefix then
-    BYTES (position, value)
+    BYTES (string_position, content_position, value)
   else if is_format_prefix prefix then
-    FORMAT (position, value)
+    FORMAT (string_position, content_position, value)
   else
-    STRING (position, value)
+    STRING (string_position, content_position, value)
 
 let strip_underscores string =
   if String.contains string '_'  then
@@ -134,7 +134,8 @@ let whitespace = [' ' '\t']
 let comment = '#' [^ '\n' '\r']*
 
 let signature = '#' whitespace* "type: ("
-  (['a'-'z' 'A'-'Z' ' ' ',' '[' ']' '.' '0'-'9']+)*  ") ->" whitespace* [^ '\n' '\r']+
+  (['a'-'z' 'A'-'Z' ' ' ',' '_' '[' ']' '.' '0'-'9']+)*
+  ")" whitespace* "->" whitespace* [^ '\n' '\r']+
 
 let identifier = ['$' 'a'-'z' 'A'-'Z' '_'] ['$' '?' 'a'-'z' 'A'-'Z' '0'-'9' '_']*
 let digit = ['0'-'9']
@@ -152,19 +153,23 @@ let exponent = ['e''E'] ['-''+']? digipart
 let pointfloat = (digipart '.') | (digipart? '.' digipart)
 let float = (pointfloat exponent?) | (digipart exponent)
 let complex = (float | digipart) ('j' | 'J')
+let long = (['0' - '9']+ ('L'))
 
 let kind = 'b' | 'B' | 'f' | 'F'
 let encoding = 'u' | 'U' | 'r' | 'R'
-let stringprefix = (encoding | kind | (encoding kind) | (kind encoding))?
+(* (encoding encoding) for python2 legacy support *)
+let stringprefix = (encoding | kind | (encoding kind) | (kind encoding) | (encoding encoding))?
 let escape = '\\' _
 
 rule read state = parse
   | newline whitespace* signature {
       line_break lexbuf;
-      SIGNATURE_COMMENT (parse_signature_comment (lexeme lexbuf))
+      let parameters, return = parse_signature_comment (lexeme lexbuf) in
+      SIGNATURE_COMMENT ((lexbuf.lex_start_p, lexbuf.lex_curr_p), parameters, return)
     }
   | whitespace* signature {
-      SIGNATURE_COMMENT (parse_signature_comment (lexeme lexbuf))
+      let parameters, return = parse_signature_comment (lexeme lexbuf) in
+      SIGNATURE_COMMENT ((lexbuf.lex_start_p, lexbuf.lex_curr_p), parameters, return)
     }
   | newline whitespace* comment {
       line_break lexbuf;
@@ -206,9 +211,14 @@ and read_without_indent state = parse
       else
         read_without_indent state lexbuf
     }
-
+  (* handle whitespace in python3 print statements  *)
+  | "print" whitespace+ "(" {
+      lexbuf.lex_curr_pos <- lexbuf.lex_start_pos + 5;
+      IDENTIFIER ((lexbuf.lex_start_p, lexbuf.lex_curr_p), lexeme lexbuf)
+    }
   (* Don't even try to do anything with Python 2 print statements. *)
   | "print " { read_without_indent state lexbuf }
+  | "print" whitespace+ ">>" { read_without_indent state lexbuf }
 
   | "is" whitespace+ "not" { ISNOT }
 
@@ -265,20 +275,41 @@ and read_without_indent state = parse
       in
       COMPLEX ((lexbuf.lex_start_p, lexbuf.lex_curr_p), value)
     }
+  | long {
+    let value =
+      let value = lexeme lexbuf in
+      String.slice value 0 (String.length value - 1)
+      |> parse_integer
+    in
+    INTEGER ((lexbuf.lex_start_p, lexbuf.lex_curr_p), value)
+  }
 
   | whitespace* '#' whitespace* "type" whitespace* ':' whitespace* "ignore" [^ '\n' '\r']* {
       read_without_indent state lexbuf
     }
   | whitespace* '#' whitespace* "type" whitespace* ':' whitespace* [^ '\n' '\r']* {
+      let annotation_string = lexeme lexbuf in
+      let comment_regex = Str.regexp ".*: *" in
       let annotation =
-        lexeme lexbuf
+        annotation_string
         |> String.split ~on:':'
         |> List.tl
         >>| String.concat ~sep:":"
         >>| (fun string -> String.strip string)
         |> Option.value ~default:"$unknown"
       in
-      ANNOTATION_COMMENT ((lexbuf.lex_start_p, lexbuf.lex_curr_p), annotation)
+      let offset =
+        Str.string_match comment_regex annotation_string 0 |> ignore;
+        String.length (Str.matched_string annotation_string)
+      in
+      let start = lexbuf.lex_start_p in
+      ANNOTATION_COMMENT (
+        (
+          { start with pos_cnum = start.pos_cnum + offset },
+          lexbuf.lex_curr_p
+        ),
+        annotation
+      )
     }
   | "..." { ELLIPSES (lexbuf.lex_start_p, lexbuf.lex_curr_p) }
 
@@ -367,16 +398,20 @@ and offset state = parse
 
 and single_string prefix_position prefix = parse
   | (([^ '\\' '\r' '\n' '\''] | escape)* as value) '\'' {
-      let (prefix_start, _) = prefix_position in
+      let (prefix_start, prefix_stop) = prefix_position in
+      let current_position = lexbuf.lex_curr_p in
+      let content_stop = { current_position with pos_cnum = current_position.pos_cnum - 1 } in
       line_breaks lexbuf value;
-      string (prefix_start, lexbuf.lex_curr_p) prefix value
+      string (prefix_start, current_position) (prefix_stop, content_stop) prefix value
     }
 
 and double_string prefix_position prefix = parse
   | (([^ '\\' '\r' '\n' '"'] | escape)* as value) '"' {
-      let (prefix_start, _) = prefix_position in
+      let (prefix_start, prefix_stop) = prefix_position in
+      let current_position = lexbuf.lex_curr_p in
+      let content_stop = { current_position with pos_cnum = current_position.pos_cnum - 1 } in
       line_breaks lexbuf value;
-      string (prefix_start, lexbuf.lex_curr_p) prefix value
+      string (prefix_start, current_position) (prefix_stop, content_stop) prefix value
     }
 
 and single_long_string prefix_position prefix buffer = parse
@@ -395,8 +430,14 @@ and single_long_string prefix_position prefix buffer = parse
       single_long_string prefix_position prefix buffer lexbuf
     }
   | "'''" {
-      let (prefix_start, _) = prefix_position in
-      string (prefix_start, lexbuf.lex_curr_p) prefix (Buffer.contents buffer)
+      let (prefix_start, prefix_stop) = prefix_position in
+      let current_position = lexbuf.lex_curr_p in
+      let content_stop = { current_position with pos_cnum = current_position.pos_cnum - 3 } in
+      string
+        (prefix_start, current_position)
+        (prefix_stop, content_stop)
+        prefix
+        (Buffer.contents buffer)
     }
 
 and double_long_string prefix_position prefix buffer = parse
@@ -415,6 +456,12 @@ and double_long_string prefix_position prefix buffer = parse
       double_long_string prefix_position prefix buffer lexbuf
     }
   | "\"\"\"" {
-      let (prefix_start, _) = prefix_position in
-      string (prefix_start, lexbuf.lex_curr_p) prefix (Buffer.contents buffer)
+      let (prefix_start, prefix_stop) = prefix_position in
+      let current_position = lexbuf.lex_curr_p in
+      let content_stop = { current_position with pos_cnum = current_position.pos_cnum - 3 } in
+      string
+        (prefix_start, current_position)
+        (prefix_stop, content_stop)
+        prefix
+        (Buffer.contents buffer)
     }

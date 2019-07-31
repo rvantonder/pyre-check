@@ -4,8 +4,10 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+import os
 from typing import List
 
+from ..project_files_monitor import Monitor
 from .command import ClientException, Command, State
 from .kill import Kill
 
@@ -23,14 +25,26 @@ class Stop(Command):
         return []
 
     def _run(self) -> None:
+        def _kill():
+            arguments = self._arguments
+            arguments.with_fire = False
+            Kill(arguments, self._configuration, self._analysis_directory).run()
+
         if self._state() == State.DEAD:
-            LOG.info("No server running")
+            LOG.warning("No server running, cleaning up any left over Pyre processes.")
+            _kill()
         else:
             try:
                 self._call_client(command=self.NAME).check()
                 LOG.info("Stopped server at `%s`", self._analysis_directory.get_root())
             except ClientException:
-                LOG.info("Could not stop server, attempting to kill.")
-                arguments = self._arguments
-                arguments.with_fire = False
-                Kill(arguments, self._configuration, self._analysis_directory).run()
+                LOG.warning("Could not stop server, attempting to kill.")
+                _kill()
+
+        try:
+            pid_path = Monitor.pid_path(self._analysis_directory.get_root())
+            with open(pid_path) as file:
+                pid = int(file.read())
+                os.kill(pid, 2)  # sigint
+        except (FileNotFoundError, OSError, ValueError):
+            pass

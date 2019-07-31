@@ -1,22 +1,28 @@
-(** Copyright (c) 2016-present, Facebook, Inc.
-
-    This source code is licensed under the MIT license found in the
-    LICENSE file in the root directory of this source tree. *)
+(* Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree. *)
 
 open Core
 
-type t
-[@@deriving compare, eq, sexp, show, hash]
+type t = string [@@deriving compare, eq, sexp, hash, to_yojson]
 
 module Map : Map.S with type Key.t = t
-module Set: Set.S with type Elt.t = t
 
-val create: string -> t
+module SerializableMap : SerializableMap.S with type key = t
 
-val sanitized: t -> t
-val pp_sanitized: Format.formatter -> t -> unit
-val show_sanitized: t -> string
+module Set : Set.S with type Elt.t = t
 
-val remove_leading_underscores: t -> t
+include Hashable with type t := t
 
-val map: t -> f: (string -> string) -> t
+val sanitized : t -> t
+
+val equal_sanitized : t -> t -> bool
+
+val pp : Format.formatter -> t -> unit
+
+val pp_sanitized : Format.formatter -> t -> unit
+
+val remove_leading_underscores : t -> t
+
+val split_star : t -> string * t

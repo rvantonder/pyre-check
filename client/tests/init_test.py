@@ -8,29 +8,21 @@ from unittest.mock import MagicMock, patch
 
 from .. import (
     EnvironmentException,
-    __name__ as client_name,
     _resolve_filter_paths,
-    _resolve_source_directories,
     buck,
     commands,
-    find_configuration_root,
     resolve_analysis_directory,
     switch_root,
     translate_paths,
 )
-from ..filesystem import AnalysisDirectory, SharedAnalysisDirectory
+from ..filesystem import (
+    AnalysisDirectory,
+    SharedAnalysisDirectory,
+    __name__ as filesystem_name,
+)
 
 
 class InitTest(unittest.TestCase):
-    @patch("os.path.isfile")
-    def test_find_configuration(self, os_mock_isfile) -> None:
-        os_mock_isfile.side_effect = [False, False, False, True]
-        self.assertEqual(find_configuration_root("/a/b/c/d", "configuration"), "/a")
-        os_mock_isfile.side_effect = [True]
-        self.assertEqual(find_configuration_root("/a", "configuration"), "/a")
-        os_mock_isfile.side_effect = [False, False]
-        self.assertEqual(find_configuration_root("/a/b", "configuration"), None)
-
     @patch("os.chdir")
     def test_switch_root(self, chdir) -> None:
         arguments = MagicMock()
@@ -50,115 +42,16 @@ class InitTest(unittest.TestCase):
                 self.assertEqual(arguments.original_directory, "/a/b/c")
                 self.assertEqual(arguments.local_configuration, "/a/b")
 
-        with patch(
-            "{}.find_configuration_root".format(client_name)
-        ) as mock_find_configuation_root:
+        with patch("{}.find_root".format(filesystem_name)) as mock_find_root:
             with patch("os.getcwd", return_value="/a/b"):
                 arguments.original_directory = "/a/b"
                 arguments.current_directory = "/a/b"
                 arguments.local_configuration = None
-                mock_find_configuation_root.side_effect = ["/a", "/a/b"]
+                mock_find_root.side_effect = ["/a", "/a/b"]
                 switch_root(arguments)
                 self.assertEqual(arguments.original_directory, "/a/b")
                 self.assertEqual(arguments.current_directory, "/a/b")
                 self.assertEqual(arguments.local_configuration, None)
-
-    @patch("os.path.realpath", side_effect=lambda path: "realpath({})".format(path))
-    @patch("os.getcwd", return_value="/")
-    @patch("os.path.exists", return_value=True)
-    def test_resolve_source_directories(self, realpath, cwd, exists) -> None:
-        arguments = MagicMock()
-        arguments.source_directories = []
-        arguments.original_directory = "/root"
-        arguments.build = False
-        arguments.command = commands.Check
-        configuration = MagicMock()
-        configuration.source_directories = []
-
-        with self.assertRaises(EnvironmentException):
-            _resolve_source_directories(arguments, commands, configuration, prompt=True)
-
-        # Arguments override configuration.
-        with patch.object(
-            buck, "generate_source_directories", return_value=[]
-        ) as buck_source_directories:
-            arguments.source_directories = ["arguments_source_directory"]
-            configuration.source_directories = ["configuration_source_directory"]
-
-            source_directories = _resolve_source_directories(
-                arguments, commands, configuration, prompt=True
-            )
-            buck_source_directories.assert_called_with(set(), build=False, prompt=True)
-            self.assertEqual(
-                source_directories, {"realpath(root/arguments_source_directory)"}
-            )
-
-        with patch.object(
-            buck, "generate_source_directories", return_value=["arguments_target"]
-        ) as buck_source_directories:
-            arguments.source_directories = []
-            arguments.targets = ["arguments_target"]
-            configuration.source_directories = ["configuration_source_directory"]
-
-            source_directories = _resolve_source_directories(
-                arguments, commands, configuration, prompt=True
-            )
-            buck_source_directories.assert_called_with(
-                {"arguments_target"}, build=False, prompt=True
-            )
-            self.assertEqual(source_directories, {"realpath(root/arguments_target)"})
-
-        # Restart and start always rebuild buck targets
-        with patch.object(
-            buck, "generate_source_directories", return_value=["arguments_target"]
-        ) as buck_source_directories:
-            arguments.command = commands.Start
-            source_directories = _resolve_source_directories(
-                arguments, commands, configuration, prompt=True
-            )
-            buck_source_directories.assert_called_with(
-                {"arguments_target"}, build=True, prompt=True
-            )
-            arguments.command = commands.Restart
-            source_directories = _resolve_source_directories(
-                arguments, commands, configuration, prompt=True
-            )
-            buck_source_directories.assert_called_with(
-                {"arguments_target"}, build=True, prompt=True
-            )
-
-        # Configuration is picked up when no arguments provided.
-        with patch.object(
-            buck, "generate_source_directories", return_value=[]
-        ) as buck_source_directories:
-            arguments.source_directories = []
-            arguments.targets = []
-            arguments.command = commands.Check
-            arguments.build = True
-            configuration.targets = ["configuration_target"]
-            configuration.source_directories = ["configuration_source_directory"]
-
-            source_directories = _resolve_source_directories(
-                arguments, commands, configuration, prompt=True
-            )
-            buck_source_directories.assert_called_with(
-                {"configuration_target"}, build=True, prompt=True
-            )
-            self.assertEqual(
-                source_directories, {"realpath(root/configuration_source_directory)"}
-            )
-
-        # Files are translated relative to project root
-        with patch.object(
-            buck, "generate_source_directories", return_value=[]
-        ) as buck_source_directories:
-            arguments.source_directories = []
-            arguments.targets = []
-            configuration.source_directories = ["."]
-            source_directories = _resolve_source_directories(
-                arguments, commands, configuration, prompt=True
-            )
-            self.assertEqual(source_directories, {"realpath(root/.)"})
 
     def test_resolve_filter_paths(self) -> None:
         arguments = MagicMock()
@@ -199,10 +92,7 @@ class InitTest(unittest.TestCase):
     )
     def test_resolve_analysis_directory(self, buck) -> None:
         arguments = MagicMock()
-        arguments.source_directories = ["a/b"]
-        arguments.targets = None
         arguments.build = None
-        arguments.filter_directory = None
         arguments.original_directory = "/project"
         arguments.current_directory = "/project"
 
@@ -215,6 +105,9 @@ class InitTest(unittest.TestCase):
         configuration.targets = []
         configuration.local_configuration_root = None
 
+        arguments.source_directories = ["a/b"]
+        arguments.targets = []
+        arguments.filter_directory = None
         expected_analysis_directory = AnalysisDirectory("a/b")
         analysis_directory = resolve_analysis_directory(
             arguments, commands, configuration
@@ -222,9 +115,24 @@ class InitTest(unittest.TestCase):
         assert_analysis_directory(expected_analysis_directory, analysis_directory)
 
         arguments.source_directories = ["/symlinked/directory"]
+        arguments.targets = []
         arguments.filter_directory = "/real/directory"
         expected_analysis_directory = AnalysisDirectory(
-            "/symlinked/directory", ["/real/directory"]
+            "/symlinked/directory", filter_paths=["/real/directory"]
+        )
+        analysis_directory = resolve_analysis_directory(
+            arguments, commands, configuration
+        )
+        assert_analysis_directory(expected_analysis_directory, analysis_directory)
+
+        arguments.source_directories = []
+        arguments.targets = ["//x:y"]
+        arguments.filter_directory = "/real/directory"
+        expected_analysis_directory = SharedAnalysisDirectory(
+            [],
+            ["//x:y"],
+            original_directory="/project",
+            filter_paths=["/real/directory"],
         )
         analysis_directory = resolve_analysis_directory(
             arguments, commands, configuration
@@ -236,7 +144,26 @@ class InitTest(unittest.TestCase):
         arguments.filter_directory = "/filter"
         configuration.targets = ["//overridden/..."]
         expected_analysis_directory = SharedAnalysisDirectory(
-            ["a/b", "//x:y", "//y:/..."], ["/filter"]
+            ["a/b"],
+            ["//x:y", "//y:/..."],
+            original_directory="/project",
+            filter_paths=["/filter"],
+        )
+        analysis_directory = resolve_analysis_directory(
+            arguments, commands, configuration
+        )
+        assert_analysis_directory(expected_analysis_directory, analysis_directory)
+
+        arguments.source_directories = []
+        arguments.targets = []
+        arguments.filter_directory = "/filter"
+        configuration.source_directories = []
+        configuration.targets = ["//not:overridden/..."]
+        expected_analysis_directory = SharedAnalysisDirectory(
+            [],
+            ["//not:overridden/..."],
+            original_directory="/project",
+            filter_paths=["/filter"],
         )
         analysis_directory = resolve_analysis_directory(
             arguments, commands, configuration

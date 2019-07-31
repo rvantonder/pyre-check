@@ -1,127 +1,98 @@
-(** Copyright (c) 2016-present, Facebook, Inc.
-
-    This source code is licensed under the MIT license found in the
-    LICENSE file in the root directory of this source tree. *)
+(* Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree. *)
 
 open OUnit2
-
 open Ast
 open Analysis
 open Taint
 open Domains
 open Core
 
+let is_user_controlled = ( = ) Sources.UserControlled
 
-let is_user_controlled = (=) Sources.UserControlled
-let is_RCE = (=) Sinks.RemoteCodeExecution
+let is_RCE = ( = ) Sinks.RemoteCodeExecution
 
+let source_taint = ForwardTaint.of_list [Sources.Test; Sources.UserControlled]
 
-let source_taint = ForwardTaint.of_list [ Sources.Test; Sources.UserControlled; ]
-let sink_taint = BackwardTaint.of_list [ Sinks.Test; Sinks.RemoteCodeExecution; ]
-
+let sink_taint = BackwardTaint.of_list [Sinks.Test; Sinks.RemoteCodeExecution]
 
 let test_partition_match_all _ =
   let open Flow in
-  let flows = [ { source_taint; sink_taint; } ] in
-  let { matched; rest; } = partition_flows flows in
+  let flows = [{ source_taint; sink_taint }] in
+  let { matched; rest } = partition_flows flows in
   assert_equal
     ~msg:"Matching"
-    ~printer:(fun taint -> Sexp.to_string [%message (taint: Flow.flow list)])
+    ~printer:(fun taint -> Sexp.to_string [%message (taint : Flow.flow list)])
     flows
     matched;
   assert_equal
     ~msg:"Rest"
-    ~printer:(fun taint -> Sexp.to_string [%message (taint: Flow.flow list)])
+    ~printer:(fun taint -> Sexp.to_string [%message (taint : Flow.flow list)])
     []
     rest
 
 
 let test_partition_match_some_sources _ =
   let open Flow in
-  let flows = [ { source_taint; sink_taint; } ] in
-  let { matched; rest; } = partition_flows ~sources:is_user_controlled flows in
+  let flows = [{ source_taint; sink_taint }] in
+  let { matched; rest } = partition_flows ~sources:is_user_controlled flows in
   assert_equal
     ~msg:"Matching"
-    ~printer:(fun taint -> Sexp.to_string [%message (taint: Flow.flow list)])
-    [
-      {
-        source_taint = ForwardTaint.singleton Sources.UserControlled;
-        sink_taint;
-      };
-    ]
+    ~printer:(fun taint -> Sexp.to_string [%message (taint : Flow.flow list)])
+    [{ source_taint = ForwardTaint.singleton Sources.UserControlled; sink_taint }]
     matched;
   assert_equal
     ~msg:"Rest"
-    ~printer:(fun taint -> Sexp.to_string [%message (taint: Flow.flow list)])
-    [
-      {
-        source_taint = ForwardTaint.singleton Sources.Test;
-        sink_taint;
-      };
-    ]
+    ~printer:(fun taint -> Sexp.to_string [%message (taint : Flow.flow list)])
+    [{ source_taint = ForwardTaint.singleton Sources.Test; sink_taint }]
     rest
 
 
 let test_partition_match_some_sinks _ =
   let open Flow in
-  let flows = [ { source_taint; sink_taint; } ] in
-  let { matched; rest; } = partition_flows ~sinks:is_RCE flows in
+  let flows = [{ source_taint; sink_taint }] in
+  let { matched; rest } = partition_flows ~sinks:is_RCE flows in
   assert_equal
     ~msg:"Matching"
-    ~printer:(fun taint -> Sexp.to_string [%message (taint: Flow.flow list)])
-    [
-      {
-        source_taint;
-        sink_taint = BackwardTaint.singleton Sinks.RemoteCodeExecution;
-      };
-    ]
+    ~printer:(fun taint -> Sexp.to_string [%message (taint : Flow.flow list)])
+    [{ source_taint; sink_taint = BackwardTaint.singleton Sinks.RemoteCodeExecution }]
     matched;
   assert_equal
     ~msg:"Rest"
-    ~printer:(fun taint -> Sexp.to_string [%message (taint: Flow.flow list)])
-    [
-      {
-        source_taint;
-        sink_taint = BackwardTaint.singleton Sinks.Test;
-      };
-    ]
+    ~printer:(fun taint -> Sexp.to_string [%message (taint : Flow.flow list)])
+    [{ source_taint; sink_taint = BackwardTaint.singleton Sinks.Test }]
     rest
 
 
 let test_partition_match_some_sinks_and_sources _ =
   let open Flow in
-  let flows = [ { source_taint; sink_taint; } ] in
-  let { matched; rest; } = partition_flows ~sources:is_user_controlled ~sinks:is_RCE flows in
+  let flows = [{ source_taint; sink_taint }] in
+  let { matched; rest } = partition_flows ~sources:is_user_controlled ~sinks:is_RCE flows in
   assert_equal
     ~msg:"Matching"
-    ~printer:(fun taint -> Sexp.to_string [%message (taint: Flow.flow list)])
-    [
-      {
+    ~printer:(fun taint -> Sexp.to_string [%message (taint : Flow.flow list)])
+    [ {
         source_taint = ForwardTaint.singleton Sources.UserControlled;
         sink_taint = BackwardTaint.singleton Sinks.RemoteCodeExecution;
-      };
-    ]
+      } ]
     matched;
   assert_equal
     ~msg:"Rest"
-    ~printer:(fun taint -> Sexp.to_string [%message (taint: Flow.flow list)])
-    [
-      {
+    ~printer:(fun taint -> Sexp.to_string [%message (taint : Flow.flow list)])
+    [ {
         source_taint = ForwardTaint.singleton Sources.Test;
         sink_taint = BackwardTaint.singleton Sinks.RemoteCodeExecution;
       };
-      {
-        source_taint;
-        sink_taint = BackwardTaint.singleton Sinks.Test;
-      };
-    ]
+      { source_taint; sink_taint = BackwardTaint.singleton Sinks.Test } ]
     rest
 
 
 let test_no_errors _ =
   let open Flow in
   let source_tree_a =
-    ForwardTaint.singleton Sources.UserControlled
+    ForwardTaint.singleton Sources.Demo
     |> ForwardState.Tree.create_leaf
     |> ForwardState.Tree.prepend [AbstractTreeDomain.Label.Field "a"]
   in
@@ -136,14 +107,14 @@ let test_no_errors _ =
     |> BackwardState.Tree.prepend [AbstractTreeDomain.Label.Field "a"]
   in
   let sink_tree_b =
-    BackwardTaint.singleton Sinks.RemoteCodeExecution
+    BackwardTaint.singleton Sinks.Demo
     |> BackwardState.Tree.create_leaf
     |> BackwardState.Tree.prepend [AbstractTreeDomain.Label.Field "b"]
   in
   let assert_no_errors ~source_tree ~sink_tree =
     let location = Location.create ~start:Lexing.dummy_pos ~stop:Lexing.dummy_pos in
     let define =
-      Statement.Define.create_toplevel ~qualifier:[] ~statements:[]
+      Statement.Define.create_toplevel ~qualifier:None ~statements:[]
       |> Node.create_with_default_location
     in
     let errors =
@@ -153,7 +124,7 @@ let test_no_errors _ =
     in
     assert_equal
       ~msg:"Errors"
-      ~printer:(fun errors -> Sexp.to_string [%message (errors: Interprocedural.Error.t list)])
+      ~printer:(fun errors -> Sexp.to_string [%message (errors : Interprocedural.Error.t list)])
       []
       errors
   in
@@ -176,6 +147,11 @@ let test_errors _ =
     |> ForwardState.Tree.create_leaf
     |> ForwardState.Tree.prepend [AbstractTreeDomain.Label.Field "b"]
   in
+  let source_tree_c =
+    ForwardTaint.singleton Sources.Demo
+    |> ForwardState.Tree.create_leaf
+    |> ForwardState.Tree.prepend [AbstractTreeDomain.Label.Field "a"]
+  in
   let sink_tree_a =
     BackwardTaint.singleton Sinks.RemoteCodeExecution
     |> BackwardState.Tree.create_leaf
@@ -187,14 +163,19 @@ let test_errors _ =
     |> BackwardState.Tree.prepend [AbstractTreeDomain.Label.Field "b"]
   in
   let sink_tree_c =
-    BackwardTaint.singleton Sinks.Thrift
+    BackwardTaint.singleton Sinks.Demo
+    |> BackwardState.Tree.create_leaf
+    |> BackwardState.Tree.prepend [AbstractTreeDomain.Label.Field "a"]
+  in
+  let sink_tree_d =
+    BackwardTaint.singleton Sinks.Test
     |> BackwardState.Tree.create_leaf
     |> BackwardState.Tree.prepend [AbstractTreeDomain.Label.Field "a"]
   in
   let assert_error ~source_tree ~sink_tree code =
     let location = Location.create ~start:Lexing.dummy_pos ~stop:Lexing.dummy_pos in
     let define =
-      Statement.Define.create_toplevel ~qualifier:[] ~statements:[]
+      Statement.Define.create_toplevel ~qualifier:None ~statements:[]
       |> Node.create_with_default_location
     in
     let errors =
@@ -210,17 +191,17 @@ let test_errors _ =
   in
   assert_error ~source_tree:source_tree_a ~sink_tree:sink_tree_a 5001;
   assert_error ~source_tree:source_tree_b ~sink_tree:sink_tree_b 5002;
-  assert_error ~source_tree:source_tree_a ~sink_tree:sink_tree_c 5003;
+  assert_error ~source_tree:source_tree_c ~sink_tree:sink_tree_c 5009;
+  assert_error ~source_tree:source_tree_a ~sink_tree:sink_tree_d 5002;
   ()
 
 
 let () =
-  "test_taint_flow">:::[
-    "partition_match_all">::test_partition_match_all;
-    "partition_match_some_sources">::test_partition_match_some_sources;
-    "partition_match_some_sinks">::test_partition_match_some_sinks;
-    "partition_match_some_sinks_and_sources">::test_partition_match_some_sinks_and_sources;
-    "test_no_errors">::test_no_errors;
-    "test_errors">::test_errors;
-  ]
+  "test_taint_flow"
+  >::: [ "partition_match_all" >:: test_partition_match_all;
+         "partition_match_some_sources" >:: test_partition_match_some_sources;
+         "partition_match_some_sinks" >:: test_partition_match_some_sinks;
+         "partition_match_some_sinks_and_sources" >:: test_partition_match_some_sinks_and_sources;
+         "test_no_errors" >:: test_no_errors;
+         "test_errors" >:: test_errors ]
   |> Test.run

@@ -3,6 +3,9 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
+import argparse
 import enum
 import logging
 import os
@@ -12,13 +15,15 @@ import signal
 import subprocess
 import threading
 from abc import abstractmethod
-from typing import List, Set  # noqa
+from typing import Iterable, List, Optional, Set  # noqa
 
-from .. import EnvironmentException, log
-from ..filesystem import AnalysisDirectory
+from .. import log
+from ..configuration import Configuration
+from ..exceptions import EnvironmentException
+from ..filesystem import AnalysisDirectory, make_pyre_directory, remove_if_exists
 
 
-LOG = logging.getLogger(__name__)
+LOG = logging.getLogger(__name__)  # type: logging.Logger
 
 
 class ClientException(Exception):
@@ -34,14 +39,15 @@ class ExitCode(enum.IntEnum):
     SUCCESS = 0
     FOUND_ERRORS = 1
     FAILURE = 2
+    BUCK_ERROR = 3
     # If the process exited due to a signal, this will be the negative signal number.
     SIGSEGV = -signal.SIGSEGV
 
 
 class Result:
-    def __init__(self, code, output) -> None:
+    def __init__(self, code: int, output: str) -> None:
         self.code = code
-        self.output = output
+        self.output = output  # type: str
 
     def check(self) -> None:
         if self.code != ExitCode.SUCCESS:
@@ -56,33 +62,66 @@ class Result:
             )
 
 
+def typeshed_search_path(typeshed_root: str) -> List[str]:
+    search_path = []
+    typeshed_subdirectories = ["stdlib", "third_party"]
+    for typeshed_subdirectory_name in typeshed_subdirectories:
+        typeshed_subdirectory = os.path.join(typeshed_root, typeshed_subdirectory_name)
+        if (
+            not os.path.isdir(typeshed_subdirectory)
+            or typeshed_subdirectory_name == "tests"
+            or typeshed_subdirectory_name[0] == "."
+        ):
+            continue
+
+        # Always prefer newer version over older version
+        version_names = reversed(sorted(os.listdir(typeshed_subdirectory)))
+        for version_name in version_names:
+            # Anything under 2/ or 2.x is unusable for Pyre
+            if version_name.startswith("2") and version_name != "2and3":
+                continue
+            search_path.append(os.path.join(typeshed_subdirectory, version_name))
+    return search_path
+
+
+# pyre-fixme[44]: `Command` non-abstract class with abstract methods
 class Command:
     _buffer = []  # type: List[str]
     _call_client_terminated = False  # type: bool
 
     _exit_code = ExitCode.SUCCESS  # type: ExitCode
 
+    _local_root = ""  # type: str
+
     def __init__(
-        self, arguments, configuration, analysis_directory: AnalysisDirectory
+        self,
+        arguments: argparse.Namespace,
+        configuration: Configuration,
+        analysis_directory: AnalysisDirectory,
     ) -> None:
         self._arguments = arguments
         self._configuration = configuration
 
         self._analysis_directory = analysis_directory
-        self._debug = arguments.debug
-        self._sequential = arguments.sequential
-        self._strict = arguments.strict
-        self._run_additional_checks = arguments.run_additional_checks
-        self._show_error_traces = arguments.show_error_traces
-        self._verbose = arguments.verbose
-        self._show_parse_errors = arguments.show_parse_errors
-        self._logging_sections = arguments.logging_sections
-        self._capable_terminal = arguments.capable_terminal
-        self._log_identifier = arguments.log_identifier
-        self._logger = arguments.logger or (configuration and configuration.logger)
+        self._debug = arguments.debug  # type: bool
+        self._enable_profiling = arguments.enable_profiling  # type: bool
+        self._sequential = arguments.sequential  # type: bool
+        self._strict = arguments.strict or (
+            configuration and configuration.strict
+        )  # type: bool
+        self._additional_checks = arguments.additional_check  # type: List[str]
+        self._show_error_traces = arguments.show_error_traces  # type: bool
+        self._verbose = arguments.verbose  # type: bool
+        self._hide_parse_errors = arguments.hide_parse_errors  # type: bool
+        self._logging_sections = arguments.logging_sections  # type: str
+        self._capable_terminal = arguments.capable_terminal  # type: bool
+        self._log_identifier = arguments.log_identifier  # type: str
+        self._logger = arguments.logger or (
+            configuration and configuration.logger
+        )  # type: str
 
-        self._original_directory = arguments.original_directory
-        self._current_directory = arguments.current_directory
+        self._original_directory = arguments.original_directory  # type: str
+        self._current_directory = arguments.current_directory  # type: str
         if arguments.local_configuration:
             self._local_root = (
                 arguments.local_configuration
@@ -112,13 +151,14 @@ class Command:
             flags.extend(["-sequential"])
         if self._strict:
             flags.extend(["-strict"])
-        if self._run_additional_checks:
-            flags.extend(["-run-additional-checks"])
+        if self._additional_checks:
+            flags.append("-additional-checks")
+            flags.append(",".join(self._additional_checks))
         if self._show_error_traces:
             flags.append("-show-error-traces")
         if self._verbose:
             flags.append("-verbose")
-        if self._show_parse_errors:
+        if not self._hide_parse_errors:
             if self._logging_sections:
                 self._logging_sections = self._logging_sections + ",parser"
             else:
@@ -132,6 +172,12 @@ class Command:
                 self._logging_sections = "-progress"
         if self._logging_sections:
             flags.extend(["-logging-sections", self._logging_sections])
+        if self._enable_profiling:
+            pyre_directory = make_pyre_directory()
+            profiling_output = os.path.join(pyre_directory, "profiling.log")
+            # Clear the profiling log first since in pyre binary it's append-only
+            remove_if_exists(profiling_output)
+            flags.extend(["-profiling-output", profiling_output])
         if self._current_directory:
             flags.extend(["-project-root", self._current_directory])
         if self._log_identifier:
@@ -140,12 +186,12 @@ class Command:
             flags.extend(["-logger", self._logger])
         return flags
 
-    def _read_stdout(self, stdout) -> None:
+    def _read_stdout(self, stdout: Iterable[bytes]) -> None:
         self._buffer = []
         for line in stdout:
             self._buffer.append(line.decode())
 
-    def _read_stderr(self, stream, _analysis_directory) -> None:
+    def _read_stderr(self, stream: Iterable[bytes]) -> None:
         buffer = None
         log_pattern = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} (\w+) (.*)")
         try:
@@ -167,7 +213,7 @@ class Command:
         except Exception:
             pass
 
-    def _call_client(self, command, capture_output: bool = True) -> Result:
+    def _call_client(self, command: str, capture_output: bool = True) -> Result:
         if not os.path.isdir(self._analysis_directory.get_root()):
             raise EnvironmentException(
                 "`{}` is not a link tree.".format(self._analysis_directory.get_root())
@@ -177,7 +223,7 @@ class Command:
         client_command.extend(self._flags())
         client_command.append(self._analysis_directory.get_root())
 
-        def limit_memory_usage():
+        def limit_memory_usage() -> None:
             try:
                 limit = 20 * 1024 * 1024 * 1024  # 20 GB
                 resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
@@ -204,8 +250,7 @@ class Command:
             # Read the error output and print it.
             self._call_client_terminated = False
             stderr_reader = threading.Thread(
-                target=self._read_stderr,
-                args=(process.stderr, self._analysis_directory.get_root()),
+                target=self._read_stderr, args=(process.stderr,)
             )
             stderr_reader.daemon = True
             stderr_reader.start()
@@ -225,8 +270,7 @@ class Command:
 
             return Result(code=process.returncode, output=output)
 
-    def _relative_path(self, path) -> str:
-        # pyre-fixme: Expected str, got bytes
+    def _relative_path(self, path: str) -> str:
         return os.path.relpath(path, self._original_directory)
 
     def _state(self) -> State:
@@ -240,11 +284,6 @@ class Command:
             return State.RUNNING
         except Exception:
             return State.DEAD
-
-    def _server_string(self, analysis_directory=None) -> str:
-        if not analysis_directory:
-            analysis_directory = self._analysis_directory.get_root()
-        return "server{}".format("" if len(analysis_directory) < 2 else "s")
 
     def _analysis_directory_string(self) -> str:
         return "`{}`".format(self._analysis_directory.get_root())

@@ -1,13 +1,12 @@
-(** Copyright (c) 2016-present, Facebook, Inc.
-
-    This source code is licensed under the MIT license found in the
-    LICENSE file in the root directory of this source tree. *)
+(* Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree. *)
 
 open Core
 
-
-type section = [
-  | `Check
+type section =
+  [ `Check
   | `Coverage
   | `Debug
   | `Dependencies
@@ -22,14 +21,13 @@ type section = [
   | `Interprocedural
   | `Memory
   | `Parser
-  | `Progress
   | `Performance
+  | `Progress
   | `Protocols
   | `Server
   | `Taint
   | `Warning
-]
-
+  ]
 
 let section_to_string = function
   | `Check -> "Check"
@@ -47,8 +45,8 @@ let section_to_string = function
   | `Interprocedural -> "Interprocedural"
   | `Memory -> "Memory"
   | `Parser -> "Parser"
-  | `Progress -> "Progress"
   | `Performance -> "Performance"
+  | `Progress -> "Progress"
   | `Protocols -> "Protocols"
   | `Server -> "Server"
   | `Taint -> "Taint"
@@ -56,38 +54,19 @@ let section_to_string = function
 
 
 let enabled =
-  String.Hash_set.of_list [
-    "Dump";
-    "Error";
-    "Info";
-    "Memory";
-    "Performance";
-    "Progress";
-    "Warning";
-  ]
+  String.Hash_set.of_list ["Dump"; "Error"; "Info"; "Memory"; "Progress"; "Performance"; "Warning"]
 
 
-let is_enabled section =
-  Hash_set.mem enabled (section_to_string section)
-
+let is_enabled section = Hash_set.mem enabled (section_to_string section)
 
 let initialize ~verbose ~sections =
   if verbose then
     Hash_set.add enabled "Debug";
-
   let handle_section section =
-    let normalize section =
-      String.lowercase section
-      |> String.capitalize
-    in
-
+    let normalize section = String.lowercase section |> String.capitalize in
     match String.chop_prefix ~prefix:"-" section with
-    | Some section ->
-        normalize section
-        |> Hash_set.remove enabled
-    | None ->
-        normalize section
-        |> Hash_set.add enabled
+    | Some section -> normalize section |> Hash_set.remove enabled
+    | None -> normalize section |> Hash_set.add enabled
   in
   List.iter ~f:handle_section sections
 
@@ -98,22 +77,21 @@ let initialize_for_tests () =
 
 
 let time_zone = ref None
-(* A safer version of Time.Zone.local, which defaults to UTC instead
-   of throwing an exception if we cannot figure out local time. See
-   https://github.com/janestreet/core/issues/96 for one example when
-   this can happen *)
+
+(* A safer version of Time.Zone.local, which defaults to UTC instead of throwing an exception if we
+   cannot figure out local time. See https://github.com/janestreet/core/issues/96 for one example
+   when this can happen *)
 let get_time_zone () =
   match !time_zone with
   | Some zone -> zone
   | None ->
       let zone =
-        try
-          force Time.Zone.local
-        with _ ->
-          Time.Zone.utc
+        try force Time.Zone.local with
+        | _ -> Time.Zone.utc
       in
       time_zone := Some zone;
       zone
+
 
 let log ~section format =
   let section = section_to_string section in
@@ -128,56 +106,34 @@ let log ~section format =
     Format.ifprintf Format.err_formatter format
 
 
-let debug format =
-  log ~section:`Debug format
+let debug format = log ~section:`Debug format
 
+let dump format = log ~section:`Dump format
 
-let dump format =
-  log ~section:`Dump format
+let info format = log ~section:`Info format
 
+let error format = log ~section:`Error format
 
-let info format =
-  log ~section:`Info format
+let warning format = log ~section:`Warning format
 
-
-let error format =
-  log ~section:`Error format
-
-
-let warning format =
-  log ~section:`Warning format
-
-
-let print format =
-  Printf.printf format
-
+let print format = Printf.printf format
 
 let log_unix_error ?(section = `Error) (error_kind, name, parameters) =
   log ~section "Unix error %s: %s(%s)" (Unix.error_message error_kind) name parameters
 
 
 module Color = struct
-  let cyan string =
-    Format.asprintf "\027[36m%s\027[0m" string
+  let cyan string = Format.asprintf "\027[36m%s\027[0m" string
 
+  let red string = Format.asprintf "\027[31m%s\027[0m" string
 
-  let red string =
-    Format.asprintf "\027[31m%s\027[0m" string
-
-
-  let yellow string =
-    Format.asprintf "\027[33m%s\027[0m" string
+  let yellow string = Format.asprintf "\027[33m%s\027[0m" string
 end
 
-
 let rotate ?(number_to_keep = 10) basename =
-  let timestamp =
-    Time.to_filename_string ~zone:(get_time_zone ()) (Time.now ())
-  in
+  let timestamp = Time.to_filename_string ~zone:(get_time_zone ()) (Time.now ()) in
   let suppress_system_error f =
-    try
-      f ()
-    with
+    try f () with
     | Sys_error _
     | Unix.Unix_error _ ->
         ()
@@ -186,24 +142,23 @@ let rotate ?(number_to_keep = 10) basename =
     Filename.dirname basename
     |> Sys.ls_dir
     (* The "." is to prevent us from counting a symlinked log as a log to keep. *)
-    |> List.filter ~f:(String.is_prefix ~prefix:((Filename.basename basename) ^ "."))
+    |> List.filter ~f:(String.is_prefix ~prefix:(Filename.basename basename ^ "."))
     |> List.sort ~compare:String.compare (* Sorts by earliest date, i.e. least recent *)
     |> List.rev
     |> (fun list -> List.drop list number_to_keep)
-    |> List.iter
-      ~f:(fun path ->
-          suppress_system_error (fun () -> Unix.remove (Filename.dirname basename ^/ path)))
+    |> List.iter ~f:(fun path ->
+           suppress_system_error (fun () -> Unix.remove (Filename.dirname basename ^/ path)))
   in
   suppress_system_error rotate_old_logs;
   let is_file_or_link path =
     try
       let { Unix.st_kind; _ } = Unix.lstat path in
       st_kind = Unix.S_LNK || st_kind = Unix.S_REG
-    with Unix.Unix_error _ ->
-      false
+    with
+    | Unix.Unix_error _ -> false
   in
   if is_file_or_link basename then
     suppress_system_error (fun () -> Unix.unlink basename);
   let actual_path = Format.sprintf "%s.%s" basename timestamp in
-  suppress_system_error (fun () -> Unix.symlink ~src:actual_path ~dst:basename);
+  suppress_system_error (fun () -> Unix.symlink ~target:actual_path ~link_name:basename);
   actual_path

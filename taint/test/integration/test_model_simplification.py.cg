@@ -1,4 +1,0 @@
-Call dependencies
-qualifier._asdict_inner (fun) -> [getattr (fun) isinstance (fun) list::append (method) qualifier._asdict_inner (fun)]
-qualifier.asdict (fun) -> [qualifier._asdict_inner (fun)]
-qualifier.asdict_test (fun) -> [qualifier.asdict (fun)]

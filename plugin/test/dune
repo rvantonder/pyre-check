@@ -1,8 +1,9 @@
 (tests
  (names
-  namedTuplesTest
+  attrsTest
   dataClassTest
-  filterTest)
+  namedTuplesTest
+  newTypeTest)
  (libraries
   oUnit
   pyrelib.test

@@ -100,7 +100,7 @@ let split_lines = Str.split nl_regexp
 
 (** Returns true if substring occurs somewhere inside str. *)
 let string_contains str substring =
-  (** regexp_string matches only this string and nothing else. *)
+  (* regexp_string matches only this string and nothing else. *)
   let re = Str.regexp_string substring in
   try (Str.search_forward re str 0) >= 0 with Not_found -> false
 
@@ -137,7 +137,7 @@ let rec rm_dir_tree path =
     | Unix.S_SOCK ->
         Unix.unlink path
   end with
-  (** Path has been deleted out from under us - can ignore it. *)
+  (* Path has been deleted out from under us - can ignore it. *)
   | Sys_error(s) when s = Printf.sprintf "%s: No such file or directory" path ->
       ()
   | Unix.Unix_error(Unix.ENOENT, _, _) ->
@@ -174,7 +174,7 @@ let with_umask umask f =
   let old_umask = ref 0 in
   Utils.with_context
     ~enter:(fun () -> old_umask := Unix.umask umask)
-    ~exit:(fun () -> Unix.umask !old_umask)
+    ~exit:(fun () -> ignore (Unix.umask !old_umask))
     ~do_:f
 let with_umask umask f =
   if Sys.win32 then f () else with_umask umask f
@@ -270,7 +270,7 @@ let executable_path : unit -> string =
 
 let lines_of_in_channel ic =
   let rec loop accum =
-    match try Some(input_line ic) with e -> None with
+    match try Some(input_line ic) with _e -> None with
     | None -> List.rev accum
     | Some(line) -> loop (line::accum)
   in

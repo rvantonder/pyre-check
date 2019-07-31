@@ -94,6 +94,12 @@ module Std : sig
     val init_done: unit -> unit
 
     (*****************************************************************************)
+    (* Serializes the hash table to sqlite *)
+    (****************************************************************************)
+
+    val save_table_sqlite: string -> int
+
+    (*****************************************************************************)
     (* Serializes the dependency table and writes it to a file *)
     (*****************************************************************************)
     val save_dep_table_sqlite: string -> string -> int
@@ -246,8 +252,10 @@ module Std : sig
 
   module Worker : sig
     exception Worker_exited_abnormally of int
-    (* Worker killed by Out Of Memory. *)
+
+    (** Worker killed by Out Of Memory. *)
     exception Worker_oomed
+
     (** Raise this exception when sending work to a worker that is already busy.
      * We should never be doing that, and this is an assertion error. *)
     exception Worker_busy
@@ -276,9 +284,8 @@ module Std : sig
     val register_entry_point:
       restore:('a -> unit) -> 'a entry
 
-    (* Creates a pool of workers. *)
+    (** Creates a pool of workers. See docs in Worker.t for call_wrapper. *)
     val make:
-      (** See docs in Worker.t for call_wrapper. *)
       ?call_wrapper: call_wrapper ->
       saved_state : 'a ->
       entry       : 'a entry ->

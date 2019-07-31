@@ -11,20 +11,21 @@
    ppx_sexp_message
    ppx_deriving_yojson))
  (libraries
+  base64
   core
+  core.uuid
   sexplib
   ppxlib
   yojson
   ppx_deriving
   ppx_deriving_yojson
   ppx_deriving_yojson.runtime
-  pyrelib.service
   pyrelib.ast
   pyrelib.analysis
   pyrelib.configuration
-  pyrelib.experimental
   pyrelib.fetchSavedState
   pyrelib.memory
   pyrelib.network
   pyrelib.languageServer
+  pyrelib.service
   pyrelib.version))

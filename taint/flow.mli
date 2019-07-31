@@ -1,12 +1,11 @@
-(** Copyright (c) 2018-present, Facebook, Inc.
-
-    This source code is licensed under the MIT license found in the
-    LICENSE file in the root directory of this source tree. *)
+(* Copyright (c) 2018-present, Facebook, Inc.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree. *)
 
 open Ast
 open Statement
 open Domains
-
 
 type flow = {
   source_taint: ForwardTaint.t;
@@ -14,8 +13,7 @@ type flow = {
 }
 [@@deriving sexp]
 
-type flows = flow list
-[@@deriving sexp]
+type flows = flow list [@@deriving sexp]
 
 type candidate = {
   flows: flows;
@@ -38,28 +36,22 @@ type issue = {
 }
 [@@deriving sexp]
 
-val partition_flows:
-  ?sources: (Sources.t -> bool)
-  -> ?sinks: (Sinks.t -> bool)
-  -> flows
-  -> flow_state
+val partition_flows
+  :  ?sources:(Sources.t -> bool) ->
+  ?sinks:(Sinks.t -> bool) ->
+  flows ->
+  flow_state
 
-val generate_source_sink_matches:
-  location: Location.t
-  -> source_tree: ForwardState.Tree.t
-  -> sink_tree: BackwardState.Tree.t
-  -> candidate
+val generate_source_sink_matches
+  :  location:Location.t ->
+  source_tree:ForwardState.Tree.t ->
+  sink_tree:BackwardState.Tree.t ->
+  candidate
 
-val generate_issues:
-  define: Define.t Node.t
-  -> candidate
-  -> issue list
+val generate_issues : define:Define.t Node.t -> candidate -> issue list
 
-val to_json:
-  Interprocedural.Callable.t
-  -> issue
-  -> Yojson.Safe.json
+val to_json : Interprocedural.Callable.t -> issue -> Yojson.Safe.json
 
-val generate_error: issue -> Interprocedural.Error.t
+val generate_error : issue -> Interprocedural.Error.t
 
-val code_metadata: unit -> Yojson.Safe.json
+val code_metadata : unit -> Yojson.Safe.json

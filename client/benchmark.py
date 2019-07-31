@@ -10,8 +10,9 @@ import subprocess
 import sys
 import time
 
-from . import FAILURE, SUCCESS, EnvironmentException, log, switch_root
+from . import FAILURE, SUCCESS, log, switch_root
 from .configuration import Configuration
+from .exceptions import EnvironmentException
 
 
 LOG = logging.getLogger(__name__)
@@ -90,6 +91,7 @@ if __name__ == "__main__":
         help="Maximum number of concurrent processes to measure.",
     )
     arguments = parser.parse_args()
+    # pyre-fixme[16]: `Namespace` has no attribute `noninteractive`.
     arguments.noninteractive = True
     log.initialize(arguments)
 

@@ -9,9 +9,10 @@ import unittest
 from contextlib import contextmanager
 from unittest.mock import call, patch
 
-from ..commands import monitor  # noqa
+from .. import monitor, watchman_subscriber
+from ..commands import stop
+from ..commands.tests.command_test import mock_arguments, mock_configuration
 from ..filesystem import AnalysisDirectory
-from .infer_test import mock_arguments, mock_configuration
 
 
 class MonitorTest(unittest.TestCase):
@@ -40,7 +41,7 @@ class MonitorTest(unittest.TestCase):
         _exit.assert_has_calls([call(0), call(1)])
 
     @patch("os.makedirs")
-    @patch.object(monitor, "acquire_lock")
+    @patch.object(watchman_subscriber, "acquire_lock")
     def test_run(self, _lock, _makedirs) -> None:
         @contextmanager
         def yield_once(path, blocking):
@@ -62,3 +63,32 @@ class MonitorTest(unittest.TestCase):
                         )._run()
         except ImportError:
             pass
+
+    def test_handle_response(self) -> None:
+        arguments = mock_arguments()
+        arguments.local_configuration = "/ROOT/a/b/c"
+        configuration = mock_configuration()
+        analysis_directory = AnalysisDirectory("/tmp")
+        monitor_instance = monitor.Monitor(arguments, configuration, analysis_directory)
+
+        with patch.object(stop, "Stop") as stop_command:
+            monitor_instance._handle_response(
+                {"files": ["a/b/c/.pyre_configuration.local"], "root": "/ROOT"}
+            )
+            stop_command.assert_called_once_with(
+                arguments, configuration, analysis_directory
+            )
+
+        with patch.object(stop, "Stop") as stop_command:
+            monitor_instance._handle_response(
+                {
+                    "files": [
+                        "a/b/.pyre_configuration.local",
+                        "c/d/.pyre_configuration.local",
+                        "c/a/b/c/.pyre_configuration.local",
+                        "a/.pyre_configuration.local",
+                    ],
+                    "root": "/ROOT",
+                }
+            )
+            stop_command.assert_not_called()

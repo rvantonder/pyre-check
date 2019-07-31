@@ -1,1226 +1,1842 @@
-(** Copyright (c) 2016-present, Facebook, Inc.
-
-    This source code is licensed under the MIT license found in the
-    LICENSE file in the root directory of this source tree. *)
+(* Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree. *)
 
 open Core
-
 open Ast
 open Expression
 open Pyre
 open Statement
 
-
-type t = {
-  function_definitions: ((Define.t Node.t) list) Access.Table.t;
-  class_definitions: Resolution.class_representation Type.Table.t;
-  protocols: Type.Hash_set.t;
-  modules: Module.t Access.Table.t;
-  order: TypeOrder.t;
-  aliases: Type.t Type.Table.t;
-  globals: Resolution.global Access.Table.t;
-  dependencies: Dependencies.t;
-}
-
 module type Handler = sig
-  val register_definition
-    :  handle: File.Handle.t
-    -> ?name_override: Access.t
-    -> (Define.t Node.t)
-    -> unit
-  val register_dependency: handle: File.Handle.t -> dependency: Access.t -> unit
+  val register_dependency : qualifier:Reference.t -> dependency:Reference.t -> unit
+
   val register_global
-    :  handle: File.Handle.t
-    -> access: Access.t
-    -> global: Resolution.global
-    -> unit
-  val set_class_definition: primitive: Type.t -> definition: Class.t Node.t -> unit
-  val refine_class_definition: Type.t -> unit
-  val register_alias: handle: File.Handle.t -> key: Type.t -> data: Type.t -> unit
-  val purge: ?debug: bool -> File.Handle.t list -> unit
+    :  ?qualifier:Reference.t ->
+    reference:Reference.t ->
+    global:GlobalResolution.global ->
+    unit
 
-  val function_definitions: Access.t -> (Define.t Node.t) list option
-  val class_definition: Type.t -> Resolution.class_representation option
+  val register_undecorated_function
+    :  reference:Reference.t ->
+    annotation:Type.t Type.Callable.overload ->
+    unit
 
-  val register_protocol: Type.t -> unit
-  val protocols: unit -> Type.t list
+  val set_class_definition : name:Identifier.t -> definition:Class.t Node.t -> unit
 
-  val register_module
-    :  qualifier: Access.t
-    -> local_mode: Source.mode
-    -> handle: File.Handle.t option
-    -> stub: bool
-    -> statements: Statement.t list
-    -> unit
+  val register_class_metadata : Identifier.t -> unit
 
-  val is_module: Access.t -> bool
-  val module_definition: Access.t -> Module.t option
+  val register_alias : qualifier:Reference.t -> key:Identifier.t -> data:Type.alias -> unit
 
-  val in_class_definition_keys: Type.t -> bool
-  val aliases: Type.t -> Type.t option
-  val globals: Access.t -> Resolution.global option
-  val dependencies: Access.t -> File.Handle.t list option
+  val purge : ?debug:bool -> Reference.t list -> unit
 
-  val local_mode: File.Handle.t -> Source.mode option
+  val class_definition : Identifier.t -> Class.t Node.t option
 
-  module DependencyHandler: Dependencies.Handler
+  val class_metadata : Identifier.t -> GlobalResolution.class_metadata option
 
-  module TypeOrderHandler: TypeOrder.Handler
+  val register_module : Reference.t -> Module.t -> unit
+
+  val register_implicit_submodule : Reference.t -> unit
+
+  val is_module : Reference.t -> bool
+
+  val module_definition : Reference.t -> Module.t option
+
+  val in_class_definition_keys : Identifier.t -> bool
+
+  val aliases : Identifier.t -> Type.alias option
+
+  val globals : Reference.t -> GlobalResolution.global option
+
+  val undecorated_signature : Reference.t -> Type.t Type.Callable.overload option
+
+  val dependencies : Reference.t -> Reference.Set.Tree.t option
+
+  val transaction : ?only_global_keys:bool -> f:(unit -> 'a) -> unit -> 'a
+
+  module DependencyHandler : Dependencies.Handler
+
+  module TypeOrderHandler : ClassHierarchy.Handler
 end
+
+type t = (module Handler)
+
+module UnresolvedAlias = struct
+  type t = {
+    qualifier: Reference.t;
+    target: Reference.t;
+    value: Expression.expression_t;
+  }
+  [@@deriving sexp, compare, hash]
+end
+
+module ResolvedAlias = struct
+  type t = {
+    qualifier: Reference.t;
+    name: Type.Primitive.t;
+    annotation: Type.alias;
+  }
+  [@@deriving sexp, compare, hash]
+
+  let register (module Handler : Handler) { qualifier; name; annotation } =
+    Handler.register_alias ~qualifier ~key:name ~data:annotation
+end
+
+let resolution (module Handler : Handler) () =
+  let aliases = Handler.aliases in
+  let class_hierarchy = (module Handler.TypeOrderHandler : ClassHierarchy.Handler) in
+  let constructor ~resolution class_name =
+    let instantiated = Type.Primitive class_name in
+    Handler.class_definition class_name
+    >>| AnnotatedClass.create
+    >>| AnnotatedClass.constructor ~instantiated ~resolution
+  in
+  let is_protocol annotation =
+    Type.split annotation
+    |> fst
+    |> Type.primitive_name
+    >>= Handler.class_definition
+    >>| AnnotatedClass.create
+    >>| AnnotatedClass.is_protocol
+    |> Option.value ~default:false
+  in
+  let attributes ~resolution annotation =
+    match Annotated.Class.resolve_class ~resolution annotation with
+    | None -> None
+    | Some [] -> None
+    | Some [{ instantiated; class_attributes; class_definition }] ->
+        AnnotatedClass.attributes
+          class_definition
+          ~resolution
+          ~transitive:true
+          ~instantiated
+          ~class_attributes
+        |> Option.some
+    | Some (_ :: _) ->
+        (* These come from calling attributes on Unions, which are handled by solve_less_or_equal
+           indirectly by breaking apart the union before doing the instantiate_protocol_parameters.
+           Therefore, there is no reason to deal with joining the attributes together here *)
+        None
+  in
+  let global reference =
+    (* TODO (T41143153): We might want to properly support this by unifying attribute lookup logic
+       for module and for class *)
+    match Reference.last reference with
+    | "__file__"
+    | "__name__" ->
+        let annotation =
+          Annotation.create_immutable ~global:true Type.string |> Node.create_with_default_location
+        in
+        Some annotation
+    | "__dict__" ->
+        let annotation =
+          Type.dictionary ~key:Type.string ~value:Type.Any
+          |> Annotation.create_immutable ~global:true
+          |> Node.create_with_default_location
+        in
+        Some annotation
+    | _ -> Handler.globals reference
+  in
+  GlobalResolution.create
+    ~class_hierarchy
+    ~aliases
+    ~module_definition:Handler.module_definition
+    ~class_definition:Handler.class_definition
+    ~class_metadata:Handler.class_metadata
+    ~constructor
+    ~undecorated_signature:Handler.undecorated_signature
+    ~attributes
+    ~is_protocol
+    ~global
+    ()
 
 
 let connect_definition
-    ~resolution
-    ~definition:({ Node.value = { Class.name; bases; _ }; _ } as definition) =
-  let (module Handler: TypeOrder.Handler) = Resolution.order resolution in
+    (module Handler : Handler)
+    ~(resolution : GlobalResolution.t)
+    ~definition:({ Node.value = { Class.name; bases; _ }; _ } as definition)
+  =
+  let (module Handler : ClassHierarchy.Handler) = (module Handler.TypeOrderHandler) in
   let annotated = Annotated.Class.create definition in
   (* We have to split the type here due to our built-in aliasing. Namely, the "list" and "dict"
      classes get expanded into parametric types of List[Any] and Dict[Any, Any]. *)
   let connect ~predecessor ~successor ~parameters =
     let annotations_tracked =
-      Handler.contains (Handler.indices ()) predecessor &&
-      Handler.contains (Handler.indices ()) successor
+      Handler.contains (Handler.indices ()) predecessor
+      && Handler.contains (Handler.indices ()) successor
     in
     let primitive_cycle =
       (* Primitive cycles can be introduced by meta-programming. *)
-      Type.equal predecessor successor
+      String.equal predecessor successor
     in
-    let cycle_with_top =
-      match predecessor, successor with
-      | Type.Top, _ -> true
-      | Type.Object, successor when not (Type.equal successor Type.Top) -> true
-      | _ -> false
-    in
-    if annotations_tracked && not primitive_cycle && not cycle_with_top then
-      TypeOrder.connect (module Handler) ~predecessor ~successor ~parameters
+    if annotations_tracked && not primitive_cycle then
+      ClassHierarchy.connect (module Handler) ~predecessor ~successor ~parameters
   in
-  let primitive, _ =
-    Annotated.Class.annotation ~resolution annotated
-    |> Type.split
-  in
-  connect ~predecessor:Type.Bottom ~successor:primitive ~parameters:[];
-  begin
-    match Annotated.Class.inferred_callable_type annotated ~resolution with
-    | Some callable ->
-        connect
-          ~predecessor:primitive
-          ~successor:(Type.primitive "typing.Callable")
-          ~parameters:[callable]
-    | None ->
-        ()
-  end;
-  if not (Type.equal primitive Type.Object) or Access.show name = "object" then
-    (* Register normal annotations. *)
-    let register_supertype { Argument.value; _ } =
-      let value = Expression.delocalize value in
-      match Node.value value with
-      | Access name ->
-          let supertype, parameters =
-            Resolution.parse_annotation resolution value
-            |> Type.split
-          in
-          if not (TypeOrder.contains (module Handler) supertype) &&
-             not (Type.equal supertype Type.Top) then
-            Log.log
-              ~section:`Environment
-              "Superclass annotation %a is missing"
-              Type.pp
-              supertype
-          else if Type.equal supertype Type.Top then
+  let primitive = Reference.show name in
+  ( match Annotated.Class.inferred_callable_type annotated ~resolution with
+  | Some callable ->
+      connect
+        ~predecessor:primitive
+        ~successor:"typing.Callable"
+        ~parameters:(Concrete [Type.Callable callable])
+  | None -> () );
+
+  (* Register normal annotations. *)
+  let register_supertype { Expression.Call.Argument.value; _ } =
+    let value = Expression.delocalize value in
+    match Node.value value with
+    | Call _
+    | Name _ -> (
+        let supertype, parameters =
+          (* While building environment, allow untracked to parse into primitives *)
+          GlobalResolution.parse_annotation
+            ~allow_untracked:true
+            ~allow_invalid_type_parameters:true
+            resolution
+            value
+          |> Type.split
+        in
+        match supertype with
+        | Type.Top ->
             Statistics.event
               ~name:"superclass of top"
               ~section:`Environment
-              ~normals:["unresolved name", Access.show name]
+              ~normals:["unresolved name", Expression.show value]
               ()
-          else
+        | Type.Primitive primitive when not (ClassHierarchy.contains (module Handler) primitive) ->
+            Log.log ~section:`Environment "Superclass annotation %a is missing" Type.pp supertype
+        | Type.Primitive supertype ->
             connect ~predecessor:primitive ~successor:supertype ~parameters
-      | _ ->
-          ()
-    in
-    let inferred_base = Annotated.Class.inferred_generic_base annotated ~resolution in
-    inferred_base @ bases
-    (* Don't register metaclass=abc.ABCMeta, etc. superclasses. *)
-    |> List.filter ~f:(fun { Argument.name; _ } -> Option.is_none name)
-    |> List.iter ~f:register_supertype
-  else
-    ()
-
-
-let handler
-    {
-      function_definitions;
-      class_definitions;
-      protocols;
-      modules;
-      order;
-      aliases;
-      globals;
-      dependencies;
-    }
-    ~configuration:{ Configuration.Analysis.infer; _ } =
-  let (module DependencyHandler: Dependencies.Handler) = Dependencies.handler dependencies in
-
-  (module struct
-    module TypeOrderHandler = (val TypeOrder.handler order: TypeOrder.Handler)
-    module DependencyHandler = DependencyHandler
-
-    let register_definition
-        ~handle
-        ?name_override
-        ({ Node.value = { Define.name; _  }; _ } as definition) =
-      let name = Option.value ~default:name name_override in
-      DependencyHandler.add_function_key ~handle name;
-      if infer then
-        let definitions =
-          match Hashtbl.find function_definitions name with
-          | Some definitions ->
-              definition::definitions
-          | None ->
-              [definition]
-        in
-        Hashtbl.set ~key:name ~data:definitions function_definitions
-
-
-    let register_dependency ~handle ~dependency =
-      Log.log
-        ~section:`Dependencies
-        "Adding dependency from %a to %a"
-        Access.pp dependency
-        File.Handle.pp handle;
-      DependencyHandler.add_dependent ~handle dependency
-
-
-    let register_global ~handle ~access ~global =
-      DependencyHandler.add_global_key ~handle access;
-      Hashtbl.set ~key:access ~data:global globals
-
-
-    let set_class_definition ~primitive ~definition =
-      let definition =
-        match Hashtbl.find class_definitions primitive with
-        | Some ({
-            class_definition = { Node.location; value = preexisting };
-            _;
-          } as class_representation) ->
-            {
-              class_representation with
-              class_definition = {
-                Node.location;
-                value = Class.update preexisting ~definition:(Node.value definition);
-              };
-            }
         | _ ->
+            Log.log ~section:`Environment "Superclass annotation %a is missing" Type.pp supertype )
+    | _ -> ()
+  in
+  let inferred_base = Annotated.Class.inferred_generic_base annotated ~resolution in
+  inferred_base @ bases
+  (* Don't register metaclass=abc.ABCMeta, etc. superclasses. *)
+  |> List.filter ~f:(fun { Expression.Call.Argument.name; _ } -> Option.is_none name)
+  |> List.iter ~f:register_supertype
+
+
+let add_special_classes (module Handler : Handler) =
+  (* Add classes for `typing.Optional` and `typing.Undeclared` that are currently not encoded in
+     the stubs. *)
+  let add_special_class ~name ~bases ~metaclasses ~body =
+    let definition =
+      let create_base annotation =
+        { Expression.Call.Argument.name = None; value = Type.expression annotation }
+      in
+      let create_metaclass annotation =
+        {
+          Expression.Call.Argument.name = Some (Node.create_with_default_location "metaclass");
+          value = Type.expression annotation;
+        }
+      in
+      {
+        Class.name = Reference.create name;
+        bases = List.map bases ~f:create_base @ List.map metaclasses ~f:create_metaclass;
+        body;
+        decorators = [];
+        docstring = None;
+      }
+    in
+    let order = (module Handler.TypeOrderHandler : ClassHierarchy.Handler) in
+    Handler.set_class_definition ~name ~definition:(Node.create_with_default_location definition);
+    ClassHierarchy.insert order name;
+    Handler.register_class_metadata name
+  in
+  let t_self_expression = Name (Name.Identifier "TSelf") |> Node.create_with_default_location in
+  List.iter
+    ~f:(fun (name, bases, metaclasses, body) -> add_special_class ~name ~bases ~metaclasses ~body)
+    [ "None", [], [], [];
+      "typing.Optional", [], [], [];
+      "typing.Undeclared", [], [], [];
+      "typing.NoReturn", [], [], [];
+      ( "typing.Type",
+        [Type.parametric "typing.Generic" (Concrete [Type.variable "typing._T"])],
+        [],
+        [] );
+      ( "typing.GenericMeta",
+        [],
+        [],
+        [ Define
             {
-              class_definition = definition;
-              methods = [];
-              successors = [];
-              explicit_attributes = Access.SerializableMap.empty;
-              implicit_attributes = Access.SerializableMap.empty;
-              is_test = false;
+              signature =
+                {
+                  name = Reference.create "typing.GenericMeta.__getitem__";
+                  parameters =
+                    [ { Parameter.name = "cls"; value = None; annotation = None }
+                      |> Node.create_with_default_location;
+                      { Parameter.name = "arg"; value = None; annotation = None }
+                      |> Node.create_with_default_location ];
+                  decorators = [];
+                  docstring = None;
+                  return_annotation = None;
+                  async = false;
+                  parent = Some (Reference.create "typing.GenericMeta");
+                };
+              body = [];
             }
-      in
-      Hashtbl.set class_definitions ~key:primitive ~data:definition
+          |> Node.create_with_default_location ] );
+      "typing.Generic", [], [Type.Primitive "typing.GenericMeta"], [];
+      ( "TypedDictionary",
+        [Type.parametric "typing.Mapping" (Concrete [Type.string; Type.Any])],
+        [],
+        Type.TypedDictionary.defines ~t_self_expression ~total:true );
+      ( "NonTotalTypedDictionary",
+        [Type.Primitive "TypedDictionary"],
+        [],
+        Type.TypedDictionary.defines ~t_self_expression ~total:false ) ]
 
 
-    let refine_class_definition annotation =
-      let refine { Resolution.class_definition = { Node.location; value = class_definition }; _ } =
-        let successors = TypeOrder.successors (module TypeOrderHandler) annotation in
-        let in_test =
-          let is_unit_test
-              { Resolution.class_definition = { Node.value = { Class.name; _ }; _ }; _ } =
-            Access.equal name (Access.create "unittest.TestCase")
-          in
-          let successor_classes =
-            successors
-            |> List.filter_map ~f:(Hashtbl.find class_definitions)
-          in
-          List.exists ~f:is_unit_test successor_classes
-        in
-        let explicit_attributes = Class.explicitly_assigned_attributes class_definition in
-        let implicit_attributes = Class.implicit_attributes ~in_test class_definition in
-        Hashtbl.set
-          class_definitions
-          ~key:annotation
-          ~data:{
-            class_definition = { Node.location; value = class_definition };
-            is_test = in_test;
-            successors;
-            explicit_attributes;
-            implicit_attributes;
-            methods = [];
-          }
-      in
-      Hashtbl.find class_definitions annotation
-      >>| refine
-      |> ignore
+let add_dummy_modules (module Handler : Handler) =
+  (* Register dummy module for `builtins` and `future.builtins`. *)
+  let builtins = Reference.create "builtins" in
+  Handler.register_module builtins (Ast.Module.create_implicit ~empty_stub:true ());
+  let future_builtins = Reference.create "future.builtins" in
+  Handler.register_module future_builtins (Ast.Module.create_implicit ~empty_stub:true ())
 
 
-    let register_alias ~handle ~key ~data =
-      DependencyHandler.add_alias_key ~handle key;
-      Hashtbl.set ~key ~data aliases
+let add_special_globals (module Handler : Handler) =
+  (* Add `None` constant to globals. *)
+  let annotation annotation =
+    Annotation.create_immutable ~global:true annotation |> Node.create_with_default_location
+  in
+  Handler.register_global
+    ?qualifier:None
+    ~reference:(Reference.create "None")
+    ~global:(annotation Type.none);
+  Handler.register_global
+    ?qualifier:None
+    ~reference:(Reference.create "...")
+    ~global:(annotation Type.Any)
 
 
-    let purge ?(debug = false) handles =
-      let purge_table_given_keys table keys =
-        List.iter ~f:(fun key -> Hashtbl.remove table key) keys
-      in
-      (* Dependents are handled differently from other keys, because in each other
-       * instance, the path is the only one adding entries to the key. However, we can have
-       *  both a.py and b.py import c.py, and thus have c.py in its keys. Therefore, when
-       * purging a.py, we need to take care not to remove the c -> b dependent relationship. *)
-      let purge_dependents keys =
-        let remove_path dependents =
-          List.filter
-            ~f:(fun dependent -> not (List.mem handles dependent ~equal:File.Handle.equal))
-            dependents
-        in
-        let dependents = dependencies.Dependencies.dependents in
-        List.iter
-          ~f:(fun key ->
-              Hashtbl.find dependents key
-              >>| remove_path
-              >>| (fun dependents_list -> Hashtbl.set ~key ~data:dependents_list dependents)
-              |> ignore)
-          keys
-      in
-      List.concat_map ~f:(fun handle -> DependencyHandler.get_function_keys ~handle) handles
-      |> purge_table_given_keys function_definitions;
-      List.concat_map ~f:(fun handle -> DependencyHandler.get_class_keys ~handle) handles
-      |> purge_table_given_keys class_definitions;
-      List.concat_map ~f:(fun handle -> DependencyHandler.get_alias_keys ~handle) handles
-      |> purge_table_given_keys aliases;
-      List.concat_map ~f:(fun handle -> DependencyHandler.get_global_keys ~handle) handles
-      |> purge_table_given_keys globals;
-      List.concat_map ~f:(fun handle -> DependencyHandler.get_dependent_keys ~handle) handles
-      |> purge_dependents;
-      DependencyHandler.clear_keys_batch handles;
-      List.map handles ~f:(fun handle -> Source.qualifier ~handle)
-      |> List.iter ~f:(Hashtbl.remove modules);
+let dependencies (module Handler : Handler) = Handler.dependencies
 
-      if debug then
-        TypeOrder.check_integrity (TypeOrder.handler order)
+let register_module (module Handler : Handler) ({ Source.qualifier; _ } as source) =
+  Handler.register_module qualifier (Module.create source)
 
 
-    let function_definitions =
-      Hashtbl.find function_definitions
-
-    let class_definition =
-      Hashtbl.find class_definitions
-
-    let register_protocol protocol =
-      Hash_set.add protocols protocol
-
-    let protocols () =
-      Hash_set.to_list protocols
-
-    let register_module ~qualifier ~local_mode ~handle ~stub ~statements =
-      let is_registered_empty_stub =
-        Hashtbl.find modules qualifier
-        >>| Module.empty_stub
-        |> Option.value ~default:false
-      in
-
-      let string =
-        Annotation.create_immutable ~global:true Type.string
-        |> Node.create_with_default_location
-      in
-      Hashtbl.set globals ~key:(qualifier @ (Access.create "__file__")) ~data:string;
-      Hashtbl.set globals ~key:(qualifier @ (Access.create "__name__")) ~data:string;
-
-      if not is_registered_empty_stub then
-        Hashtbl.set
-          ~key:qualifier
-          ~data:(
-            Module.create
-              ~qualifier
-              ~local_mode
-              ?handle
-              ~stub
-              statements)
-          modules
-
-    let is_module access =
-      Hashtbl.mem modules access
-
-    let module_definition access =
-      Hashtbl.find modules access
-
-    let in_class_definition_keys =
-      Hashtbl.mem class_definitions
-
-    let aliases =
-      Hashtbl.find aliases
-
-    let globals =
-      Hashtbl.find globals
-
-    let dependencies =
-      DependencyHandler.dependents
-
-    let local_mode _ =
-      None
-  end: Handler)
-
-
-let dependencies (module Handler: Handler) =
-  Handler.dependencies
-
-
-let register_module
-    (module Handler: Handler)
-    {
-      Source.qualifier;
-      handle;
-      statements;
-      metadata = { Source.Metadata.local_mode; _ };
-      _;
-    } =
+let register_implicit_submodules (module Handler : Handler) qualifier =
   let rec register_submodules = function
-    | [] ->
-        ()
-    | (_ :: tail) as reversed ->
-        let qualifier = List.rev reversed in
-        if not (Handler.is_module qualifier) then
-          Handler.register_module
-            ~handle:None
-            ~qualifier
-            ~local_mode
-            ~stub:false
-            ~statements:[];
-        register_submodules tail
+    | None -> ()
+    | Some qualifier ->
+        Handler.register_implicit_submodule qualifier;
+        register_submodules (Reference.prefix qualifier)
   in
-  Handler.register_module
-    ~qualifier
-    ~local_mode
-    ~handle:(Some handle)
-    ~stub:(File.Handle.is_stub handle)
-    ~statements;
-  if List.length qualifier > 1 then
-    register_submodules (List.rev qualifier |> List.tl_exn)
+  register_submodules (Reference.prefix qualifier)
 
 
-let register_class_definitions (module Handler: Handler) source =
-  let order = (module Handler.TypeOrderHandler : TypeOrder.Handler) in
-  let module Visit = Visit.MakeStatementVisitor(struct
-      type t = Type.Set.t
+let register_class_definitions (module Handler : Handler) source =
+  let order = (module Handler.TypeOrderHandler : ClassHierarchy.Handler) in
+  let module Visit = Visit.MakeStatementVisitor (struct
+    type t = Type.Primitive.Set.t
 
-      let visit_children _ =
-        true
+    let visit_children _ = true
 
-      let statement { Source.handle; _ } new_annotations = function
-        | { Node.location; value = Class ({ Class.name; _ } as definition); } ->
-            let primitive, _ =
-              Access.expression name
-              |> Type.create ~aliases:Handler.aliases
-              |> Type.split
-            in
-            Handler.DependencyHandler.add_class_key ~handle primitive;
-            let annotated = Annotated.Class.create { Node.location; value = definition } in
-
-            if Annotated.Class.is_protocol annotated then
-              Handler.register_protocol primitive;
-
-            Handler.set_class_definition
-              ~primitive
-              ~definition:{ Node.location; value = definition };
-            if not (TypeOrder.contains order primitive) then
-              TypeOrder.insert order primitive;
-            Set.add new_annotations primitive
-        | _ ->
-            new_annotations
-    end)
+    let statement { Source.qualifier; _ } new_annotations = function
+      | { Node.location; value = Class ({ Class.name; _ } as definition) } ->
+          let name = Reference.show name in
+          let primitive = name in
+          Handler.DependencyHandler.add_class_key ~qualifier name;
+          Handler.set_class_definition ~name ~definition:{ Node.location; value = definition };
+          if not (ClassHierarchy.contains order primitive) then
+            ClassHierarchy.insert order primitive;
+          Set.add new_annotations primitive
+      | _ -> new_annotations
+  end)
   in
-  Visit.visit Type.Set.empty source
+  Visit.visit Type.Primitive.Set.empty source
 
 
-let register_aliases (module Handler: Handler) sources =
-  Type.Cache.disable ();
-  let order = (module Handler.TypeOrderHandler : TypeOrder.Handler) in
-  let collect_aliases { Source.handle; statements; qualifier; _ } =
-    let rec visit_statement ~qualifier ?(in_class_body = false) aliases { Node.value; _ } =
-      let is_allowable_alias_annotation = function
-        | Some {
-            Node.value = Access [
-                Access.Identifier typing;
-                Access.Identifier typ;
-                Access.Identifier getitem;
-                Access.Call _;
-              ];
-            _;
-          } when Identifier.show typing = "typing"
-              && Identifier.show typ = "Type"
-              && Identifier.show getitem = "__getitem__" ->
-            true
-        | None ->
-            true
-        | _ ->
-            false
-      in
-      match value with
-      | Assign { Assign.target; annotation; value; _ }
-        when is_allowable_alias_annotation annotation ->
-          let target =
-            let access =
-              let access =
-                Expression.access target
-                |> Access.delocalize_qualified
-              in
-              if in_class_body then
-                access
-              else
-                qualifier @ access
-            in
-            { target with Node.value = Access access }
-          in
-          begin
-            match Node.value value with
-            | Expression.Access _ ->
-                let value = Expression.delocalize value in
-                let value_annotation = Type.create ~aliases:Handler.aliases value in
-                let target_annotation = Type.create ~aliases:Handler.aliases target in
-                if not (Type.equal target_annotation Type.Top ||
-                        Type.equal value_annotation Type.Top ||
-                        Type.equal value_annotation target_annotation) then
-                  (handle, target, value) :: aliases
-                else
-                  aliases
-            | _ ->
-                aliases
-          end
-      | Class { Class.name; body; _ } ->
-          List.fold body ~init:aliases ~f:(visit_statement ~qualifier:name ~in_class_body:true)
-      | Import { Import.from = Some from; imports } ->
-          let from =
-            match Access.show from with
-            | "future.builtins"
-            | "builtins" -> []
-            | _ -> from
-          in
-          let import_to_alias { Import.name; alias } =
-            let qualified_name =
-              match alias with
-              | None -> Access.expression (qualifier @ name)
-              | Some alias -> Access.expression (qualifier @ alias)
-            in
-            [handle, qualified_name, Access.expression (from @ name)]
-          in
-          List.rev_append (List.concat_map ~f:import_to_alias imports) aliases
-      | _ ->
-          aliases
-    in
-    List.fold ~init:[] ~f:(visit_statement ~qualifier) statements
-  in
-  let register_alias (any_changed, unresolved) (handle, target, value) =
-    let target_annotation = Type.create ~aliases:Handler.aliases target in
-    let value_annotation =
-      match Type.create ~aliases:Handler.aliases value with
-      | Type.Variable variable ->
-          let name =
-            Expression.access target
-            |> Access.show
-            |> Identifier.create
-          in
-          Type.Variable { variable with variable = name }
-      | annotation ->
-          annotation
-    in
-    let target_primitive, _ = Type.split target_annotation in
-    let module TrackedTransform = Type.Transform.Make(struct
-        type state = bool
-
-        let visit_children _ = function
-          | Type.Optional Bottom -> false
-          | _ -> true
-
-        let visit sofar annotation =
-          match annotation with
-          | Type.Parametric { name = primitive; _ }
-          | Primitive primitive ->
-              let access =
-                Type.expression (Type.Primitive primitive)
-                |> Expression.access
-              in
-              if Module.from_empty_stub ~access ~module_definition:Handler.module_definition then
-                sofar, Type.Object
-              else if TypeOrder.contains order (Primitive primitive) then
-                sofar, annotation
-              else
-                false, annotation
-          | Bottom
-          | Deleted
-          | Top ->
-              false, annotation
-          | _ ->
-              sofar, annotation
-      end)
-    in
-    let all_valid, value_annotation = TrackedTransform.visit true value_annotation in
-    if all_valid && not (TypeOrder.contains order target_primitive) then
-      begin
-        Handler.register_alias ~handle ~key:target_annotation ~data:value_annotation;
-        (true, unresolved)
-      end
-    else
-      (any_changed, (handle, target, value) :: unresolved)
-  in
-  let rec resolve_aliases unresolved =
-    if List.is_empty unresolved then
-      ()
-    else
-      let (any_changed, unresolved) = List.fold ~init:(false, []) ~f:register_alias unresolved in
-      if any_changed then
-        resolve_aliases unresolved
-      else
-        let show_unresolved (handle, target, value) =
-          Log.debug
-            "Unresolved alias %a:%a <- %a"
-            File.Handle.pp handle
-            Expression.pp target
-            Expression.pp value
+let collect_aliases (module Handler : Handler) { Source.statements; qualifier; _ } =
+  let rec visit_statement ~qualifier ?(in_class_body = false) aliases { Node.value; _ } =
+    match value with
+    | Assign { Assign.target = { Node.value = Name target; _ }; annotation; value; _ }
+      when Expression.is_simple_name target -> (
+        let target =
+          let target = Expression.name_to_reference_exn target |> Reference.sanitize_qualified in
+          if in_class_body then target else Reference.combine qualifier target
         in
-        List.iter ~f:show_unresolved unresolved
+        let target_annotation =
+          Type.create
+            ~aliases:Handler.aliases
+            (Expression.from_reference ~location:Location.Reference.any target)
+        in
+        match Node.value value, annotation with
+        | ( _,
+            Some
+              {
+                Node.value =
+                  Call
+                    {
+                      callee =
+                        {
+                          Node.value =
+                            Name
+                              (Name.Attribute
+                                {
+                                  base =
+                                    {
+                                      Node.value =
+                                        Name
+                                          (Name.Attribute
+                                            {
+                                              base =
+                                                { Node.value = Name (Name.Identifier "typing"); _ };
+                                              attribute = "Type";
+                                              _;
+                                            });
+                                      _;
+                                    };
+                                  attribute = "__getitem__";
+                                  _;
+                                });
+                          _;
+                        };
+                      arguments =
+                        [ {
+                            Call.Argument.value =
+                              {
+                                Node.value =
+                                  Call
+                                    {
+                                      callee =
+                                        {
+                                          Node.value =
+                                            Name
+                                              (Name.Attribute
+                                                {
+                                                  base =
+                                                    {
+                                                      Node.value =
+                                                        Name
+                                                          (Name.Attribute
+                                                            {
+                                                              base =
+                                                                {
+                                                                  Node.value =
+                                                                    Name
+                                                                      (Name.Identifier
+                                                                        "mypy_extensions");
+                                                                  _;
+                                                                };
+                                                              attribute = "TypedDict";
+                                                              _;
+                                                            });
+                                                      _;
+                                                    };
+                                                  attribute = "__getitem__";
+                                                  _;
+                                                });
+                                          _;
+                                        };
+                                      _;
+                                    };
+                                _;
+                              };
+                            _;
+                          } ];
+                    };
+                _;
+              } ) ->
+            if not (Type.is_top target_annotation) then
+              { UnresolvedAlias.qualifier; target; value } :: aliases
+            else
+              aliases
+        | ( _,
+            Some
+              ( {
+                  Node.value =
+                    Name
+                      (Name.Attribute
+                        {
+                          base = { Node.value = Name (Name.Identifier "typing"); _ };
+                          attribute = "Any";
+                          _;
+                        });
+                  _;
+                } as value ) ) ->
+            if not (Type.is_top target_annotation) then
+              { UnresolvedAlias.qualifier; target; value } :: aliases
+            else
+              aliases
+        | Call _, None
+        | Name _, None -> (
+            let value = Expression.delocalize value in
+            match Type.Variable.parse_declaration value with
+            | Some variable ->
+                Handler.register_alias
+                  ~qualifier
+                  ~key:(Reference.show target)
+                  ~data:(Type.VariableAlias variable);
+                aliases
+            | None ->
+                let value_annotation = Type.create ~aliases:Handler.aliases value in
+                if
+                  not
+                    ( Type.is_top target_annotation
+                    || Type.is_top value_annotation
+                    || Type.equal value_annotation target_annotation )
+                then
+                  { UnresolvedAlias.qualifier; target; value } :: aliases
+                else
+                  aliases )
+        | _ -> aliases )
+    | Class { Class.name; body; _ } ->
+        List.fold body ~init:aliases ~f:(visit_statement ~qualifier:name ~in_class_body:true)
+    | Import { Import.from = Some _; imports = [{ Import.name; _ }] }
+      when Reference.show name = "*" ->
+        (* Don't register x.* as an alias when a user writes `from x import *`. *)
+        aliases
+    | Import { Import.from; imports } ->
+        let from =
+          match from >>| Reference.show with
+          | None
+          | Some "future.builtins"
+          | Some "builtins" ->
+              Reference.empty
+          | Some from -> Reference.create from
+        in
+        let import_to_alias { Import.name; alias } =
+          let qualified_name =
+            match alias with
+            | None -> Reference.combine qualifier name
+            | Some alias -> Reference.combine qualifier alias
+          in
+          let original_name = Reference.combine from name in
+          (* A module might import T and define a T that shadows it. In this case, we do not want
+             to create the alias. *)
+          if
+            ClassHierarchy.contains
+              (module Handler.TypeOrderHandler)
+              (Reference.show qualified_name)
+          then
+            []
+          else
+            match Reference.as_list qualified_name, Reference.as_list original_name with
+            | [single_identifier], [typing; identifier]
+              when String.equal typing "typing" && String.equal single_identifier identifier ->
+                (* builtins has a bare qualifier. Don't export bare aliases from typing. *)
+                []
+            | _ ->
+                [ {
+                    UnresolvedAlias.qualifier;
+                    target = qualified_name;
+                    value =
+                      Expression.from_reference ~location:Location.Reference.any original_name;
+                  } ]
+        in
+        List.rev_append (List.concat_map ~f:import_to_alias imports) aliases
+    | _ -> aliases
   in
-  List.concat_map ~f:collect_aliases sources
-  |> resolve_aliases;
+  List.fold ~init:[] ~f:(visit_statement ~qualifier) statements
+
+
+let resolve_alias (module Handler : Handler) { UnresolvedAlias.qualifier; target; value } =
+  let order = (module Handler.TypeOrderHandler : ClassHierarchy.Handler) in
+  let target_primitive_name = Reference.show target in
+  let value_annotation =
+    match Type.create ~aliases:Handler.aliases value with
+    | Type.Variable variable ->
+        if Type.Variable.Unary.contains_subvariable variable then
+          Type.Any
+        else
+          Type.Variable { variable with variable = Reference.show target }
+    | annotation -> annotation
+  in
+  let dependencies = String.Hash_set.create () in
+  let module TrackedTransform = Type.Transform.Make (struct
+    type state = unit
+
+    let visit_children_before _ = function
+      | Type.Optional Bottom -> false
+      | _ -> true
+
+
+    let visit_children_after = false
+
+    let visit _ annotation =
+      let new_state, transformed_annotation =
+        match annotation with
+        | Type.Parametric { name = primitive; _ }
+        | Primitive primitive ->
+            let reference =
+              match Node.value (Type.expression (Type.Primitive primitive)) with
+              | Expression.Name name when Expression.is_simple_name name ->
+                  Expression.name_to_reference_exn name
+              | _ -> Reference.create "typing.Any"
+            in
+            let module_definition = Handler.module_definition in
+            if Module.from_empty_stub ~reference ~module_definition then
+              (), Type.Any
+            else if
+              ClassHierarchy.contains order primitive
+              || Handler.is_module (Reference.create primitive)
+            then
+              (), annotation
+            else
+              let _ = Hash_set.add dependencies primitive in
+              (), annotation
+        | _ -> (), annotation
+      in
+      { Type.Transform.transformed_annotation; new_state }
+  end)
+  in
+  let _, annotation = TrackedTransform.visit () value_annotation in
+  if Hash_set.is_empty dependencies then
+    Result.Ok
+      {
+        ResolvedAlias.qualifier;
+        name = target_primitive_name;
+        annotation = Type.TypeAlias annotation;
+      }
+  else
+    Result.Error (Hash_set.to_list dependencies)
+
+
+let register_aliases (module Handler : Handler) sources =
+  Type.Cache.disable ();
+  let register_aliases unresolved =
+    let resolution_dependency = String.Table.create () in
+    let worklist = Queue.create () in
+    Queue.enqueue_all worklist unresolved;
+    let rec fixpoint () =
+      match Queue.dequeue worklist with
+      | None -> ()
+      | Some unresolved ->
+          let _ =
+            match resolve_alias (module Handler) unresolved with
+            | Result.Error dependencies ->
+                let add_dependency =
+                  let update_dependency = function
+                    | None -> [unresolved]
+                    | Some entries -> unresolved :: entries
+                  in
+                  String.Table.update resolution_dependency ~f:update_dependency
+                in
+                List.iter dependencies ~f:add_dependency
+            | Result.Ok ({ ResolvedAlias.name; _ } as resolved) -> (
+                ResolvedAlias.register (module Handler) resolved;
+                match Hashtbl.find resolution_dependency name with
+                | Some entries ->
+                    Queue.enqueue_all worklist entries;
+                    Hashtbl.remove resolution_dependency name
+                | None -> () )
+          in
+          fixpoint ()
+    in
+    fixpoint ()
+  in
+  List.concat_map ~f:(collect_aliases (module Handler)) sources |> register_aliases;
   Type.Cache.enable ()
 
 
-let register_globals
-    (module Handler: Handler)
-    resolution
-    ({ Source.handle; qualifier; statements; _ } as source) =
+let register_undecorated_functions
+    (module Handler : Handler)
+    (resolution : GlobalResolution.t)
+    source
+  =
+  let module Visit = Visit.MakeStatementVisitor (struct
+    type t = unit
 
-  let qualified_access access =
-    let access =
-      match access with
-      | (Access.Identifier builtins) :: tail when Identifier.show builtins = "builtins" -> tail
-      | _ -> access
-    in
-    Access.delocalize_qualified access
-  in
+    let visit_children = function
+      | { Node.value = Define _; _ } ->
+          (* inner functions are not globals *)
+          false
+      | _ -> true
 
-  (* Register meta annotations for classes. *)
-  let module Visit = Visit.MakeStatementVisitor(struct
-      type t = unit
 
-      let visit_children _ =
-        true
-
-      let statement { Source.handle; _ } _ = function
-        | { Node.location; value = Class { Class.name; _ } } ->
-            (* Register meta annotation. *)
-            let primitive, _ =
-              Node.create ~location (Access name)
-              |> Resolution.parse_annotation resolution
-              |> Type.split
-            in
-            let global =
-              Annotation.create_immutable
-                ~global:true
-                ~original:(Some Type.Top)
-                (Type.meta primitive)
-              |> Node.create ~location
-            in
-            Handler.register_global ~handle ~access:(qualified_access name) ~global
-        | _ ->
+    let statement _ _ { Node.value; location } =
+      match value with
+      | Class definition -> (
+          let annotation =
+            AnnotatedClass.create { Node.value = definition; location }
+            |> AnnotatedClass.inferred_callable_type ~resolution
+          in
+          match annotation with
+          | Some { Type.Callable.implementation; overloads = []; _ } ->
+              Handler.register_undecorated_function
+                ~reference:definition.Class.name
+                ~annotation:implementation
+          | _ -> () )
+      | Define ({ Define.signature = { Statement.Define.name; _ }; _ } as define) ->
+          if Define.is_overloaded_method define then
             ()
-    end)
+          else
+            Handler.register_undecorated_function
+              ~reference:name
+              ~annotation:(Annotated.Callable.create_overload ~resolution define)
+      | _ -> ()
+  end)
   in
   Visit.visit () source
-  |> ignore;
 
-  let rec visit statement =
-    match statement with
-    | { Node.value = If { If.body; orelse; _ }; _ } ->
-        (* TODO(T28732125): Properly take an intersection here. *)
-        List.iter ~f:visit body;
-        List.iter ~f:visit orelse
-    | _ ->
-        let global =
-          match statement with
-          | {
-            Node.location;
-            value = Assign { Assign.target; annotation = None; value; _ };
-          } ->
-              begin
-                try
-                  match target.Node.value, (Resolution.resolve_literal resolution value) with
-                  | Access access, annotation ->
-                      let global =
-                        Annotation.create_immutable
-                          ~global:true
-                          ~original:(Some Type.Top)
-                          annotation
-                        |> Node.create ~location
-                      in
-                      Some (access, global)
-                  | _ ->
-                      None
-                with _ ->
-                match target.Node.value with
-                | Access access ->
-                    (* If we have a global of the form x = os.path.join('a', 'b'), still add x. *)
-                    let global =
-                      Annotation.create_immutable ~global:true Type.Top
-                      |> Node.create ~location
-                    in
-                    Some (access, global)
-                | _ ->
-                    None
-              end
-          | {
-            Node.location;
-            value = Assign {
-                Assign.target = { Node.value = Access access; _ };
-                annotation = Some annotation;
-                _;
-              };
-          } ->
-              let global =
-                Annotation.create_immutable
-                  ~global:true
-                  (Type.create ~aliases:Handler.aliases annotation)
-                |> Node.create ~location
-              in
-              Some (access, global)
-          | _ ->
+
+let register_values
+    (module Handler : Handler)
+    (resolution : GlobalResolution.t)
+    ({ Source.statements; qualifier; _ } as source)
+  =
+  let qualified_reference reference =
+    let reference =
+      let builtins = Reference.create "builtins" in
+      if Reference.is_strict_prefix ~prefix:builtins reference then
+        Reference.drop_prefix ~prefix:builtins reference
+      else
+        reference
+    in
+    Reference.sanitize_qualified reference
+  in
+  let module CollectCallables = Visit.MakeStatementVisitor (struct
+    type t = Type.Callable.t Node.t list Reference.Map.t
+
+    let visit_children = function
+      | { Node.value = Define _; _ } ->
+          (* inner functions are not globals *)
+          false
+      | _ -> true
+
+
+    let statement { Source.qualifier; _ } callables statement =
+      let collect_callable ~name callables callable =
+        Handler.DependencyHandler.add_function_key ~qualifier name;
+
+        (* Register callable global. *)
+        let change callable = function
+          | None -> Some [callable]
+          | Some existing -> Some (existing @ [callable])
+        in
+        Map.change callables name ~f:(change callable)
+      in
+      match statement with
+      | {
+       Node.location;
+       value = Define ({ Statement.Define.signature = { name; parent; _ }; _ } as define);
+      } ->
+          let parent =
+            if Define.is_class_method define then
+              parent
+              >>= fun reference -> Some (Type.Primitive (Reference.show reference)) >>| Type.meta
+            else
               None
-        in
-        global
-        >>| (fun (access, global) ->
-            let access = qualified_access (qualifier @ access) in
-            Handler.register_global ~handle ~access ~global)
-        |> ignore
-  in
-  List.iter ~f:visit statements
-
-
-let connect_type_order (module Handler: Handler) resolution source =
-  let module Visit = Visit.MakeStatementVisitor(struct
-      type t = unit
-
-      let visit_children _ =
-        true
-
-      let statement _ _ = function
-        | { Node.location; value = Class definition } ->
-            connect_definition
-              ~resolution
-              ~definition:(Node.create ~location definition)
-        | _ ->
-            ()
-    end)
-  in
-  Visit.visit () source
-  |> ignore
-
-
-let register_dependencies (module Handler: Handler) source =
-  let module Visit = Visit.MakeStatementVisitor(struct
-      type t = unit
-
-      let visit_children _ =
-        true
-
-      let statement { Source.handle; _ } _ = function
-        | { Node.value = Import { Import.from; imports }; _ } ->
-            let imports =
-              match from with
-              (* If analyzing from x import y, only add x to the dependencies.
-                 Otherwise, add all dependencies. *)
-              | None -> imports |> List.map ~f:(fun { Import.name; _ } -> name)
-              | Some base_module -> [base_module]
-            in
-            List.iter
-              ~f:(fun dependency -> Handler.register_dependency ~handle ~dependency)
-              imports
-        | _ ->
-            ()
-    end)
-  in
-  Visit.visit () source
-
-
-let register_functions (module Handler: Handler) resolution ({ Source.handle; _ } as source) =
-  let module CollectCallables = Visit.MakeStatementVisitor(struct
-      type t = ((Type.Callable.t Node.t) list) Access.Map.t
-
-      let visit_children _ =
-        true
-
-      let statement { Source.handle; _ } callables statement =
-        let collect_callable
-            ~parent
-            ~location
-            callables
-            ({ Define.name; _ } as define) =
-
-          Handler.register_definition
-            ~handle
-            ~name_override:name
-            (Node.create ~location define);
-
-          (* Register callable global. *)
-          let callable =
-            (* Only omit `self` for class methods in the environment.When accessed globally,
-               Instance methods require the calling class to be passed in. *)
-            let parent =
-              if Define.is_class_method define then
-                parent
-                >>| (fun access -> Node.create ~location (Expression.Access access))
-                >>| Resolution.parse_annotation resolution
-                >>| Type.meta
-              else
-                None
-            in
-            Annotated.Callable.create ~parent [define] ~resolution
-            |> Node.create ~location
           in
-          let change callable = function
-            | None -> Some [callable]
-            | Some existing -> Some (existing @ [callable])
-          in
-          Map.change callables name ~f:(change callable)
-        in
-        let is_property define =
-          String.Set.exists
-            ~f:(Statement.Define.has_decorator define)
-            Recognized.property_decorators
-        in
-        match statement with
-        | { Node.location; value = Define ({ Statement.Define.parent; _ } as define) }
-          when not (is_property define) ->
-            Annotated.Callable.apply_decorators ~resolution ~define
-            |> Annotated.Define.create
-            |> Annotated.Define.define
-            |> collect_callable ~parent ~location callables
-
-        | _ ->
-            callables
-    end)
+          Annotated.Callable.apply_decorators ~resolution ~location define
+          |> (fun overload -> [Define.is_overloaded_method define, overload])
+          |> Annotated.Callable.create ~resolution ~parent ~name:(Reference.show name)
+          |> Node.create ~location
+          |> collect_callable ~name callables
+      | _ -> callables
+  end)
   in
-
-  let register_callables handle ~key ~data =
+  let register_callables ~key ~data =
     assert (not (List.is_empty data));
-    let location =
-      List.hd_exn data
-      |> Node.location
-    in
+    let location = List.hd_exn data |> Node.location in
     data
     |> List.map ~f:Node.value
     |> Type.Callable.from_overloads
     >>| (fun callable -> Type.Callable callable)
     >>| Annotation.create_immutable ~global:true
     >>| Node.create ~location
-    >>| (fun global -> Handler.register_global ~handle ~access:key ~global)
+    >>| (fun global -> Handler.register_global ~qualifier ~reference:key ~global)
     |> ignore
   in
-  CollectCallables.visit Access.Map.empty source
-  |> Map.iteri ~f:(register_callables handle)
+  CollectCallables.visit Reference.Map.empty source |> Map.iteri ~f:register_callables;
 
+  (* Register meta annotations for classes. *)
+  let module Visit = Visit.MakeStatementVisitor (struct
+    type t = unit
 
-let infer_implementations (module Handler: Handler) resolution ~implementing_classes ~protocol =
-  let module Edge = TypeOrder.Edge in
-  let open Annotated in
+    let visit_children _ = true
 
-  Resolution.class_definition resolution protocol
-  >>| (fun protocol_definition ->
-      let protocol_definition = Class.create protocol_definition in
-      let implementations =
-        let classes_to_analyze =
-          (* Get all implementing classes. *)
-          let names =
-            Class.methods protocol_definition ~resolution
-            |> List.map ~f:Class.Method.name
-            |> List.map ~f:(fun access -> [List.last_exn access])
+    let statement { Source.qualifier; _ } _ = function
+      | { Node.location; value = Class { Class.name; _ } } ->
+          (* Register meta annotation. *)
+          let primitive = Type.Primitive (Reference.show name) in
+          let global =
+            Annotation.create_immutable
+              ~global:true
+              ~original:(Some Type.Top)
+              (Type.meta primitive)
+            |> Node.create ~location
           in
-          if List.is_empty names then
-            let annotations = Handler.TypeOrderHandler.annotations () in
-            Handler.TypeOrderHandler.keys ()
-            |> List.map ~f:(Handler.TypeOrderHandler.find_unsafe annotations)
-          else
-            let get_implementing_methods method_name =
-              implementing_classes ~method_name
-              |> Option.value ~default:[]
-              |> List.map ~f:(fun class_name -> Type.primitive (Statement.Access.show class_name))
+          Handler.register_global ~qualifier ~reference:(qualified_reference name) ~global
+      | _ -> ()
+  end)
+  in
+  Visit.visit () source |> ignore;
+  let rec visit statement =
+    match statement with
+    | { Node.value = If { If.body; orelse; _ }; _ } ->
+        (* TODO(T28732125): Properly take an intersection here. *)
+        List.iter ~f:visit body;
+        List.iter ~f:visit orelse
+    | { Node.value = Assign { Assign.target; annotation; value; _ }; _ } ->
+        let annotation, explicit =
+          match annotation with
+          | Some ({ Node.value; _ } as annotation) ->
+              let annotation =
+                match value with
+                | Name name when Expression.is_simple_name name -> Expression.delocalize annotation
+                | _ -> annotation
+              in
+              Type.create ~aliases:Handler.aliases annotation, true
+          | None ->
+              let annotation =
+                try GlobalResolution.resolve_literal resolution value with
+                | _ -> Type.Top
+              in
+              annotation, false
+        in
+        let rec register_assign ~target ~annotation =
+          let register ~location reference annotation =
+            let reference = qualified_reference (Reference.combine qualifier reference) in
+            (* Don't register attributes or chained accesses as globals *)
+            if Reference.length (Reference.drop_prefix ~prefix:qualifier reference) = 1 then
+              let register_global global =
+                Node.create ~location global
+                |> fun global -> Handler.register_global ~qualifier ~reference ~global
+              in
+              let exists = Option.is_some (Handler.globals reference) in
+              if explicit then
+                Annotation.create_immutable ~global:true annotation |> register_global
+              else if not exists then
+                (* Treat literal globals as having been explicitly annotated. *)
+                let original =
+                  if Type.is_partially_typed annotation then Some Type.Top else None
+                in
+                Annotation.create_immutable ~global:true ~original annotation |> register_global
+              else
+                ()
+          in
+          match target.Node.value, annotation with
+          | Name name, _ when Expression.is_simple_name name ->
+              register
+                ~location:target.Node.location
+                (Expression.name_to_reference_exn name)
+                annotation
+          | Tuple elements, Type.Tuple (Type.Bounded (Concrete parameters))
+            when List.length elements = List.length parameters ->
+              List.map2_exn
+                ~f:(fun target annotation -> register_assign ~target ~annotation)
+                elements
+                parameters
+              |> ignore
+          | Tuple elements, Type.Tuple (Type.Unbounded parameter) ->
+              List.map ~f:(fun target -> register_assign ~target ~annotation:parameter) elements
+              |> ignore
+          | Tuple elements, _ ->
+              List.map ~f:(fun target -> register_assign ~target ~annotation:Type.Top) elements
+              |> ignore
+          | _ -> ()
+        in
+        register_assign ~target ~annotation
+    | _ -> ()
+  in
+  List.iter ~f:visit statements
+
+
+let connect_type_order (module Handler : Handler) resolution source =
+  let module Visit = Visit.MakeStatementVisitor (struct
+    type t = unit
+
+    let visit_children _ = true
+
+    let statement _ _ = function
+      | { Node.location; value = Class definition } ->
+          connect_definition
+            (module Handler)
+            ~resolution
+            ~definition:(Node.create ~location definition)
+      | _ -> ()
+  end)
+  in
+  Visit.visit () source |> ignore
+
+
+let register_dependencies (module Handler : Handler) source =
+  let module Visit = Visit.MakeStatementVisitor (struct
+    type t = unit
+
+    let visit_children _ = true
+
+    let statement { Source.qualifier; _ } _ = function
+      | { Node.value = Import { Import.from; imports }; _ } ->
+          let imports =
+            let imports =
+              match from with
+              (* If analyzing from x import y, only add x to the dependencies. Otherwise, add all
+                 dependencies. *)
+              | None -> imports |> List.map ~f:(fun { Import.name; _ } -> name)
+              | Some base_module -> [base_module]
             in
-            List.concat_map ~f:get_implementing_methods names
-            |> List.dedup_and_sort ~compare:Type.compare
-        in
-        let implements annotation =
-          Handler.class_definition annotation
-          >>| (fun { class_definition; _ } -> class_definition)
-          >>| Class.create
-          >>| (fun definition ->
-              not (Class.is_protocol definition) &&
-              Class.implements ~resolution ~protocol:protocol_definition definition)
-          |> Option.value ~default:false
-        in
-        List.filter ~f:implements classes_to_analyze
-      in
-
-      (* Get edges to protocol. *)
-      let edges =
-        let add_edge sofar source =
-          (* Even if `object` technically implements a protocol, do not add cyclic edge. *)
-          if Type.equal source protocol || Type.equal source Type.Object then
-            sofar
-          else
-            Set.add sofar { Edge.source; target = protocol }
-        in
-        List.fold ~init:Edge.Set.empty ~f:add_edge implementations
-      in
-      Log.log
-        ~section:`Protocols
-        "Found implementations for protocol %a: %s"
-        Type.pp protocol
-        (List.map ~f:Type.show implementations |> String.concat ~sep:", ");
-      edges)
-  |> Option.value ~default:Edge.Set.empty
-
-
-let infer_protocol_edges
-    ~handler:((module Handler: Handler) as handler)
-    resolution
-    ~classes_to_infer =
-  let module Edge = TypeOrder.Edge in
-  Log.info "Inferring protocol implementations...";
-  let protocols =
-    (* Skip useless protocols for better performance. *)
-    let skip_protocol protocol =
-      match Handler.class_definition protocol with
-      | Some { class_definition = protocol_definition; _ } ->
-          let protocol_definition = Annotated.Class.create protocol_definition in
-          let whitelisted = ["typing.Hashable"] in
-          let name = Annotated.Class.name protocol_definition |> Expression.Access.show in
-          List.is_empty (Annotated.Class.methods protocol_definition ~resolution) ||
-          List.mem ~equal:String.equal whitelisted name
-      | _ ->
-          true
-    in
-    List.filter ~f:(fun protocol -> not (skip_protocol protocol)) (Handler.protocols ())
-  in
-  let implementing_classes =
-    let methods_to_implementing_classes =
-      let open Statement in
-      let protocol_methods =
-        let names_of_methods protocol =
-          Handler.class_definition protocol
-          >>| (fun { class_definition; _ } -> class_definition)
-          >>| Annotated.Class.create
-          >>| Annotated.Class.methods ~resolution
-          >>| List.map ~f:Annotated.Class.Method.name
-          >>| List.map ~f:(fun name -> [List.last_exn name])
-          |> Option.value ~default:[]
-        in
-        List.concat_map ~f:names_of_methods protocols
-        |> Access.Set.of_list
-      in
-      let annotations = Handler.TypeOrderHandler.annotations () in
-      let add_type_methods methods_to_implementing_classes index =
-        let class_definition =
-          Handler.TypeOrderHandler.find_unsafe annotations index
-          |> Handler.class_definition
-        in
-        match class_definition with
-        | None ->
-            methods_to_implementing_classes
-        | Some { class_definition = { Node.value = { Class.name = class_name; body; _ }; _ }; _ } ->
-            (* TODO(T30499509): Rely on existing class defines instead of repeating work. *)
-            let add_method methods_to_implementing_classes { Node.value = statement; _ } =
-              match statement with
-              | Define { Define.name;  _ } ->
-                  let method_name = [List.last_exn name] in
-                  if Set.mem protocol_methods method_name then
-                    let classes =
-                      match Map.find methods_to_implementing_classes method_name with
-                      | Some classes -> class_name :: classes
-                      | None -> [class_name]
-                    in
-                    Map.set methods_to_implementing_classes ~key:method_name ~data:classes
-                  else
-                    methods_to_implementing_classes
-              | _ ->
-                  methods_to_implementing_classes
+            let qualify_builtins import =
+              match Reference.single import with
+              | Some "builtins" -> Reference.empty
+              | _ -> import
             in
-            List.fold body ~f:add_method ~init:methods_to_implementing_classes
-      in
-      List.fold classes_to_infer ~f:add_type_methods ~init:Access.Map.empty
-    in
-    fun ~method_name -> Map.find methods_to_implementing_classes method_name
+            List.map imports ~f:qualify_builtins
+          in
+          List.iter
+            ~f:(fun dependency -> Handler.register_dependency ~qualifier ~dependency)
+            imports
+      | _ -> ()
+  end)
   in
-  let add_protocol_edges edges protocol =
-    infer_implementations handler resolution ~implementing_classes ~protocol
-    |> Set.union edges
-  in
-  List.fold ~init:TypeOrder.Edge.Set.empty ~f:add_protocol_edges protocols
+  Visit.visit () source
 
 
-let infer_protocols
-    ?classes_to_infer
-    ~handler:((module Handler: Handler) as handler)
-    resolution
-    () =
-  let timer = Timer.start () in
-  let classes_to_infer =
-    match classes_to_infer with
-    | Some classes ->
-        List.filter_map
-          classes
-          ~f:(Handler.TypeOrderHandler.find (Handler.TypeOrderHandler.indices ()))
-    | None ->
-        Handler.TypeOrderHandler.keys ()
-  in
-  infer_protocol_edges ~handler resolution ~classes_to_infer
-  |> Set.iter ~f:(fun { TypeOrder.Edge.source; target } ->
-      TypeOrder.connect
-        (module Handler.TypeOrderHandler)
-        ~predecessor:source
-        ~successor:target);
-
-  Statistics.performance ~name:"inferred protocol implementations" ~timer ()
-
-
-module Builder = struct
-  let create () =
-    let function_definitions = Access.Table.create () in
-    let class_definitions = Type.Table.create () in
-    let protocols = Type.Hash_set.create () in
-    let modules = Access.Table.create () in
-    let order = TypeOrder.Builder.default () in
-    let aliases = Type.Table.create () in
-    let globals = Access.Table.create () in
-    let dependencies = Dependencies.create () in
-
-    (* Register dummy module for `builtins` and `future.builtins`. *)
-    let builtins = Access.create "builtins" in
-    Hashtbl.set
-      modules
-      ~key:builtins
-      ~data:(
-        Ast.Module.create
-          ~qualifier:builtins
-          ~local_mode:Ast.Source.PlaceholderStub
-          ~stub:true
-          []);
-    let future_builtins = Access.create "future.builtins" in
-    Hashtbl.set
-      modules
-      ~key:future_builtins
-      ~data:(
-        Ast.Module.create
-          ~qualifier:future_builtins
-          ~local_mode:Ast.Source.PlaceholderStub
-          ~stub:true
-          []);
-
-    (* Add `None` constant to globals. *)
-    let annotation annotation =
-      Annotation.create_immutable ~global:true annotation
-      |> Node.create_with_default_location
+let propagate_nested_classes (module Handler : Handler) source =
+  let propagate ~qualifier ({ Statement.Class.name; _ } as definition) successors =
+    let nested_class_names { Statement.Class.name; body; _ } =
+      let extract_classes = function
+        | { Node.value = Class { name = nested_name; _ }; _ } ->
+            Some (Reference.drop_prefix nested_name ~prefix:name, nested_name)
+        | _ -> None
+      in
+      List.filter_map ~f:extract_classes body
     in
-    Hashtbl.set globals ~key:(Access.create "None") ~data:(annotation Type.none);
-    Hashtbl.set globals
-      ~key:[Access.Identifier (Identifier.create "...")]
-      ~data:(annotation Type.Object);
-
-    (* Add classes for `typing.Optional` and `typing.Undeclared` that are currently not encoded
-       in the stubs. *)
-    let add_special_class ~name ~bases ~body =
-      let definition =
-        {
-          Class.name = Access.create name;
-          bases;
-          body;
-          decorators = [];
-          docstring = None;
-        }
-      in
-      let successors =
-        let successor { Argument.value; _ } = Type.create value ~aliases:(fun _ -> None) in
-        (List.map bases ~f:successor) @ [Type.Object]
-      in
-      Hashtbl.set
-        ~key:(Type.primitive name)
-        ~data:{
-          Resolution.class_definition = Node.create_with_default_location definition;
-          methods = [];
-          successors;
-          explicit_attributes = Access.SerializableMap.empty;
-          implicit_attributes = Access.SerializableMap.empty;
-          is_test = false;
-        }
-        class_definitions;
+    let create_alias added_sofar (stripped_name, full_name) =
+      let alias = Reference.combine name stripped_name in
+      if List.exists added_sofar ~f:(Reference.equal alias) then
+        added_sofar
+      else
+        let primitive name = Type.Primitive (Reference.show name) in
+        Handler.register_alias
+          ~qualifier
+          ~key:(Reference.show alias)
+          ~data:(Type.TypeAlias (primitive full_name));
+        alias :: added_sofar
     in
-    List.iter
-      ~f:(fun (name, bases, body) -> add_special_class ~name ~bases ~body)
-      [
-        "None", [], [];
-        "typing.Optional", [], [];
-        "typing.Undeclared", [], [];
-        "typing.NoReturn", [], [];
-        "typing.Type",
-        [
-          {
-            Argument.name = None;
-            value = Type.parametric "typing.Generic" [Type.variable "typing._T"] |> Type.expression
-          };
-        ],
-        [];
-        "typing.Generic",
-        [],
-        [
-          Define {
-            Define.name = Access.create "typing.Generic.__getitem__";
-            parameters = [
-              { Parameter.name = Identifier.create "*args"; value = None; annotation = None}
-              |> Node.create_with_default_location;
-            ];
-            body = [];
-            decorators = [];
-            docstring = None;
-            return_annotation = None;
-            async = false;
-            parent = Some (Access.create "typing.Generic");
-          }
-          |> Node.create_with_default_location
-        ];
-        "TypedDictionary",
-        [
-          {
-            Argument.name = None;
-            value =
-              Type.primitive "typing.Mapping"
-              |> Type.expression
-          };
-        ],
-        [
-          Define {
-            Define.name = Access.create "TypedDictionary.__setitem__";
-            parameters = [
-              { Parameter.name = Identifier.create "self"; value = None; annotation = None}
-              |> Node.create_with_default_location;
-              { Parameter.name = Identifier.create "key"; value = None; annotation = None}
-              |> Node.create_with_default_location;
-              { Parameter.name = Identifier.create "value"; value = None; annotation = None}
-              |> Node.create_with_default_location;
-            ];
-            body = [];
-            decorators = [];
-            docstring = None;
-            return_annotation =
-              Some (Node.create_with_default_location (Access (Access.create "None")));
-            async = false;
-            parent = Some (Access.create "TypedDictionary");
-          }
-          |> Node.create_with_default_location
-        ]
-      ];
-    (* Register hardcoded aliases. *)
-    Hashtbl.set
-      aliases
-      ~key:(Type.primitive "typing.DefaultDict")
-      ~data:(Type.primitive "collections.defaultdict");
-    Hashtbl.set
-      aliases
-      ~key:(Type.primitive "None")
-      ~data:(Type.Optional Type.Bottom);
-    (* This is broken in typeshed:
-       https://github.com/python/typeshed/pull/991#issuecomment-288160993 *)
-    Hashtbl.set
-      aliases
-      ~key:(Type.primitive "PathLike")
-      ~data:(Type.primitive "_PathLike");
+    let own_nested_classes = nested_class_names definition |> List.map ~f:snd in
+    successors
+    |> List.filter_map ~f:Handler.class_definition
+    |> List.map ~f:Node.value
+    |> List.concat_map ~f:nested_class_names
+    |> List.fold ~f:create_alias ~init:own_nested_classes
+    |> ignore
+  in
+  let module Visit = Visit.MakeStatementVisitor (struct
+    type t = unit
 
-    TypeOrder.insert
-      (TypeOrder.handler order)
-      (Type.primitive "TypedDictionary");
+    let visit_children _ = true
+
+    let statement { Source.qualifier; _ } _ = function
+      | { Node.value = Class ({ Class.name; _ } as definition); _ } ->
+          Handler.class_metadata (Reference.show name)
+          |> Option.iter ~f:(fun { GlobalResolution.successors; _ } ->
+                 propagate ~qualifier definition successors)
+      | _ -> ()
+  end)
+  in
+  Visit.visit () source
 
 
-    {
-      function_definitions;
-      class_definitions;
-      protocols;
-      modules;
-      order;
-      aliases;
-      globals;
-      dependencies;
-    }
+let built_in_annotations =
+  ["TypedDictionary"; "NonTotalTypedDictionary"] |> Type.Primitive.Set.of_list
 
 
-  let copy
-      {
-        function_definitions;
-        class_definitions;
-        protocols;
-        modules;
-        order;
-        aliases;
-        globals;
-        dependencies;
-      } =
-    {
-      function_definitions = Hashtbl.copy function_definitions;
-      class_definitions = Hashtbl.copy class_definitions;
-      protocols = Hash_set.copy protocols;
-      modules = Hashtbl.copy modules;
-      order = TypeOrder.Builder.copy order;
-      aliases = Hashtbl.copy aliases;
-      globals = Hashtbl.copy globals;
-      dependencies = Dependencies.copy dependencies;
-    }
+let is_module (module Handler : Handler) = Handler.is_module
+
+let class_hierarchy (module Handler : Handler) =
+  (module Handler.TypeOrderHandler : ClassHierarchy.Handler)
 
 
-  let statistics
-      {
-        function_definitions;
-        class_definitions;
-        protocols;
-        globals;
-        _;
-      } =
-    Format.asprintf
-      "Found %d functions, %d classes, %d protocols, and %d globals"
-      (Hashtbl.length function_definitions)
-      (Hashtbl.length class_definitions)
-      (Hash_set.length protocols)
-      (Hashtbl.length globals)
+let dependency_handler (module Handler : Handler) =
+  (module Handler.DependencyHandler : Dependencies.Handler)
 
 
-  let pp format { function_definitions; order; aliases; globals; _ } =
-    let functions =
-      Hashtbl.keys function_definitions
-      |> List.map ~f:(fun access -> "  " ^  (Format.asprintf "%a" Access.pp access))
-      |> String.concat ~sep:"\n" in
-    let aliases =
-      let alias (key, data) =
-        Format.asprintf
-          "  %a -> %a"
-          Type.pp key
-          Type.pp data in
-      Hashtbl.to_alist aliases
-      |> List.map ~f:alias
-      |> String.concat ~sep:"\n" in
-    let globals =
-      let global (key, { Node.value; _ }) =
-        Format.asprintf
-          "  %a -> %a"
-          Access.pp key
-          Annotation.pp value
-      in
-      Hashtbl.to_alist globals
-      |> List.map ~f:global
-      |> String.concat ~sep:"\n" in
-    Format.fprintf
-      format
-      "Environment:\nOrder:\n%a\nFunctions:\n%s\nAliases:\n%s\nGlobals:\n%s"
-      TypeOrder.pp order
-      functions
-      aliases
-      globals
+let set_class_definition (module Handler : Handler) = Handler.set_class_definition
 
+let register_class_metadata (module Handler : Handler) = Handler.register_class_metadata
 
-  let show environment =
-    Format.asprintf "%a" pp environment
+let transaction (module Handler : Handler) = Handler.transaction
+
+module SharedMemory = struct
+  (** Keys *)
+  module StringKey = struct
+    type t = string
+
+    let to_string = ident
+
+    let compare = String.compare
+
+    type out = string
+
+    let from_string x = x
+  end
+
+  (** Values *)
+  module FunctionKeyValue = struct
+    type t = Reference.t list
+
+    let prefix = Prefix.make ()
+
+    let description = "Function keys"
+
+    let unmarshall value = Marshal.from_string value 0
+  end
+
+  module GlobalKeyValue = struct
+    type t = Reference.t list
+
+    let prefix = Prefix.make ()
+
+    let description = "Global keys"
+
+    let unmarshall value = Marshal.from_string value 0
+  end
+
+  module AliasKeyValue = struct
+    type t = Identifier.t list
+
+    let prefix = Prefix.make ()
+
+    let description = "Alias keys"
+
+    let unmarshall value = Marshal.from_string value 0
+  end
+
+  module ClassKeyValue = struct
+    type t = Identifier.t list
+
+    let prefix = Prefix.make ()
+
+    let description = "Class keys"
+
+    let unmarshall value = Marshal.from_string value 0
+  end
+
+  module DependentKeyValue = struct
+    type t = Reference.t list
+
+    let prefix = Prefix.make ()
+
+    let description = "Dependent keys"
+
+    let unmarshall value = Marshal.from_string value 0
+  end
+
+  module ClassValue = struct
+    type t = Statement.Class.t Node.t
+
+    let prefix = Prefix.make ()
+
+    let description = "Class"
+
+    let unmarshall value = Marshal.from_string value 0
+  end
+
+  module ClassMetadataValue = struct
+    type t = GlobalResolution.class_metadata
+
+    let prefix = Prefix.make ()
+
+    let description = "Class metadata"
+
+    let unmarshall value = Marshal.from_string value 0
+  end
+
+  module AliasValue = struct
+    type t = Type.alias
+
+    let prefix = Prefix.make ()
+
+    let description = "Alias"
+
+    let unmarshall value = Marshal.from_string value 0
+  end
+
+  module GlobalValue = struct
+    type t = GlobalResolution.global
+
+    let prefix = Prefix.make ()
+
+    let description = "Global"
+
+    let unmarshall value = Marshal.from_string value 0
+  end
+
+  module DependentValue = struct
+    type t = Reference.Set.Tree.t
+
+    let prefix = Prefix.make ()
+
+    let description = "Dependent"
+
+    let unmarshall value = Marshal.from_string value 0
+  end
+
+  module OrderIndexValue = struct
+    type t = int
+
+    let prefix = Prefix.make ()
+
+    let description = "Order indices"
+
+    let unmarshall value = Marshal.from_string value 0
+  end
+
+  module OrderAnnotationValue = struct
+    type t = string
+
+    let prefix = Prefix.make ()
+
+    let description = "Order annotations"
+
+    (* Strings are not marshalled by shared memory *)
+    let unmarshall value = value
+  end
+
+  module EdgeValue = struct
+    type t = ClassHierarchy.Target.t list
+
+    let prefix = Prefix.make ()
+
+    let description = "Edges"
+
+    let unmarshall value = Marshal.from_string value 0
+  end
+
+  module BackedgeValue = struct
+    type t = ClassHierarchy.Target.Set.Tree.t
+
+    let prefix = Prefix.make ()
+
+    let description = "Backedges"
+
+    let unmarshall value = Marshal.from_string value 0
+  end
+
+  module OrderKeyValue = struct
+    type t = int list
+
+    let prefix = Prefix.make ()
+
+    let description = "Order keys"
+
+    let unmarshall value = Marshal.from_string value 0
+  end
+
+  module IntValue = struct
+    type t = int
+
+    let prefix = Prefix.make ()
+
+    let description = "Refcount of implicit submodules"
+
+    let unmarshall value = Marshal.from_string value 0
+  end
+
+  module ModuleValue = struct
+    type t = Module.t
+
+    let prefix = Prefix.make ()
+
+    let description = "Module"
+
+    let unmarshall value = Marshal.from_string value 0
+  end
+
+  module UndecoratedFunctionValue = struct
+    type t = Type.t Type.Callable.overload
+
+    let prefix = Prefix.make ()
+
+    let description = "Undecorated functions"
+
+    let unmarshall value = Marshal.from_string value 0
+  end
+
+  module ClassDefinitions = Memory.WithCache (StringKey) (ClassValue)
+  (** Shared memory maps *)
+
+  module Modules = Memory.WithCache (Reference.Key) (ModuleValue)
+  module ClassMetadata = Memory.WithCache (StringKey) (ClassMetadataValue)
+  module ImplicitSubmodules = Memory.NoCache (Reference.Key) (IntValue)
+  module Aliases = Memory.NoCache (StringKey) (AliasValue)
+  module Globals = Memory.WithCache (Reference.Key) (GlobalValue)
+  module Dependents = Memory.WithCache (Reference.Key) (DependentValue)
+  module UndecoratedFunctions = Memory.WithCache (Reference.Key) (UndecoratedFunctionValue)
+
+  module FunctionKeys = Memory.WithCache (Reference.Key) (FunctionKeyValue)
+  (** Keys *)
+
+  module ClassKeys = Memory.WithCache (Reference.Key) (ClassKeyValue)
+  module GlobalKeys = Memory.WithCache (Reference.Key) (GlobalKeyValue)
+  module AliasKeys = Memory.WithCache (Reference.Key) (AliasKeyValue)
+  module DependentKeys = Memory.WithCache (Reference.Key) (DependentKeyValue)
+
+  module OrderIndices = Memory.WithCache (StringKey) (OrderIndexValue)
+  (** Type order maps *)
+
+  module OrderAnnotations = Memory.WithCache (Ast.SharedMemory.IntKey) (OrderAnnotationValue)
+  module OrderEdges = Memory.WithCache (Ast.SharedMemory.IntKey) (EdgeValue)
+  module OrderBackedges = Memory.WithCache (Ast.SharedMemory.IntKey) (BackedgeValue)
+  module OrderKeys = Memory.WithCache (Memory.SingletonKey) (OrderKeyValue)
 end
+
+module SharedMemoryClassHierarchyHandler = struct
+  type ('key, 'value) lookup = {
+    get: 'key -> 'value option;
+    set: 'key -> 'value -> unit;
+  }
+
+  open SharedMemory
+
+  let edges () =
+    {
+      get = OrderEdges.get;
+      set =
+        (fun key value ->
+          OrderEdges.remove_batch (OrderEdges.KeySet.singleton key);
+          OrderEdges.add key value);
+    }
+
+
+  let backedges () =
+    {
+      get = (fun key -> OrderBackedges.get key >>| ClassHierarchy.Target.Set.of_tree);
+      set =
+        (fun key value ->
+          let value = ClassHierarchy.Target.Set.to_tree value in
+          OrderBackedges.remove_batch (OrderBackedges.KeySet.singleton key);
+          OrderBackedges.add key value);
+    }
+
+
+  let indices () =
+    {
+      get = OrderIndices.get;
+      set =
+        (fun key value ->
+          OrderIndices.remove_batch (OrderIndices.KeySet.singleton key);
+          OrderIndices.add key value);
+    }
+
+
+  let annotations () =
+    {
+      get = OrderAnnotations.get;
+      set =
+        (fun key value ->
+          OrderAnnotations.remove_batch (OrderAnnotations.KeySet.singleton key);
+          OrderAnnotations.add key value);
+    }
+
+
+  let find { get; _ } key = get key
+
+  let find_unsafe { get; _ } key = Option.value_exn (get key)
+
+  let contains { get; _ } key = Option.is_some (get key)
+
+  let set { set; _ } ~key ~data = set key data
+
+  let length _ = OrderKeys.get Memory.SingletonKey.key >>| List.length |> Option.value ~default:0
+
+  let add_key key =
+    match OrderKeys.get Memory.SingletonKey.key with
+    | None -> OrderKeys.add Memory.SingletonKey.key [key]
+    | Some keys ->
+        OrderKeys.remove_batch (OrderKeys.KeySet.singleton Memory.SingletonKey.key);
+        OrderKeys.add Memory.SingletonKey.key (key :: keys)
+
+
+  let keys () = Option.value ~default:[] (OrderKeys.get Memory.SingletonKey.key)
+
+  let show () =
+    let keys = keys () |> List.sort ~compare:Int.compare in
+    let serialized_keys = List.to_string ~f:Int.to_string keys in
+    let serialized_annotations =
+      let serialize_annotation key =
+        find (annotations ()) key >>| fun annotation -> Format.asprintf "%d->%s\n" key annotation
+      in
+      List.filter_map ~f:serialize_annotation keys |> String.concat
+    in
+    let module EdgeSerializer (ListOrSet : ClassHierarchy.Target.ListOrSet) = struct
+      let serialize edges =
+        let edges_of_key key =
+          let show_successor { ClassHierarchy.Target.target = successor; _ } =
+            Option.value_exn (find (annotations ()) successor)
+          in
+          find edges key >>| ListOrSet.to_string ~f:show_successor |> Option.value ~default:""
+        in
+        List.to_string ~f:(fun key -> Format.asprintf "%d -> %s\n" key (edges_of_key key)) keys
+    end
+    in
+    let module ForwardEdgeSerializer = EdgeSerializer (ClassHierarchy.Target.List) in
+    let module BackwardEdgeSerializer = EdgeSerializer (ClassHierarchy.Target.Set) in
+    Format.asprintf
+      "Keys:\n%s\nAnnotations:\n%s\nEdges:\n%s\nBackedges:\n%s\n"
+      serialized_keys
+      serialized_annotations
+      (ForwardEdgeSerializer.serialize (edges ()))
+      (BackwardEdgeSerializer.serialize (backedges ()))
+end
+
+let fill_shared_memory_with_default_typeorder () =
+  ClassHierarchy.Builder.add_default_order (module SharedMemoryClassHierarchyHandler)
+
+
+let purge (module Handler : Handler) ?debug x =
+  Handler.purge ?debug x;
+  fill_shared_memory_with_default_typeorder ();
+  add_special_classes (module Handler);
+  add_dummy_modules (module Handler);
+  add_special_globals (module Handler)
+
+
+module SharedMemoryPartialHandler = struct
+  open SharedMemory
+  module TypeOrderHandler = SharedMemoryClassHierarchyHandler
+
+  let transaction ?(only_global_keys = false) ~f () =
+    if only_global_keys then
+      GlobalKeys.LocalChanges.push_stack ()
+    else (
+      Modules.LocalChanges.push_stack ();
+      FunctionKeys.LocalChanges.push_stack ();
+      ClassKeys.LocalChanges.push_stack ();
+      AliasKeys.LocalChanges.push_stack ();
+      GlobalKeys.LocalChanges.push_stack ();
+      DependentKeys.LocalChanges.push_stack ();
+      Dependents.LocalChanges.push_stack ();
+      ClassDefinitions.LocalChanges.push_stack ();
+      ClassMetadata.LocalChanges.push_stack ();
+      Aliases.LocalChanges.push_stack ();
+      OrderEdges.LocalChanges.push_stack ();
+      OrderBackedges.LocalChanges.push_stack ();
+      OrderAnnotations.LocalChanges.push_stack ();
+      OrderKeys.LocalChanges.push_stack ();
+      OrderIndices.LocalChanges.push_stack ();
+      Globals.LocalChanges.push_stack () );
+    let result = f () in
+    if only_global_keys then
+      GlobalKeys.LocalChanges.commit_all ()
+    else (
+      Modules.LocalChanges.commit_all ();
+      FunctionKeys.LocalChanges.commit_all ();
+      ClassKeys.LocalChanges.commit_all ();
+      AliasKeys.LocalChanges.commit_all ();
+      GlobalKeys.LocalChanges.commit_all ();
+      DependentKeys.LocalChanges.commit_all ();
+      Dependents.LocalChanges.commit_all ();
+      ClassDefinitions.LocalChanges.commit_all ();
+      ClassMetadata.LocalChanges.commit_all ();
+      Globals.LocalChanges.commit_all ();
+      Aliases.LocalChanges.commit_all ();
+      OrderEdges.LocalChanges.commit_all ();
+      OrderBackedges.LocalChanges.commit_all ();
+      OrderAnnotations.LocalChanges.commit_all ();
+      OrderKeys.LocalChanges.commit_all ();
+      OrderIndices.LocalChanges.commit_all () );
+    if only_global_keys then
+      GlobalKeys.LocalChanges.pop_stack ()
+    else (
+      Modules.LocalChanges.pop_stack ();
+      FunctionKeys.LocalChanges.pop_stack ();
+      ClassKeys.LocalChanges.pop_stack ();
+      AliasKeys.LocalChanges.pop_stack ();
+      GlobalKeys.LocalChanges.pop_stack ();
+      DependentKeys.LocalChanges.pop_stack ();
+      Dependents.LocalChanges.pop_stack ();
+      ClassDefinitions.LocalChanges.pop_stack ();
+      ClassMetadata.LocalChanges.pop_stack ();
+      Globals.LocalChanges.pop_stack ();
+      Aliases.LocalChanges.pop_stack ();
+      OrderEdges.LocalChanges.pop_stack ();
+      OrderBackedges.LocalChanges.pop_stack ();
+      OrderAnnotations.LocalChanges.pop_stack ();
+      OrderKeys.LocalChanges.pop_stack ();
+      OrderIndices.LocalChanges.pop_stack () );
+    result
+
+
+  module DependencyHandler : Dependencies.Handler = struct
+    let add_new_key ~get ~add ~qualifier ~key =
+      let existing = get qualifier in
+      match existing with
+      | None -> add qualifier [key]
+      | Some keys -> add qualifier (key :: keys)
+
+
+    let add_function_key ~qualifier reference =
+      add_new_key ~qualifier ~key:reference ~get:FunctionKeys.get ~add:FunctionKeys.add
+
+
+    let add_class_key ~qualifier class_type =
+      add_new_key ~qualifier ~key:class_type ~get:ClassKeys.get ~add:ClassKeys.add
+
+
+    let add_alias_key ~qualifier alias =
+      add_new_key ~qualifier ~key:alias ~get:AliasKeys.get ~add:AliasKeys.add
+
+
+    let add_global_key ~qualifier global =
+      add_new_key ~qualifier ~key:global ~get:GlobalKeys.get ~add:GlobalKeys.add
+
+
+    let add_dependent_key ~qualifier dependent =
+      add_new_key ~qualifier ~key:dependent ~get:DependentKeys.get ~add:DependentKeys.add
+
+
+    let add_dependent ~qualifier dependent =
+      add_dependent_key ~qualifier dependent;
+      match Dependents.get dependent with
+      | None -> Dependents.add dependent (Reference.Set.Tree.singleton qualifier)
+      | Some dependencies ->
+          Dependents.add dependent (Reference.Set.Tree.add dependencies qualifier)
+
+
+    let get_function_keys ~qualifier = FunctionKeys.get qualifier |> Option.value ~default:[]
+
+    let get_class_keys ~qualifier = ClassKeys.get qualifier |> Option.value ~default:[]
+
+    let get_alias_keys ~qualifier = AliasKeys.get qualifier |> Option.value ~default:[]
+
+    let get_global_keys ~qualifier = GlobalKeys.get qualifier |> Option.value ~default:[]
+
+    let get_dependent_keys ~qualifier = DependentKeys.get qualifier |> Option.value ~default:[]
+
+    let clear_keys_batch qualifiers =
+      FunctionKeys.remove_batch (FunctionKeys.KeySet.of_list qualifiers);
+      ClassKeys.remove_batch (ClassKeys.KeySet.of_list qualifiers);
+      AliasKeys.remove_batch (AliasKeys.KeySet.of_list qualifiers);
+      GlobalKeys.remove_batch (GlobalKeys.KeySet.of_list qualifiers);
+      DependentKeys.remove_batch (DependentKeys.KeySet.of_list qualifiers)
+
+
+    let dependents = Dependents.get
+
+    let normalize qualifiers =
+      let normalize_keys qualifier =
+        ( match FunctionKeys.get qualifier with
+        | Some keys ->
+            FunctionKeys.remove_batch (FunctionKeys.KeySet.singleton qualifier);
+            FunctionKeys.add qualifier (List.dedup_and_sort ~compare:Reference.compare keys)
+        | None -> () );
+        ( match ClassKeys.get qualifier with
+        | Some keys ->
+            ClassKeys.remove_batch (ClassKeys.KeySet.singleton qualifier);
+            ClassKeys.add qualifier (List.dedup_and_sort ~compare:Identifier.compare keys)
+        | None -> () );
+        ( match AliasKeys.get qualifier with
+        | Some keys ->
+            AliasKeys.remove_batch (AliasKeys.KeySet.singleton qualifier);
+            AliasKeys.add qualifier (List.dedup_and_sort ~compare:Identifier.compare keys)
+        | None -> () );
+        ( match GlobalKeys.get qualifier with
+        | Some keys ->
+            GlobalKeys.remove_batch (GlobalKeys.KeySet.singleton qualifier);
+            GlobalKeys.add qualifier (List.dedup_and_sort ~compare:Reference.compare keys)
+        | None -> () );
+        match DependentKeys.get qualifier with
+        | Some keys ->
+            DependentKeys.remove_batch (DependentKeys.KeySet.singleton qualifier);
+            DependentKeys.add qualifier (List.dedup_and_sort ~compare:Reference.compare keys)
+        | None -> ()
+      in
+      List.iter qualifiers ~f:normalize_keys;
+      let normalize_dependents name =
+        match Dependents.get name with
+        | Some unnormalized ->
+            Dependents.remove_batch (Dependents.KeySet.singleton name);
+            Reference.Set.Tree.to_list unnormalized
+            |> List.sort ~compare:Reference.compare
+            |> Reference.Set.Tree.of_list
+            |> Dependents.add name
+        | None -> ()
+      in
+      List.concat_map qualifiers ~f:(fun qualifier -> get_dependent_keys ~qualifier)
+      |> List.dedup_and_sort ~compare:Reference.compare
+      |> List.iter ~f:normalize_dependents
+  end
+
+  let class_definition annotation = ClassDefinitions.get annotation
+
+  let class_metadata = ClassMetadata.get
+
+  let register_module qualifier registered_module = Modules.add qualifier registered_module
+
+  let register_implicit_submodule qualifier =
+    match Modules.get qualifier with
+    | Some _ -> ()
+    | None -> (
+      match ImplicitSubmodules.get qualifier with
+      | None -> ImplicitSubmodules.add qualifier 1
+      | Some count ->
+          let count = count + 1 in
+          ImplicitSubmodules.remove_batch (ImplicitSubmodules.KeySet.of_list [qualifier]);
+          ImplicitSubmodules.add qualifier count )
+
+
+  let register_undecorated_function ~reference ~annotation =
+    UndecoratedFunctions.add reference annotation
+
+
+  let is_module qualifier = Modules.mem qualifier || ImplicitSubmodules.mem qualifier
+
+  let module_definition qualifier =
+    match Modules.get qualifier with
+    | Some _ as result -> result
+    | None -> (
+      match ImplicitSubmodules.get qualifier with
+      | Some _ -> Some (Module.create_implicit ())
+      | None -> None )
+
+
+  let in_class_definition_keys annotation = ClassDefinitions.mem annotation
+
+  let aliases = Aliases.get
+
+  let globals = Globals.get
+
+  let dependencies = Dependents.get
+
+  let undecorated_signature = UndecoratedFunctions.get
+
+  let register_dependency ~qualifier ~dependency =
+    Log.log
+      ~section:`Dependencies
+      "Adding dependency from %a to %a"
+      Reference.pp
+      dependency
+      Reference.pp
+      qualifier;
+    DependencyHandler.add_dependent ~qualifier dependency
+
+
+  let register_global ?qualifier ~reference ~global =
+    Option.iter qualifier ~f:(fun qualifier ->
+        DependencyHandler.add_global_key ~qualifier reference);
+    Globals.add reference global
+
+
+  let set_class_definition ~name ~definition =
+    let definition =
+      match ClassDefinitions.get name with
+      | Some { Node.location; value = preexisting } ->
+          {
+            Node.location;
+            value = Statement.Class.update preexisting ~definition:(Node.value definition);
+          }
+      | _ -> definition
+    in
+    ClassDefinitions.add name definition
+
+
+  let register_alias ~qualifier ~key ~data =
+    DependencyHandler.add_alias_key ~qualifier key;
+    Aliases.add key data
+
+
+  let register_class_metadata class_name =
+    let open Statement in
+    let successors =
+      ClassHierarchy.successors (module SharedMemoryClassHierarchyHandler) class_name
+    in
+    let is_final =
+      ClassDefinitions.get class_name
+      >>| (fun { Node.value = definition; _ } -> Class.is_final definition)
+      |> Option.value ~default:false
+    in
+    let in_test =
+      let is_unit_test { Node.value = definition; _ } = Class.is_unit_test definition in
+      let successor_classes = List.filter_map ~f:ClassDefinitions.get successors in
+      List.exists ~f:is_unit_test successor_classes
+    in
+    let extends_placeholder_stub_class =
+      ClassDefinitions.get class_name
+      >>| Annotated.Class.create
+      >>| Annotated.Class.extends_placeholder_stub_class ~aliases ~module_definition
+      |> Option.value ~default:false
+    in
+    ClassMetadata.add
+      class_name
+      { GlobalResolution.is_test = in_test; successors; is_final; extends_placeholder_stub_class }
+
+
+  let purge ?(debug = false) (qualifiers : Reference.t list) =
+    let purge_dependents keys =
+      let new_dependents = Reference.Table.create () in
+      let recompute_dependents key dependents =
+        let qualifiers = Reference.Set.Tree.of_list qualifiers in
+        Hashtbl.set new_dependents ~key ~data:(Reference.Set.Tree.diff dependents qualifiers)
+      in
+      List.iter ~f:(fun key -> Dependents.get key >>| recompute_dependents key |> ignore) keys;
+      Dependents.remove_batch (Dependents.KeySet.of_list (Hashtbl.keys new_dependents));
+      Hashtbl.iteri new_dependents ~f:(fun ~key ~data -> Dependents.add key data);
+      DependentKeys.remove_batch (Dependents.KeySet.of_list qualifiers)
+    in
+    List.concat_map ~f:(fun qualifier -> DependencyHandler.get_function_keys ~qualifier) qualifiers
+    |> fun keys ->
+    (* We add a global name for each function definition as well. *)
+    Globals.remove_batch (Globals.KeySet.of_list keys);
+
+    (* Remove the connection to the parent (if any) for all classes defined in the updated handles. *)
+    let dead_classes =
+      List.concat_map ~f:(fun qualifier -> DependencyHandler.get_class_keys ~qualifier) qualifiers
+    in
+    let dead_indices =
+      List.filter_map
+        dead_classes
+        ~f:(SharedMemoryClassHierarchyHandler.find (SharedMemoryClassHierarchyHandler.indices ()))
+    in
+    dead_classes |> ClassHierarchy.disconnect_successors (module SharedMemoryClassHierarchyHandler);
+    OrderIndices.remove_batch (OrderIndices.KeySet.of_list dead_classes);
+    OrderAnnotations.remove_batch (OrderAnnotations.KeySet.of_list dead_indices);
+    let remove_keys removed =
+      match OrderKeys.get Memory.SingletonKey.key with
+      | None -> ()
+      | Some keys ->
+          OrderKeys.remove_batch (OrderKeys.KeySet.singleton Memory.SingletonKey.key);
+          let remaining = Set.diff (Int.Set.of_list keys) removed in
+          OrderKeys.add Memory.SingletonKey.key (Int.Set.to_list remaining)
+    in
+    remove_keys (Int.Set.of_list dead_indices);
+
+    let class_keys =
+      List.concat_map ~f:(fun qualifier -> DependencyHandler.get_class_keys ~qualifier) qualifiers
+      |> ClassDefinitions.KeySet.of_list
+    in
+    ClassDefinitions.remove_batch class_keys;
+    ClassMetadata.remove_batch class_keys;
+    List.concat_map ~f:(fun qualifier -> DependencyHandler.get_alias_keys ~qualifier) qualifiers
+    |> fun keys ->
+    Aliases.remove_batch (Aliases.KeySet.of_list keys);
+    let global_keys =
+      List.concat_map ~f:(fun qualifier -> DependencyHandler.get_global_keys ~qualifier) qualifiers
+      |> Globals.KeySet.of_list
+    in
+    Globals.remove_batch global_keys;
+    UndecoratedFunctions.remove_batch global_keys;
+    List.concat_map
+      ~f:(fun qualifier -> DependencyHandler.get_dependent_keys ~qualifier)
+      qualifiers
+    |> List.dedup_and_sort ~compare:Reference.compare
+    |> purge_dependents;
+    DependencyHandler.clear_keys_batch qualifiers;
+    Modules.remove_batch (Modules.KeySet.of_list qualifiers);
+    if debug then (* If in debug mode, make sure the ClassHierarchy is still consistent. *)
+      ClassHierarchy.check_integrity (module SharedMemoryClassHierarchyHandler)
+end
+
+let shared_memory_handler () = (module SharedMemoryPartialHandler : Handler)
+
+let normalize_shared_memory qualifiers =
+  (* Since we don't provide an API to the raw order keys in the type order handler, handle it
+     inline here. *)
+  let open SharedMemory in
+  ( match OrderKeys.get Memory.SingletonKey.key with
+  | None -> ()
+  | Some keys ->
+      OrderKeys.remove_batch (OrderKeys.KeySet.singleton Memory.SingletonKey.key);
+      List.sort ~compare:Int.compare keys |> OrderKeys.add Memory.SingletonKey.key );
+  SharedMemoryPartialHandler.DependencyHandler.normalize qualifiers
+
+
+let shared_memory_hash_to_key_map ~qualifiers () =
+  let extend_map map ~new_map =
+    Map.merge_skewed map new_map ~combine:(fun ~key:_ value _ -> value)
+  in
+  let open SharedMemory in
+  let map =
+    let map =
+      Map.set
+        String.Map.empty
+        ~key:(OrderKeys.hash_of_key Memory.SingletonKey.key)
+        ~data:(OrderKeys.serialize_key Memory.SingletonKey.key)
+    in
+    match OrderKeys.get Memory.SingletonKey.key with
+    | Some indices ->
+        let annotations = List.filter_map indices ~f:OrderAnnotations.get in
+        let class_hierarchy_map =
+          let add_index_mappings map key =
+            Map.set
+              map
+              ~key:(OrderAnnotations.hash_of_key key)
+              ~data:(OrderAnnotations.serialize_key key)
+            |> Map.set ~key:(OrderEdges.hash_of_key key) ~data:(OrderEdges.serialize_key key)
+            |> Map.set
+                 ~key:(OrderBackedges.hash_of_key key)
+                 ~data:(OrderBackedges.serialize_key key)
+          in
+          let add_annotation_mappings map annotation =
+            Map.set
+              map
+              ~key:(OrderIndices.hash_of_key annotation)
+              ~data:(OrderIndices.serialize_key annotation)
+          in
+          List.fold indices ~init:String.Map.empty ~f:add_index_mappings
+          |> fun map -> List.fold annotations ~init:map ~f:add_annotation_mappings
+        in
+        extend_map map ~new_map:class_hierarchy_map
+    | None -> map
+  in
+  let map = extend_map map ~new_map:(Modules.compute_hashes_to_keys ~keys:qualifiers) in
+  (* Handle-based keys. *)
+  let map =
+    map
+    |> extend_map ~new_map:(FunctionKeys.compute_hashes_to_keys ~keys:qualifiers)
+    |> extend_map ~new_map:(ClassKeys.compute_hashes_to_keys ~keys:qualifiers)
+    |> extend_map ~new_map:(GlobalKeys.compute_hashes_to_keys ~keys:qualifiers)
+    |> extend_map ~new_map:(AliasKeys.compute_hashes_to_keys ~keys:qualifiers)
+    |> extend_map ~new_map:(DependentKeys.compute_hashes_to_keys ~keys:qualifiers)
+  in
+  (* Class definitions. *)
+  let map =
+    let keys = List.filter_map qualifiers ~f:ClassKeys.get |> List.concat in
+    extend_map map ~new_map:(ClassDefinitions.compute_hashes_to_keys ~keys)
+    |> extend_map ~new_map:(ClassMetadata.compute_hashes_to_keys ~keys)
+  in
+  (* Aliases. *)
+  let map =
+    let keys = List.filter_map qualifiers ~f:AliasKeys.get |> List.concat in
+    extend_map map ~new_map:(Aliases.compute_hashes_to_keys ~keys)
+  in
+  (* Globals and undecorated functions. *)
+  let map =
+    let keys = List.filter_map qualifiers ~f:GlobalKeys.get |> List.concat in
+    extend_map map ~new_map:(Globals.compute_hashes_to_keys ~keys)
+    |> extend_map ~new_map:(UndecoratedFunctions.compute_hashes_to_keys ~keys)
+  in
+  (* Dependents. *)
+  let map =
+    let keys = List.filter_map qualifiers ~f:DependentKeys.get |> List.concat in
+    extend_map map ~new_map:(Dependents.compute_hashes_to_keys ~keys)
+  in
+  map
+
+
+let serialize_decoded decoded =
+  let decode index =
+    let annotation =
+      SharedMemoryClassHierarchyHandler.find
+        (SharedMemoryClassHierarchyHandler.annotations ())
+        index
+    in
+    match annotation with
+    | None -> Format.sprintf "Undecodable(%d)" index
+    | Some annotation -> annotation
+  in
+  let decode_target { ClassHierarchy.Target.target; parameters } =
+    Format.asprintf "%s[%a]" (decode target) Type.OrderedTypes.pp_concise parameters
+  in
+  let open SharedMemory in
+  match decoded with
+  | ClassDefinitions.Decoded (key, value) ->
+      let value =
+        match value with
+        | Some { Node.value = definition; _ } ->
+            `Assoc ["class_definition", `String (Ast.Statement.Class.show definition)]
+            |> Yojson.to_string
+            |> Option.some
+        | None -> None
+      in
+      Some (ClassValue.description, key, value)
+  | ClassMetadata.Decoded (key, value) ->
+      let value =
+        match value with
+        | Some { GlobalResolution.successors; is_test; is_final; extends_placeholder_stub_class }
+          ->
+            `Assoc
+              [ "successors", `String (List.to_string ~f:Type.Primitive.show successors);
+                "is_test", `Bool is_test;
+                "is_final", `Bool is_final;
+                "extends_placeholder_stub_class", `Bool extends_placeholder_stub_class ]
+            |> Yojson.to_string
+            |> Option.some
+        | None -> None
+      in
+      Some (ClassMetadataValue.description, key, value)
+  | Aliases.Decoded (key, value) -> Some (AliasValue.description, key, value >>| Type.show_alias)
+  | Globals.Decoded (key, value) ->
+      let value = value >>| Node.value >>| Annotation.sexp_of_t >>| Sexp.to_string in
+      Some (GlobalValue.description, Reference.show key, value)
+  | UndecoratedFunctions.Decoded (key, value) ->
+      Some
+        ( UndecoratedFunctionValue.description,
+          Reference.show key,
+          value >>| Type.Callable.show_overload Type.pp )
+  | Dependents.Decoded (key, value) ->
+      Some
+        ( DependentValue.description,
+          Reference.show key,
+          value >>| Reference.Set.Tree.to_list >>| List.to_string ~f:Reference.show )
+  | FunctionKeys.Decoded (key, value) ->
+      Some
+        ( FunctionKeyValue.description,
+          Reference.show key,
+          value >>| List.to_string ~f:Reference.show )
+  | ClassKeys.Decoded (key, value) ->
+      Some (ClassKeyValue.description, Reference.show key, value >>| List.to_string ~f:Fn.id)
+  | GlobalKeys.Decoded (key, value) ->
+      Some
+        (GlobalKeyValue.description, Reference.show key, value >>| List.to_string ~f:Reference.show)
+  | AliasKeys.Decoded (key, value) ->
+      Some (AliasKeyValue.description, Reference.show key, value >>| List.to_string ~f:ident)
+  | DependentKeys.Decoded (key, value) ->
+      Some
+        ( DependentKeyValue.description,
+          Reference.show key,
+          value >>| List.to_string ~f:Reference.show )
+  | OrderIndices.Decoded (key, value) ->
+      Some (OrderIndexValue.description, key, value >>| Int.to_string)
+  | OrderAnnotations.Decoded (key, value) ->
+      Some (OrderAnnotationValue.description, Int.to_string key, value)
+  | OrderEdges.Decoded (key, value) ->
+      Some (EdgeValue.description, decode key, value >>| List.to_string ~f:decode_target)
+  | OrderBackedges.Decoded (key, value) ->
+      Some
+        ( BackedgeValue.description,
+          decode key,
+          value >>| ClassHierarchy.Target.Set.Tree.to_list >>| List.to_string ~f:decode_target )
+  | OrderKeys.Decoded (key, value) ->
+      Some (OrderKeyValue.description, Int.to_string key, value >>| List.to_string ~f:decode)
+  | Modules.Decoded (key, value) ->
+      Some
+        (ModuleValue.description, Reference.show key, value >>| Module.sexp_of_t >>| Sexp.to_string)
+  | _ -> None
+
+
+let decoded_equal first second =
+  let open SharedMemory in
+  match first, second with
+  | ClassDefinitions.Decoded (_, first), ClassDefinitions.Decoded (_, second) ->
+      Option.equal (Node.equal Statement.Class.equal) first second
+  | ClassMetadata.Decoded (_, first), ClassMetadata.Decoded (_, second) ->
+      Option.equal GlobalResolution.equal_class_metadata first second
+  | Aliases.Decoded (_, first), Aliases.Decoded (_, second) ->
+      Option.equal Type.equal_alias first second
+  | Globals.Decoded (_, first), Globals.Decoded (_, second) ->
+      Option.equal Annotation.equal (first >>| Node.value) (second >>| Node.value)
+  | UndecoratedFunctions.Decoded (_, first), UndecoratedFunctions.Decoded (_, second) ->
+      Option.equal (Type.Callable.equal_overload Type.equal) first second
+  | Dependents.Decoded (_, first), Dependents.Decoded (_, second) ->
+      Option.equal Reference.Set.Tree.equal first second
+  | FunctionKeys.Decoded (_, first), FunctionKeys.Decoded (_, second) ->
+      Option.equal (List.equal Reference.equal) first second
+  | ClassKeys.Decoded (_, first), ClassKeys.Decoded (_, second) ->
+      Option.equal (List.equal Identifier.equal) first second
+  | GlobalKeys.Decoded (_, first), GlobalKeys.Decoded (_, second) ->
+      Option.equal (List.equal Reference.equal) first second
+  | AliasKeys.Decoded (_, first), AliasKeys.Decoded (_, second) ->
+      Option.equal (List.equal Identifier.equal) first second
+  | DependentKeys.Decoded (_, first), DependentKeys.Decoded (_, second) ->
+      Option.equal (List.equal Reference.equal) first second
+  | OrderIndices.Decoded (_, first), OrderIndices.Decoded (_, second) ->
+      Option.equal Int.equal first second
+  | OrderAnnotations.Decoded (_, first), OrderAnnotations.Decoded (_, second) ->
+      Option.equal String.equal first second
+  | OrderEdges.Decoded (_, first), OrderEdges.Decoded (_, second) ->
+      Option.equal (List.equal ClassHierarchy.Target.equal) first second
+  | OrderBackedges.Decoded (_, first), OrderBackedges.Decoded (_, second) ->
+      Option.equal ClassHierarchy.Target.Set.Tree.equal first second
+  | OrderKeys.Decoded (_, first), OrderKeys.Decoded (_, second) ->
+      Option.equal (List.equal Int.equal) first second
+  | Modules.Decoded (_, first), Modules.Decoded (_, second) ->
+      Option.equal Module.equal first second
+  | _ -> false

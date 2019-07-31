@@ -1,55 +1,47 @@
-(** Copyright (c) 2016-present, Facebook, Inc.
-
-    This source code is licensed under the MIT license found in the
-    LICENSE file in the root directory of this source tree. *)
+(* Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree. *)
 
 open Core
 open OUnit2
-
 open Interprocedural
 
+module SimpleAnalysis = Interprocedural.Result.Make (struct
+  type result = string
 
-module SimpleAnalysis = Interprocedural.Result.Make(struct
-    type result = string
-    type call_model = int
+  type call_model = int [@@deriving show]
 
-    let name = "simple-test-analysis"
-    let empty_model = 0
-    let obscure_model = -1
+  let name = "simple-test-analysis"
 
-    let get_errors _ =
-      []
+  let empty_model = 0
 
-    let show_call_model = string_of_int
+  let obscure_model = -1
 
-    let join ~iteration:_ a b =
-      a + b
+  let get_errors _ = []
 
-    let widen ~iteration ~previous ~next =
-      join ~iteration previous next
+  let join ~iteration:_ a b = a + b
 
-    let reached_fixpoint ~iteration:_ ~previous ~next =
-      next <= previous
+  let widen ~iteration ~previous ~next = join ~iteration previous next
 
-    let externalize _ _ _ = []
+  let reached_fixpoint ~iteration:_ ~previous ~next = next <= previous
 
-    let metadata () = `Assoc ["foo", `String "bar"]
-  end)
+  let externalize _ _ _ = []
 
+  let metadata () = `Assoc ["foo", `String "bar"]
+end)
 
-include SimpleAnalysis.Register(struct
-    let init ~types:_ ~functions:_ = ()
+include SimpleAnalysis.Register (struct
+  let init ~configuration:_ ~environment:_ ~functions:_ = Callable.Map.empty
 
-    let analyze ~callable:_ ~environment:_ ~define:_ =
-      "some result", 5
-  end)
-
+  let analyze ~callable:_ ~environment:_ ~define:_ ~existing:_ = "some result", 5
+end)
 
 let test_simple_analysis _ =
-  match  AnalysisKind.analysis_by_name SimpleAnalysis.name with
+  match AnalysisKind.analysis_by_name SimpleAnalysis.name with
   | None -> assert_failure "Lookup of analysis module failed."
   | Some analysis_kind ->
-      let Result.Analysis { analysis; _ } = Result.get_abstract_analysis analysis_kind in
+      let (Result.Analysis { analysis; _ }) = Result.get_abstract_analysis analysis_kind in
       let module Analysis = (val analysis) in
       assert_equal (Analysis.empty_model |> Analysis.show_call_model) "0";
       assert_equal (Analysis.obscure_model |> Analysis.show_call_model) "-1";
@@ -57,7 +49,4 @@ let test_simple_analysis _ =
 
 
 let () =
-  "interproceduralRegistration">:::[
-    "test_simple_analysis">::test_simple_analysis;
-  ]
-  |> Test.run
+  "interproceduralRegistration" >::: ["test_simple_analysis" >:: test_simple_analysis] |> Test.run

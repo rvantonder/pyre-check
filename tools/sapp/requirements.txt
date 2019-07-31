@@ -1,0 +1,8 @@
+click
+click-log
+ipython==6.5.0
+munch
+pygments
+SQLAlchemy
+ujson~=1.35
+xxhash~=1.3.0

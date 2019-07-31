@@ -97,25 +97,34 @@ def find_test_typeshed(base_directory: str) -> str:
     raise Exception("Could not find a valid typeshed to use")
 
 
-def poor_mans_rsync(source_directory, destination_directory):
+def poor_mans_rsync(source_directory, destination_directory, ignored_files=None):
+    ignored_files = ignored_files or []
     # Do not delete the server directory while copying!
     assert_readable_directory(source_directory)
     source_files = [
         entry
         for entry in os.listdir(source_directory)
-        if os.path.isfile(os.path.join(source_directory, entry))
+        if entry not in ignored_files
+        and os.path.isfile(os.path.join(source_directory, entry))
     ]
     assert_readable_directory(destination_directory)
     destination_files = [
         entry
         for entry in os.listdir(destination_directory)
-        if os.path.isfile(os.path.join(destination_directory, entry))
+        if entry not in ignored_files
+        and os.path.isfile(os.path.join(destination_directory, entry))
     ]
     source_directories = [
         entry
         for entry in os.listdir(source_directory)
         if os.path.isdir(os.path.join(source_directory, entry))
     ]
+    destination_directories = [
+        entry
+        for entry in os.listdir(destination_directory)
+        if os.path.isdir(os.path.join(destination_directory, entry))
+    ]
+
     # Copy all directories over blindly.
     for directory in source_directories:
         source = os.path.join(source_directory, directory)
@@ -124,6 +133,12 @@ def poor_mans_rsync(source_directory, destination_directory):
             shutil.rmtree(destination)
         shutil.copytree(source, destination)
 
+    # Delete any missing directories.
+    for directory in destination_directories:
+        if directory not in source_directories:
+            destination = os.path.join(destination_directory, directory)
+            shutil.rmtree(destination)
+
     for filename in destination_files:
         if filename not in source_files:
             LOG.info("Removing file '%s' from destination" % filename)
@@ -131,7 +146,7 @@ def poor_mans_rsync(source_directory, destination_directory):
 
     # Compare files across source and destination.
     (match, mismatch, error) = filecmp.cmpfiles(
-        source_directory, destination_directory, source_files
+        source_directory, destination_directory, source_files, shallow=False
     )
     for filename in match:
         LOG.info("Skipping file '%s' because it matches" % filename)
@@ -178,13 +193,21 @@ class Repository:
         original_path = os.path.join(
             self._base_repository_path, self._current_commit, ""
         )
-        # I could not find the right flags for rsync to touch/write
-        # only the changed files. This is crucial for watchman to
-        # generate the right notifications. Hence, this.
-        poor_mans_rsync(original_path, ".")
+
+        self._copy_commit(original_path, ".")
 
         self._resolve_typeshed_location(".pyre_configuration")
         return self._current_commit
+
+    def _copy_commit(self, original_path, destination_path):
+        """
+            Copies the next commit at original_path to destination path. Can be
+            overridden by child classes to change copying logic.
+        """
+        # I could not find the right flags for rsync to touch/write
+        # only the changed files. This is crucial for watchman to
+        # generate the right notifications. Hence, this.
+        poor_mans_rsync(original_path, destination_path)
 
     def _resolve_typeshed_location(self, filename):
         with fileinput.input(filename, inplace=True) as f:
@@ -197,11 +220,12 @@ class Repository:
                 )
 
     def get_pyre_errors(self):
-        incremental_errors = self.run_pyre("incremental")
+        # Run the full check first so that watchman updates have time to propagate.
         check_errors = self.run_pyre("check")
+        incremental_errors = self.run_pyre("incremental")
         return (incremental_errors, check_errors)
 
-    def run_pyre(self, command: str) -> str:
+    def run_pyre(self, command: str, *arguments: str) -> str:
         pyre_client = os.getenv("PYRE_TEST_CLIENT_LOCATION", "pyre")
         try:
             output = subprocess.check_output(
@@ -211,6 +235,7 @@ class Repository:
                     "--show-parse-errors",
                     "--output=json",
                     command,
+                    *arguments,
                 ]
             )
         except subprocess.CalledProcessError as error:
@@ -221,16 +246,25 @@ class Repository:
 
 
 def run_integration_test(repository_path) -> int:
+    if not shutil.which("watchman"):
+        LOG.error("The integration test cannot work if watchman is not installed!")
+        return 1
+
     with tempfile.TemporaryDirectory() as base_directory:
         discrepancies = {}
         repository = Repository(base_directory, repository_path)
         with _watch_directory(repository.get_repository_directory()):
-            repository.run_pyre("start")
-            for commit in repository:
-                (actual_error, expected_error) = repository.get_pyre_errors()
-                if actual_error != expected_error:
-                    discrepancies[commit] = (actual_error, expected_error)
-            repository.run_pyre("stop")
+            try:
+                repository.run_pyre("start")
+                for commit in repository:
+                    (actual_error, expected_error) = repository.get_pyre_errors()
+                    if actual_error != expected_error:
+                        discrepancies[commit] = (actual_error, expected_error)
+                repository.run_pyre("stop")
+            except Exception as uncaught_pyre_exception:
+                LOG.error("Uncaught exception: `%s`", str(uncaught_pyre_exception))
+                LOG.info("Pyre rage: %s", repository.run_pyre("rage"))
+                raise uncaught_pyre_exception
 
         if discrepancies:
             LOG.error("Pyre rage:")
@@ -242,6 +276,36 @@ def run_integration_test(repository_path) -> int:
                 print("Expected errors (pyre check): {}".format(expected_error))
             return 1
 
+    return 0
+
+
+# In general, saved state load/saves are a distributed system problem - the file systems
+# are completely different. Make sure that Pyre doesn't rely on absolute paths when
+# loading via this test.
+def run_saved_state_test(repository_path: str) -> int:
+    # Copy files over to a temporary directory.
+    original_directory = os.getcwd()
+    saved_state_path = tempfile.NamedTemporaryFile().name
+    with tempfile.TemporaryDirectory() as saved_state_create_directory:
+        repository = Repository(saved_state_create_directory, repository_path)
+        repository.run_pyre("--save-initial-state-to", saved_state_path, "incremental")
+        repository.__next__()
+        expected_errors = repository.run_pyre("check")
+        repository.run_pyre("stop")
+
+    os.chdir(original_directory)
+    with tempfile.TemporaryDirectory() as saved_state_load_directory:
+        repository = Repository(saved_state_load_directory, repository_path)
+        repository.__next__()
+        repository.run_pyre("--load-initial-state-from", saved_state_path, "start")
+        actual_errors = repository.run_pyre("incremental")
+        repository.run_pyre("stop")
+
+    if actual_errors != expected_errors:
+        LOG.error("Actual errors are not equal to expected errors.")
+        print("Actual errors (pyre incremental): {}".format(actual_errors))
+        print("Expected errors (pyre check): {}".format(expected_errors))
+        return 1
     return 0
 
 
@@ -269,4 +333,14 @@ if __name__ == "__main__":
         "repository_location", help="Path to directory with fake commit list"
     )
     arguments = parser.parse_args()
-    sys.exit(run_integration_test(arguments.repository_location))
+    retries = 3
+    while retries > 0:
+        try:
+            exit_code = run_integration_test(arguments.repository_location)
+            if exit_code != 0:
+                sys.exit(exit_code)
+            sys.exit(run_saved_state_test(arguments.repository_location))
+        except Exception:
+            # Retry the integration test for uncaught exceptions. Caught issues will
+            # result in an exit code of 1.
+            retries = retries - 1
