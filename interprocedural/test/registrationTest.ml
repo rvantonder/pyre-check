@@ -26,9 +26,11 @@ module SimpleAnalysis = Interprocedural.Result.Make (struct
 
   let reached_fixpoint ~iteration:_ ~previous ~next = next <= previous
 
-  let externalize _ _ _ = []
+  let externalize ~environment:_ _ _ _ = []
 
   let metadata () = `Assoc ["foo", `String "bar"]
+
+  let strip_for_callsite model = model
 end)
 
 include SimpleAnalysis.Register (struct

@@ -10,6 +10,7 @@ import os
 import platform
 import subprocess
 import sys
+import time
 import traceback
 from argparse import Namespace
 from typing import Any, Dict, Optional
@@ -30,6 +31,7 @@ LOG = logging.getLogger(__name__)
 
 CONFIGURATION_FILE = ".pyre_configuration"
 BINARY_NAME = "pyre.bin"
+CLIENT_NAME = "pyre-client"
 
 
 def assert_readable_directory(directory: str) -> None:
@@ -70,6 +72,32 @@ def get_binary_version(configuration) -> str:
     configured = configuration.version_hash
     if configured:
         return configured
+
+    return "No version set"
+
+
+def get_binary_version_from_file(local_path: Optional[str]) -> str:
+    override = os.getenv("PYRE_BINARY")
+    if override:
+        return "override: {}".format(override)
+
+    # Get local configuration version
+    if local_path:
+        local_configuration = os.path.join(local_path, CONFIGURATION_FILE + ".local")
+        with open(local_configuration) as file:
+            configuration_contents = file.read()
+            version = json.loads(configuration_contents).pop("version", None)
+
+            if version:
+                return version
+
+    # Get configuration version
+    with open(CONFIGURATION_FILE) as file:
+        configuration_contents = file.read()
+        version = json.loads(configuration_contents).pop("version", None)
+
+        if version:
+            return version
 
     return "No version set"
 
@@ -187,6 +215,7 @@ def resolve_analysis_directory(
             buck_builder = buck.FastBuckBuilder(
                 buck_root=buck_root,
                 buck_builder_binary=arguments.buck_builder_binary,
+                buck_builder_target=arguments.buck_builder_target,
                 debug_mode=arguments.buck_builder_debug,
             )
         else:
@@ -223,6 +252,8 @@ def log_statistics(
     logger: Optional[str] = None,
 ) -> None:
     integers = integers or {}
+    if "time" not in integers:
+        integers["time"] = int(time.time())
     normals = normals or {}
     if configuration:
         normals = {
@@ -234,12 +265,7 @@ def log_statistics(
     if not logger:
         raise ValueError("Logger must either be given or in configuration")
     if arguments:
-        normals = {
-            **normals,
-            "source_directories": str(arguments.source_directories or []),
-            "arguments": str(arguments),
-            "target": str(arguments.targets or []),
-        }
+        normals = {**normals, "arguments": str(arguments)}
     try:
         statistics = {
             "int": integers,

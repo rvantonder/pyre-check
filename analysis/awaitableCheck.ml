@@ -23,12 +23,22 @@ module State (Context : Context) = struct
 
   let _ = show_state (* unused *)
 
+  type alias =
+    | Reference of Reference.t
+    | Location of Location.Reference.t
+  [@@deriving compare, sexp, show]
+
+  module AliasMap = Map.Make (struct
+    type t = alias [@@deriving sexp, compare]
+  end)
+
   type t = {
     unawaited: state Location.Reference.Map.t;
-    locals: Location.Reference.Set.t Reference.Map.t;
+    locals: Location.Reference.Set.t AliasMap.t;
+    need_to_await: bool;
   }
 
-  let show { unawaited; locals } =
+  let show { unawaited; locals; need_to_await } =
     let unawaited =
       Map.to_alist unawaited
       |> List.map ~f:(fun (location, state) ->
@@ -40,18 +50,65 @@ module State (Context : Context) = struct
         Set.to_list locations |> List.map ~f:Location.show |> String.concat ~sep:", "
       in
       Map.to_alist locals
-      |> List.map ~f:(fun (reference, locations) ->
-             Format.asprintf "%a -> {%s}" Reference.pp reference (show_locations locations))
+      |> List.map ~f:(fun (alias, locations) ->
+             Format.asprintf "%a -> {%s}" pp_alias alias (show_locations locations))
       |> String.concat ~sep:", "
     in
-    Format.sprintf "Unawaited expressions: %s\nLocals: %s\n" unawaited locals
+    Format.sprintf
+      "Unawaited expressions: %s\nLocals: %s\nNeed to await: %b"
+      unawaited
+      locals
+      need_to_await
 
 
   let pp format state = Format.fprintf format "%s" (show state)
 
-  let initial = { unawaited = Location.Reference.Map.empty; locals = Reference.Map.empty }
+  let initial ~global_resolution { Define.signature = { Define.parameters; _ }; _ } =
+    let state =
+      { unawaited = Location.Reference.Map.empty; locals = AliasMap.empty; need_to_await = true }
+    in
+    let forward_parameter
+        ({ unawaited; locals; need_to_await } as state)
+        { Node.value = { Parameter.name; annotation; _ }; location }
+      =
+      let is_awaitable =
+        match annotation with
+        | Some annotation ->
+            GlobalResolution.less_or_equal
+              global_resolution
+              ~left:(GlobalResolution.parse_annotation global_resolution annotation)
+              ~right:(Type.awaitable Type.Top)
+        | None -> false
+      in
+      if is_awaitable then
+        let name =
+          if String.is_prefix ~prefix:"**" name then
+            String.drop_prefix name 2
+          else if String.is_prefix ~prefix:"*" name then
+            String.drop_prefix name 1
+          else
+            name
+        in
+        {
+          unawaited =
+            Map.set
+              unawaited
+              ~key:location
+              ~data:(Unawaited { Node.value = Name (Expression.Name.Identifier name); location });
+          locals =
+            Map.set
+              locals
+              ~key:(Reference (Reference.create name))
+              ~data:(Location.Reference.Set.singleton location);
+          need_to_await;
+        }
+      else
+        state
+    in
+    List.fold ~init:state ~f:forward_parameter parameters
 
-  let errors { unawaited; locals } =
+
+  let errors { unawaited; locals; _ } =
     let errors =
       let keep_unawaited = function
         | Unawaited expression -> Some { Error.references = []; expression }
@@ -59,14 +116,17 @@ module State (Context : Context) = struct
       in
       Map.filter_map unawaited ~f:keep_unawaited
     in
-    let add_reference ~key:name ~data:locations errors =
-      let add_reference errors location =
-        match Map.find errors location with
-        | Some { Error.references; expression } ->
-            Map.set errors ~key:location ~data:{ references = name :: references; expression }
-        | None -> errors
-      in
-      Location.Reference.Set.fold locations ~init:errors ~f:add_reference
+    let add_reference ~key:alias ~data:locations errors =
+      match alias with
+      | Reference name ->
+          let add_reference errors location =
+            match Map.find errors location with
+            | Some { Error.references; expression } ->
+                Map.set errors ~key:location ~data:{ references = name :: references; expression }
+            | None -> errors
+          in
+          Location.Reference.Set.fold locations ~init:errors ~f:add_reference
+      | Location _ -> errors
     in
     let error (location, unawaited_awaitable) =
       Error.create
@@ -105,108 +165,278 @@ module State (Context : Context) = struct
     {
       unawaited = Map.merge_skewed left.unawaited right.unawaited ~combine:merge_unawaited;
       locals = Map.merge_skewed left.locals right.locals ~combine:merge_locals;
+      need_to_await = left.need_to_await || right.need_to_await;
     }
 
 
   let widen ~previous ~next ~iteration:_ = join previous next
 
-  let mark_name_as_awaited { unawaited; locals } ~name =
+  let mark_name_as_awaited { unawaited; locals; need_to_await } ~name =
     if Expression.is_simple_name name then
       let unawaited =
         let await_location unawaited location = Map.set unawaited ~key:location ~data:Awaited in
-        Map.find locals (Expression.name_to_reference_exn name)
+        Map.find locals (Reference (Expression.name_to_reference_exn name))
         >>| (fun locations -> Set.fold locations ~init:unawaited ~f:await_location)
         |> Option.value ~default:unawaited
       in
-      { unawaited; locals }
+      { unawaited; locals; need_to_await }
     else (* Non-simple names cannot store awaitables. *)
-      { unawaited; locals }
+      { unawaited; locals; need_to_await }
+
+
+  let mark_location_as_awaited { unawaited; locals; need_to_await } ~location =
+    if Map.mem unawaited location then
+      { unawaited = Map.set unawaited ~key:location ~data:Awaited; locals; need_to_await }
+    else
+      match Map.find locals (Location location) with
+      | Some locations ->
+          let unawaited =
+            Set.fold locations ~init:unawaited ~f:(fun unawaited location ->
+                Map.set unawaited ~key:location ~data:Awaited)
+          in
+          { unawaited; locals; need_to_await }
+      | None -> { unawaited; locals; need_to_await }
+
+
+  let ( |>> ) (new_awaitables, state) awaitables = List.rev_append new_awaitables awaitables, state
+
+  let await_all_subexpressions ~state ~expression =
+    let names =
+      Visit.collect_names
+        { Node.location = Node.location expression; value = Expression expression }
+    in
+    let mark state name = mark_name_as_awaited state ~name:(Node.value name) in
+    List.fold names ~init:state ~f:mark
 
 
   let rec forward_generator
-      state
+      ~resolution
+      (awaitables, state)
       { Expression.Comprehension.target = _; iterator; conditions; async = _ }
     =
-    let state =
+    let awaitables, state =
       List.fold
         conditions
-        ~f:(fun state expression -> forward_expression ~state ~expression)
-        ~init:state
+        ~f:(fun (awaitables, state) expression ->
+          forward_expression ~resolution ~state ~expression |>> awaitables)
+        ~init:(awaitables, state)
     in
-    forward_expression ~state ~expression:iterator
+    forward_expression ~resolution ~state ~expression:iterator |>> awaitables
 
 
-  and forward_expression ~state ~expression:{ Node.value; _ } =
+  and forward_expression
+      ~resolution
+      ~(state : t)
+      ~expression:({ Node.value; location } as expression)
+    =
     let open Expression in
     match value with
-    | Await { Node.value = Name name; _ } when Expression.is_simple_name name ->
-        mark_name_as_awaited state ~name
-    | Await expression -> forward_expression ~state ~expression
+    | Await ({ Node.value = Name name; _ } as expression) when Expression.is_simple_name name ->
+        let awaitables, state = forward_expression ~resolution ~state ~expression in
+        awaitables, mark_name_as_awaited state ~name
+    | Await ({ Node.location; _ } as expression) ->
+        let awaitables, state = forward_expression ~resolution ~state ~expression in
+        awaitables, mark_location_as_awaited state ~location
     | BooleanOperator { BooleanOperator.left; right; _ } ->
-        let state = forward_expression ~state ~expression:left in
-        forward_expression ~state ~expression:right
-    | Call { Call.callee; arguments } ->
-        let state = forward_expression ~state ~expression:callee in
-        let forward_argument state { Call.Argument.value; _ } =
-          match value with
-          | { Node.value = Name name; _ } -> mark_name_as_awaited state ~name
-          | _ -> forward_expression ~state ~expression:value
+        let awaitables, state = forward_expression ~resolution ~state ~expression:left in
+        let new_awaitables, state = forward_expression ~resolution ~state ~expression:right in
+        List.rev_append awaitables new_awaitables, state
+    | Call { Call.callee; arguments } -> (
+        let awaitables, state = forward_expression ~resolution ~state ~expression:callee in
+        let is_special_function =
+          match Node.value callee with
+          | Name (Name.Attribute { special = true; _ }) -> true
+          | _ -> false
         in
-        List.fold arguments ~init:state ~f:forward_argument
+        let forward_argument (awaitables, state) { Call.Argument.value; _ } =
+          (* For special methods such as `+`, ensure that we still require you to await the
+             expressions. *)
+          if is_special_function then
+            forward_expression ~resolution ~state ~expression:value |>> awaitables
+          else
+            let state = await_all_subexpressions ~state ~expression:value in
+            awaitables, state
+        in
+        let awaitables, state =
+          match Node.value callee, arguments with
+          (* a["b"] = c gets converted to a.__setitem__("b", c). *)
+          | ( Name (Name.Attribute { attribute = "__setitem__"; base; _ }),
+              [_; { Call.Argument.value; _ }] ) -> (
+              let new_awaitables, state =
+                forward_expression ~resolution ~state ~expression:value
+              in
+              match Node.value base with
+              | Name name when Expression.is_simple_name name && not (List.is_empty new_awaitables)
+                ->
+                  let { locals; _ } = state in
+                  let name = Expression.name_to_reference_exn name in
+                  let awaitable_locations =
+                    new_awaitables |> List.map ~f:Node.location |> Location.Reference.Set.of_list
+                  in
+                  let locals =
+                    match Map.find locals (Reference name) with
+                    | Some awaitables ->
+                        Map.set
+                          locals
+                          ~key:(Reference name)
+                          ~data:(Set.union awaitables awaitable_locations)
+                    | None -> Map.set locals ~key:(Reference name) ~data:awaitable_locations
+                  in
+                  List.rev_append new_awaitables awaitables, { state with locals }
+              | _ -> awaitables, state )
+          | _ ->
+              let need_to_await = state.need_to_await in
+              (* Don't introduce awaitables for the arguments of a call, as they will be consumed
+                 by the call anyway. *)
+              let awaitables, state =
+                List.fold
+                  arguments
+                  ~init:(awaitables, { state with need_to_await = is_special_function })
+                  ~f:forward_argument
+              in
+              let state = { state with need_to_await } in
+              awaitables, state
+        in
+        let annotation = Resolution.resolve resolution expression in
+        let is_awaitable =
+          GlobalResolution.less_or_equal
+            (Resolution.global_resolution resolution)
+            ~left:annotation
+            ~right:(Type.awaitable Type.Top)
+        in
+        let { unawaited; locals; need_to_await } = state in
+        let find_aliases { Node.value; location } =
+          if Map.mem unawaited location then
+            Some (Location.Reference.Set.singleton location)
+          else
+            match value with
+            | Name name when Expression.is_simple_name name ->
+                Map.find locals (Reference (Expression.name_to_reference_exn name))
+            | _ -> Map.find locals (Location location)
+        in
+        if need_to_await && is_awaitable then
+          (* If the callee is a method on an awaitable, make the assumption that the returned value
+             is the same awaitable. *)
+          let awaitables = expression :: awaitables in
+          match Node.value callee with
+          | Name (Name.Attribute { base; _ }) -> (
+            match find_aliases base with
+            | Some locations ->
+                ( awaitables,
+                  {
+                    unawaited;
+                    locals = Map.set locals ~key:(Location location) ~data:locations;
+                    need_to_await;
+                  } )
+            | None ->
+                ( awaitables,
+                  {
+                    unawaited = Map.set unawaited ~key:location ~data:(Unawaited expression);
+                    locals;
+                    need_to_await;
+                  } ) )
+          | _ ->
+              ( awaitables,
+                {
+                  unawaited = Map.set unawaited ~key:location ~data:(Unawaited expression);
+                  locals;
+                  need_to_await;
+                } )
+        else
+          match Node.value callee with
+          | Name (Name.Attribute { base; _ }) -> (
+            match find_aliases base with
+            | Some locations ->
+                ( awaitables,
+                  {
+                    unawaited;
+                    locals = Map.set locals ~key:(Location location) ~data:locations;
+                    need_to_await;
+                  } )
+            | None -> awaitables, state )
+          | _ -> awaitables, state )
     | ComparisonOperator { ComparisonOperator.left; right; _ } ->
-        let state = forward_expression ~state ~expression:left in
-        forward_expression ~state ~expression:right
+        let awaitables, state = forward_expression ~resolution ~state ~expression:left in
+        forward_expression ~resolution ~state ~expression:right |>> awaitables
     | Dictionary { Dictionary.entries; keywords } ->
-        let forward_entry state { Dictionary.key; value } =
-          let state = forward_expression ~state ~expression:key in
-          forward_expression ~state ~expression:value
+        let forward_entry (awaitables, state) { Dictionary.key; value } =
+          let awaitables, state =
+            forward_expression ~resolution ~state ~expression:key |>> awaitables
+          in
+          forward_expression ~resolution ~state ~expression:value |>> awaitables
         in
-        let state = List.fold entries ~init:state ~f:forward_entry in
-        List.fold keywords ~init:state ~f:(fun state expression ->
-            forward_expression ~state ~expression)
-    | Lambda { Lambda.body; _ } -> forward_expression ~state ~expression:body
+        let awaitables, state = List.fold entries ~init:([], state) ~f:forward_entry in
+        let forward_keywords (awaitables, state) expression =
+          forward_expression ~resolution ~state ~expression |>> awaitables
+        in
+        List.fold keywords ~init:(awaitables, state) ~f:forward_keywords
+    | Lambda { Lambda.body; _ } -> forward_expression ~resolution ~state ~expression:body
     | Starred (Starred.Once expression)
     | Starred (Starred.Twice expression) ->
-        forward_expression ~state ~expression
+        forward_expression ~resolution ~state ~expression
     | Ternary { Ternary.target; test; alternative } ->
-        let state = forward_expression ~state ~expression:target in
-        let state = forward_expression ~state ~expression:test in
-        forward_expression ~state ~expression:alternative
+        let awaitables, state = forward_expression ~resolution ~state ~expression:target in
+        let awaitables, state =
+          forward_expression ~resolution ~state ~expression:test |>> awaitables
+        in
+        forward_expression ~resolution ~state ~expression:alternative |>> awaitables
     | List items
     | Set items
     | Tuple items ->
-        List.fold items ~init:state ~f:(fun state expression ->
-            forward_expression ~state ~expression)
-    | UnaryOperator { UnaryOperator.operand; _ } -> forward_expression ~state ~expression:operand
-    | Yield (Some expression) -> forward_expression ~state ~expression
-    | Yield None -> state
+        List.fold items ~init:([], state) ~f:(fun (awaitables, state) expression ->
+            forward_expression ~resolution ~state ~expression |>> awaitables)
+    | UnaryOperator { UnaryOperator.operand; _ } ->
+        forward_expression ~resolution ~state ~expression:operand
+    | Yield (Some expression) -> forward_expression ~resolution ~state ~expression
+    | Yield None -> [], state
     | Generator { Expression.Comprehension.element; generators }
     | ListComprehension { Expression.Comprehension.element; generators }
     | SetComprehension { Expression.Comprehension.element; generators } ->
-        let state = List.fold generators ~init:state ~f:forward_generator in
-        forward_expression ~state ~expression:element
+        let awaitables, state =
+          List.fold generators ~init:([], state) ~f:(forward_generator ~resolution)
+        in
+        forward_expression ~resolution ~state ~expression:element |>> awaitables
     | DictionaryComprehension
         { Expression.Comprehension.element = { Expression.Dictionary.key; value }; generators } ->
-        let state = List.fold generators ~init:state ~f:forward_generator in
-        let state = forward_expression ~state ~expression:key in
-        forward_expression ~state ~expression:value
+        let awaitables, state =
+          List.fold generators ~init:([], state) ~f:(forward_generator ~resolution)
+        in
+        let awaitables, state =
+          forward_expression ~resolution ~state ~expression:key |>> awaitables
+        in
+        forward_expression ~resolution ~state ~expression:value |>> awaitables
+    | Name (Name.Attribute { base; _ }) -> forward_expression ~resolution ~state ~expression:base
+    | Name name when Expression.is_simple_name name ->
+        let awaitables =
+          match Map.find state.locals (Reference (Expression.name_to_reference_exn name)) with
+          | Some aliases ->
+              let add_unawaited unawaited location =
+                match Map.find state.unawaited location with
+                | Some (Unawaited expression) -> expression :: unawaited
+                | _ -> unawaited
+              in
+              Set.fold aliases ~init:[] ~f:add_unawaited
+          | None -> []
+        in
+        awaitables, state
     (* Base cases. *)
     | Complex _
     | False
     | Float _
     | Integer _
     | String _
-    | True
     | Name _
+    | True
     | Ellipsis ->
-        state
+        [], state
 
 
-  let rec forward_assign
+  and forward_assign
       ~resolution
-      ~state:({ unawaited; locals } as state)
+      ~state:({ unawaited; locals; need_to_await } as state)
       ~annotation
       ~expression
+      ~awaitables
       ~target
     =
     let open Expression in
@@ -228,30 +458,32 @@ module State (Context : Context) = struct
       | { Node.value = Expression.Name value; _ } when Expression.is_simple_name value ->
           (* Aliasing. *)
           let locals =
-            Map.find locals (Expression.name_to_reference_exn value)
+            Map.find locals (Reference (Expression.name_to_reference_exn value))
             >>| (fun locations ->
-                  Map.set locals ~key:(Expression.name_to_reference_exn target) ~data:locations)
+                  Map.set
+                    locals
+                    ~key:(Reference (Expression.name_to_reference_exn target))
+                    ~data:locations)
             |> Option.value ~default:locals
           in
-          { unawaited; locals }
+          { unawaited; locals; need_to_await }
       | _ ->
-          if
-            GlobalResolution.less_or_equal
-              resolution
-              ~left:annotation
-              ~right:(Type.awaitable Type.Top)
-          then
-            {
-              unawaited =
-                Map.set unawaited ~key:(Node.location expression) ~data:(Unawaited expression);
-              locals =
-                Map.set
-                  locals
-                  ~key:(Expression.name_to_reference_exn target)
-                  ~data:(Location.Reference.Set.singleton (Node.location expression));
-            }
-          else
-            state )
+          (* The expression must be analyzed before we call `forward_assign` on it, as that's where
+             unawaitables are introduced. *)
+          let locals =
+            let location = Node.location expression in
+            let key = Reference (Expression.name_to_reference_exn target) in
+            if not (List.is_empty awaitables) then
+              let awaitable_locations =
+                List.map awaitables ~f:Node.location |> Location.Reference.Set.of_list
+              in
+              Map.set locals ~key ~data:awaitable_locations
+            else if Map.mem unawaited location then
+              Map.set locals ~key ~data:(Location.Reference.Set.singleton location)
+            else
+              locals
+          in
+          { unawaited; locals; need_to_await } )
     | List elements
     | Tuple elements
       when is_nonuniform_sequence ~minimum_length:(List.length elements) annotation -> (
@@ -296,7 +528,8 @@ module State (Context : Context) = struct
             in
             List.zip_exn (left @ starred @ right) tuple_values
             |> List.fold ~init:state ~f:(fun state (target, (annotation, expression)) ->
-                   forward_assign ~resolution ~state ~target ~annotation ~expression)
+                   (* Don't propagate awaitables for tuple assignments for soundness. *)
+                   forward_assign ~resolution ~state ~target ~annotation ~awaitables:[] ~expression)
         | _ ->
             (* Right now, if we don't have a concrete tuple to break down, we won't introduce new
                unawaited awaitables. *)
@@ -304,59 +537,44 @@ module State (Context : Context) = struct
     | _ -> state
 
 
-  let forward ?key ({ unawaited; locals } as state) ~statement:{ Node.value; _ } =
+  let forward ?key state ~statement:{ Node.value; _ } =
     let { Node.value = { Define.signature = { name; parent; _ }; _ }; _ } = Context.define in
     let resolution =
       TypeCheck.resolution_with_key ~global_resolution:Context.global_resolution ~parent ~name ~key
     in
     let global_resolution = Resolution.global_resolution resolution in
-    let is_awaitable expression =
-      try
-        let annotation = Resolution.resolve resolution expression in
-        GlobalResolution.less_or_equal
-          global_resolution
-          ~left:annotation
-          ~right:(Type.awaitable Type.Top)
-      with
-      | ClassHierarchy.Untracked _ -> false
-    in
-    let forward_return ~state:{ unawaited; locals } ~expression =
-      match Node.value expression with
-      | Expression.Name name when Expression.is_simple_name name ->
-          mark_name_as_awaited state ~name
-      | _ -> { unawaited; locals }
-    in
     match value with
-    | Assert { Assert.test; _ } -> forward_expression ~state ~expression:test
+    | Assert { Assert.test; _ } -> forward_expression ~resolution ~state ~expression:test |> snd
     | Assign { value; target; _ } ->
-        let state = forward_expression ~state ~expression:value in
+        let awaitables, state = forward_expression ~resolution ~state ~expression:value in
         let annotation = Resolution.resolve resolution value in
-        forward_assign ~state ~resolution:global_resolution ~annotation ~expression:value ~target
+        forward_assign
+          ~state
+          ~resolution:global_resolution
+          ~annotation
+          ~expression:value
+          ~awaitables
+          ~target
     | Delete expression
     | Expression expression ->
-        let state =
-          if is_awaitable expression then
-            {
-              unawaited =
-                Map.set unawaited ~key:(Node.location expression) ~data:(Unawaited expression);
-              locals;
-            }
-          else
-            state
-        in
-        forward_expression ~state ~expression
+        forward_expression ~resolution ~state ~expression |> snd
     | Raise { Raise.expression = None; _ } -> state
-    | Raise { Raise.expression = Some expression; _ } -> forward_expression ~state ~expression
+    | Raise { Raise.expression = Some expression; _ } ->
+        forward_expression ~resolution ~state ~expression |> snd
     | Return { expression = Some expression; _ } ->
-        let state = forward_expression ~state ~expression in
-        forward_return ~state ~expression
+        let need_to_await = state.need_to_await in
+        let _, state =
+          forward_expression ~resolution ~state:{ state with need_to_await = false } ~expression
+        in
+        let state = { state with need_to_await } in
+        await_all_subexpressions ~state ~expression
     | Return { expression = None; _ } -> state
     | Yield { Node.value = Expression.Yield (Some expression); _ } ->
-        let state = forward_expression ~state ~expression in
-        forward_return ~state ~expression
+        let _, state = forward_expression ~resolution ~state ~expression in
+        await_all_subexpressions ~state ~expression
     | Yield _ -> state
     | YieldFrom { Node.value = Expression.Yield (Some expression); _ } ->
-        forward_expression ~state ~expression
+        forward_expression ~resolution ~state ~expression |> snd
     | YieldFrom _ -> state
     (* Control flow and nested functions/classes doesn't need to be analyzed explicitly. *)
     | If _
@@ -392,9 +610,25 @@ let run ~configuration:_ ~global_resolution ~source =
     in
     let module State = State (Context) in
     let module Fixpoint = Fixpoint.Make (State) in
-    Fixpoint.forward ~cfg:(Cfg.create (Node.value define)) ~initial:State.initial
-    |> Fixpoint.exit
-    >>| State.errors
-    |> Option.value ~default:[]
+    let should_run_analysis =
+      define.Node.value.Define.signature.Define.parent
+      >>| (fun parent -> Type.Primitive (Reference.show parent))
+      >>| (fun parent_type ->
+            not
+              (GlobalResolution.less_or_equal
+                 global_resolution
+                 ~left:parent_type
+                 ~right:(Type.awaitable Type.Top)))
+      |> Option.value ~default:true
+    in
+    if should_run_analysis then
+      Fixpoint.forward
+        ~cfg:(Cfg.create (Node.value define))
+        ~initial:(State.initial ~global_resolution (Node.value define))
+      |> Fixpoint.exit
+      >>| State.errors
+      |> Option.value ~default:[]
+    else
+      []
   in
   source |> Preprocessing.defines ~include_toplevels:true |> List.map ~f:check |> List.concat

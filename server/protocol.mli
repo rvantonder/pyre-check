@@ -45,6 +45,10 @@ module TypeQuery : sig
   [@@deriving eq, show, to_yojson]
 
   type request =
+    | RunCheck of {
+        check_name: string;
+        paths: Path.t list;
+      }
     | Attributes of Reference.t
     | Callees of Reference.t
     | ComputeHashesToKeys
@@ -163,6 +167,7 @@ module TypeQuery : sig
     | Compatibility of compatibility
     | CoverageAtLocations of coverage_at_location list
     | Decoded of decoded
+    | Errors of Error.Instantiated.t list
     | FoundAttributes of attribute list
     | FoundKeyMapping of key_mapping list
     | FoundMethods of method_representation list
@@ -234,7 +239,7 @@ type response =
   | LanguageServerProtocolResponse of string
   | ClientConnectionResponse of client
   | ClientExitResponse of client
-  | TypeCheckResponse of Error.t list
+  | TypeCheckResponse of Error.Instantiated.t list
   | TypeQueryResponse of TypeQuery.response
   | StopResponse
   | GetDefinitionResponse of Location.Instantiated.t option

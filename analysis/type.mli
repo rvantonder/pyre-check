@@ -14,20 +14,20 @@ module Record : sig
       type t [@@deriving compare, eq, sexp, show, hash]
     end
 
+    type 'annotation constraints =
+      | Bound of 'annotation
+      | Explicit of 'annotation list
+      | Unconstrained
+      | LiteralIntegers
+    [@@deriving compare, eq, sexp, show, hash]
+
+    type variance =
+      | Covariant
+      | Contravariant
+      | Invariant
+    [@@deriving compare, eq, sexp, show, hash]
+
     module RecordUnary : sig
-      type 'annotation constraints =
-        | Bound of 'annotation
-        | Explicit of 'annotation list
-        | Unconstrained
-        | LiteralIntegers
-      [@@deriving compare, eq, sexp, show, hash]
-
-      type variance =
-        | Covariant
-        | Contravariant
-        | Invariant
-      [@@deriving compare, eq, sexp, show, hash]
-
       type 'annotation record = {
         variable: Identifier.t;
         constraints: 'annotation constraints;
@@ -40,7 +40,7 @@ module Record : sig
 
     module RecordVariadic : sig
       module RecordParameters : sig
-        type record [@@deriving compare, eq, sexp, show, hash]
+        type 'annotation record [@@deriving compare, eq, sexp, show, hash]
 
         module RecordComponents : sig
           type t [@@deriving compare, eq, sexp, show, hash]
@@ -48,29 +48,30 @@ module Record : sig
       end
 
       module RecordList : sig
-        type record [@@deriving compare, eq, sexp, show, hash]
+        type 'annotation record [@@deriving compare, eq, sexp, show, hash]
       end
     end
 
-    type 'a record =
-      | Unary of 'a RecordUnary.record
-      | ParameterVariadic of RecordVariadic.RecordParameters.record
-      | ListVariadic of RecordVariadic.RecordList.record
+    type 'annotation record =
+      | Unary of 'annotation RecordUnary.record
+      | ParameterVariadic of 'annotation RecordVariadic.RecordParameters.record
+      | ListVariadic of 'annotation RecordVariadic.RecordList.record
     [@@deriving compare, eq, sexp, show, hash]
   end
 
   module OrderedTypes : sig
-    module RecordMap : sig
-      type mappee [@@deriving compare, eq, sexp, show, hash]
+    module RecordConcatenate : sig
+      module Middle : sig
+        type 'annotation t [@@deriving compare, eq, sexp, show, hash]
+      end
 
-      type t [@@deriving compare, eq, sexp, show, hash]
+      type ('middle, 'outer) t [@@deriving compare, eq, sexp, show, hash]
     end
 
     type 'annotation record =
       | Concrete of 'annotation list
-      | Variable of Variable.RecordVariadic.RecordList.record
       | Any
-      | Map of RecordMap.t
+      | Concatenation of ('annotation RecordConcatenate.Middle.t, 'annotation) RecordConcatenate.t
     [@@deriving compare, eq, sexp, show, hash]
 
     val pp_concise
@@ -90,8 +91,10 @@ module Record : sig
 
       and 'annotation variable =
         | Concrete of 'annotation
-        | Variadic of Variable.RecordVariadic.RecordList.record
-        | Map of OrderedTypes.RecordMap.t
+        | Concatenation of
+            ( 'annotation OrderedTypes.RecordConcatenate.Middle.t,
+              'annotation )
+            OrderedTypes.RecordConcatenate.t
 
       and 'annotation t =
         | Anonymous of {
@@ -120,7 +123,8 @@ module Record : sig
     and 'annotation record_parameters =
       | Defined of 'annotation RecordParameter.t list
       | Undefined
-      | ParameterVariadicTypeVariable of Variable.RecordVariadic.RecordParameters.record
+      | ParameterVariadicTypeVariable of
+          'annotation Variable.RecordVariadic.RecordParameters.record
 
     and 'annotation overload = {
       annotation: 'annotation;
@@ -476,32 +480,71 @@ module OrderedTypes : sig
 
   val pp_concise : Format.formatter -> t -> unit
 
-  module Map : sig
+  module Concatenation : sig
     include module type of struct
-      include Record.OrderedTypes.RecordMap
+      include Record.OrderedTypes.RecordConcatenate
     end
 
-    val parse : Expression.t -> aliases:(Primitive.t -> alias option) -> t option
+    module Middle : sig
+      include module type of struct
+        include Record.OrderedTypes.RecordConcatenate.Middle
+      end
 
-    (* For testing only *)
-    val create
-      :  mappers:string list ->
-      variable:Record.Variable.RecordVariadic.RecordList.record ->
-      t
+      val unwrap_if_bare
+        :  type_t t ->
+        type_t Record.Variable.RecordVariadic.RecordList.record option
 
-    val variable : t -> Record.Variable.RecordVariadic.RecordList.record
+      val create_bare : type_t Record.Variable.RecordVariadic.RecordList.record -> type_t t
 
-    val singleton_replace_variable : t -> replacement:type_t -> type_t
+      val create
+        :  variable:type_t Record.Variable.RecordVariadic.RecordList.record ->
+        mappers:Identifier.t list ->
+        type_t t
+
+      val singleton_replace_variable : type_t t -> replacement:type_t -> type_t
+    end
+
+    val map_head_and_tail
+      :  ('middle, 'outer_a) t ->
+      f:('outer_a -> 'outer_b) ->
+      ('middle, 'outer_b) t
+
+    val map_middle : ('middle_a, 'outer) t -> f:('middle_a -> 'middle_b) -> ('middle_b, 'outer) t
 
     val replace_variable
-      :  t ->
-      replacement:(Record.Variable.RecordVariadic.RecordList.record -> ordered_types_t option) ->
+      :  (type_t Middle.t, type_t) t ->
+      replacement:
+        (type_t Record.Variable.RecordVariadic.RecordList.record -> ordered_types_t option) ->
       ordered_types_t option
 
-    val expression : t -> Expression.t
+    val head : ('middle, 'outer) t -> 'outer list
+
+    val middle : ('middle, 'outer) t -> 'middle
+
+    val tail : ('middle, 'outer) t -> 'outer list
+
+    val unwrap_if_only_middle : ('middle, 'outer) t -> 'middle option
+
+    val variable
+      :  (type_t Middle.t, 'outer) t ->
+      type_t Record.Variable.RecordVariadic.RecordList.record
+
+    val expression : (type_t Middle.t, type_t) t -> Expression.t
+
+    val parse
+      :  Expression.t ->
+      aliases:(Primitive.t -> alias option) ->
+      (type_t Middle.t, type_t) t option
+
+    val create : ?head:'outer list -> ?tail:'outer list -> 'middle -> ('middle, 'outer) t
+
+    val zip : ('middle, 'outer) t -> against:'a list -> ('middle * 'a list, 'outer * 'a) t option
   end
 
   val union_upper_bound : t -> type_t
+
+  (* Concatenation is only defined for certain members *)
+  val concatenate : left:t -> right:t -> t option
 end
 
 val split : t -> t * OrderedTypes.t
@@ -537,12 +580,12 @@ module Variable : sig
 
   type unary_domain = type_t
 
-  type parameter_variadic_t = Record.Variable.RecordVariadic.RecordParameters.record
+  type parameter_variadic_t = type_t Record.Variable.RecordVariadic.RecordParameters.record
   [@@deriving compare, eq, sexp, show, hash]
 
   type parameter_variadic_domain = Callable.parameters
 
-  type list_variadic_t = Record.Variable.RecordVariadic.RecordList.record
+  type list_variadic_t = type_t Record.Variable.RecordVariadic.RecordList.record
   [@@deriving compare, eq, sexp, show, hash]
 
   type list_variadic_domain = OrderedTypes.t
@@ -591,7 +634,11 @@ module Variable : sig
 
     include VariableKind with type t = unary_t and type domain = type_t
 
-    val create : ?constraints:type_t constraints -> ?variance:variance -> string -> t
+    val create
+      :  ?constraints:type_t Record.Variable.constraints ->
+      ?variance:Record.Variable.variance ->
+      string ->
+      t
 
     val is_contravariant : t -> bool
 
@@ -610,7 +657,7 @@ module Variable : sig
 
       val name : t -> Identifier.t
 
-      val create : string -> t
+      val create : ?variance:Record.Variable.variance -> string -> t
 
       val parse_instance_annotation
         :  variable_parameter_annotation:Expression.t ->
@@ -639,7 +686,11 @@ module Variable : sig
 
       val name : t -> Identifier.t
 
-      val create : string -> t
+      val create
+        :  ?constraints:type_t Record.Variable.constraints ->
+        ?variance:Record.Variable.variance ->
+        string ->
+        t
     end
   end
 
@@ -696,8 +747,8 @@ end
 val namespace_insensitive_compare : t -> t -> int
 
 val variable
-  :  ?constraints:type_t Variable.Unary.constraints ->
-  ?variance:Variable.Unary.variance ->
+  :  ?constraints:type_t Variable.constraints ->
+  ?variance:Variable.variance ->
   string ->
   t
 

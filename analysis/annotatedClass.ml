@@ -15,7 +15,7 @@ type t = Class.t Node.t [@@deriving compare, eq, sexp, show, hash]
 
 type decorator = {
   name: string;
-  arguments: Expression.t Expression.Call.Argument.t list option;
+  arguments: Expression.Call.Argument.t list option;
 }
 [@@deriving compare, eq, sexp, show, hash]
 
@@ -199,7 +199,7 @@ let find_propagated_type_variables bases ~resolution =
     |> Type.Variable.all_free_variables
   in
   let handle_deduplicated = function
-    | [Type.Variable.ListVariadic variable] -> Type.OrderedTypes.Variable variable
+    | [Type.Variable.ListVariadic variable] -> Type.Variable.Variadic.List.self_reference variable
     | deduplicated ->
         let to_unary = function
           | Type.Variable.Unary variable -> Some (Type.Variable variable)
@@ -709,6 +709,8 @@ let extends_placeholder_stub_class
   in
   List.exists bases ~f:is_from_placeholder_stub
 
+
+let implicit_attributes { Node.value; _ } = Statement.Class.implicit_attributes value
 
 let attribute_table
     ~transitive

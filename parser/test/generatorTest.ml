@@ -884,6 +884,105 @@ let test_define _ =
            body = [+Return { Return.expression = Some (+Integer 4); is_implicit = false }];
          } ];
   assert_parsed_equal
+    (trim_extra_indentation {|
+        def foo(): # type:   ()-> str
+          return 4
+      |})
+    [ +Define
+         {
+           signature =
+             {
+               name = !&"foo";
+               parameters = [];
+               decorators = [];
+               docstring = None;
+               return_annotation = Some (+String (StringLiteral.create "str"));
+               async = false;
+               parent = None;
+             };
+           body = [+Return { Return.expression = Some (+Integer 4); is_implicit = false }];
+         } ];
+  assert_parsed_equal
+    (trim_extra_indentation
+       {|
+         def foo( *args): # type: ( *str) -> str
+           return 4
+       |})
+    [ +Define
+         {
+           signature =
+             {
+               name = !&"foo";
+               parameters =
+                 [ +{
+                      Parameter.name = "*args";
+                      value = None;
+                      annotation = Some (+String (StringLiteral.create "str"));
+                    } ];
+               decorators = [];
+               docstring = None;
+               return_annotation = Some (+String (StringLiteral.create "str"));
+               async = false;
+               parent = None;
+             };
+           body = [+Return { Return.expression = Some (+Integer 4); is_implicit = false }];
+         } ];
+  assert_parsed_equal
+    (trim_extra_indentation
+       {|
+         def foo( **kwargs): # type: ( **str) -> str
+           return 4
+       |})
+    [ +Define
+         {
+           signature =
+             {
+               name = !&"foo";
+               parameters =
+                 [ +{
+                      Parameter.name = "**kwargs";
+                      value = None;
+                      annotation = Some (+String (StringLiteral.create "str"));
+                    } ];
+               decorators = [];
+               docstring = None;
+               return_annotation = Some (+String (StringLiteral.create "str"));
+               async = false;
+               parent = None;
+             };
+           body = [+Return { Return.expression = Some (+Integer 4); is_implicit = false }];
+         } ];
+  assert_parsed_equal
+    (trim_extra_indentation
+       {|
+         def foo( *args, **kwargs): # type: ( *str, **str) -> str
+           return 4
+       |})
+    [ +Define
+         {
+           signature =
+             {
+               name = !&"foo";
+               parameters =
+                 [ +{
+                      Parameter.name = "*args";
+                      value = None;
+                      annotation = Some (+String (StringLiteral.create "str"));
+                    };
+                   +{
+                      Parameter.name = "**kwargs";
+                      value = None;
+                      annotation = Some (+String (StringLiteral.create "str"));
+                    } ];
+               decorators = [];
+               docstring = None;
+               return_annotation = Some (+String (StringLiteral.create "str"));
+               async = false;
+               parent = None;
+             };
+           body = [+Return { Return.expression = Some (+Integer 4); is_implicit = false }];
+         } ];
+  assert_parsed_equal
     (trim_extra_indentation
        {|
       def foo(a):
@@ -1316,6 +1415,21 @@ let test_binary_operator _ =
                          special = true;
                        });
                arguments = [{ Call.Argument.name = None; value = +Integer 3 }];
+             }) ];
+  assert_parsed_equal
+    "1 >> a.b"
+    [ +Expression
+         (+Call
+             {
+               callee =
+                 +Name
+                    (Name.Attribute { base = +Integer 1; attribute = "__rshift__"; special = true });
+               arguments =
+                 [ {
+                     Call.Argument.name = None;
+                     value =
+                       +Name (Name.Attribute { base = !"a"; attribute = "b"; special = false });
+                   } ];
              }) ];
   assert_parsed_equal
     "1 - 2 + 3"

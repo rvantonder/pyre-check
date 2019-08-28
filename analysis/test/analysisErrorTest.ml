@@ -39,7 +39,7 @@ let mock_define = define ()
 
 let mock_parent = Type.Primitive "foo"
 
-let error ?(signature = mock_signature) ?(location = Location.Instantiated.any) kind =
+let error ?(signature = mock_signature) ?(location = Location.Reference.any) kind =
   { Error.location; kind; signature }
 
 
@@ -402,26 +402,21 @@ let test_due_to_analysis_limitations _ =
     (Error.Unpack { expected_count = 2; unpack_problem = UnacceptableType Type.Top })
 
 
-let test_due_to_mismatch_with_any _ =
-  let resolution = Test.resolution () in
+let test_due_to_mismatch_with_any context =
+  let resolution = ScratchProject.setup ~context [] |> ScratchProject.build_resolution in
   let assert_due_to_mismatch_with_any kind =
     assert_true (Error.due_to_mismatch_with_any resolution (error kind))
   in
   let assert_not_due_to_mismatch_with_any kind =
     assert_false (Error.due_to_mismatch_with_any resolution (error kind))
   in
-  (* ImpossibleIsinstance *)
+  (* ImpossibleAssertion *)
   assert_due_to_mismatch_with_any
-    (Error.ImpossibleIsinstance
+    (Error.ImpossibleAssertion
        {
          expression = !"expression";
-         mismatch =
-           {
-             Error.actual = Type.Any;
-             actual_expressions = [];
-             expected = Type.Any;
-             due_to_invariance = false;
-           };
+         annotation = Type.Any;
+         statement = parse_single_statement "assert expression";
        });
 
   (* IncompatibleAttributeType. *)
@@ -707,10 +702,12 @@ let test_due_to_mismatch_with_any _ =
        })
 
 
-let test_join _ =
+let test_join context =
+  let resolution =
+    let _, _, environment = ScratchProject.setup ~context [] |> ScratchProject.build_environment in
+    Environment.resolution environment ()
+  in
   let assert_join left right expected =
-    let environment = Test.environment () in
-    let resolution = Environment.resolution environment () in
     let result = Error.join ~resolution left right in
     assert_equal ~printer:Error.show ~cmp:Error.equal expected result
   in
@@ -980,30 +977,21 @@ let test_join _ =
   assert_join
     (error
        ~location:
-         {
-           Location.Instantiated.synthetic with
-           Location.start = { Location.line = 1; column = 0 };
-         }
+         { Location.Reference.synthetic with Location.start = { Location.line = 1; column = 0 } }
        (revealed_type "a" (Annotation.create Type.integer)))
     (error
        ~location:
-         {
-           Location.Instantiated.synthetic with
-           Location.start = { Location.line = 2; column = 1 };
-         }
+         { Location.Reference.synthetic with Location.start = { Location.line = 2; column = 1 } }
        (revealed_type "a" (Annotation.create Type.float)))
     (error
        ~location:
-         {
-           Location.Instantiated.synthetic with
-           Location.start = { Location.line = 1; column = 0 };
-         }
+         { Location.Reference.synthetic with Location.start = { Location.line = 1; column = 0 } }
        (revealed_type "a" (Annotation.create Type.float)))
 
 
-let test_less_or_equal _ =
+let test_less_or_equal context =
   let resolution =
-    let environment = Test.environment () in
+    let _, _, environment = ScratchProject.setup ~context [] |> ScratchProject.build_environment in
     Environment.resolution environment ()
   in
   assert_true
@@ -1069,45 +1057,44 @@ let test_less_or_equal _ =
        (error (revealed_type "a" (Annotation.create_immutable ~global:true Type.float))))
 
 
-let test_filter _ =
+let test_filter context =
   let open Error in
-  let environment =
-    Test.environment
-      ~configuration
-      ~sources:
-        ( parse
+  let resolution =
+    let _, _, environment =
+      ScratchProject.setup
+        ~context
+        [ ( "test.py",
             {|
-          class Foo: ...
-          class MockChild(unittest.mock.Mock): ...
-          class NonCallableChild(unittest.mock.NonCallableMock): ...
-          class NonMockChild(Foo): ...
-        |}
-        :: Test.typeshed_stubs () )
-      ()
+            class Foo: ...
+            class MockChild(unittest.mock.Mock): ...
+            class NonCallableChild(unittest.mock.NonCallableMock): ...
+            class NonMockChild(Foo): ...
+          |}
+          ) ]
+      |> ScratchProject.build_environment
+    in
+    Environment.resolution environment ()
   in
-  let resolution = Environment.resolution environment () in
-  let assert_filtered ?(location = Location.Instantiated.any) ?(signature = mock_signature) kind =
+  let assert_filtered ?(location = Location.Reference.any) ?(signature = mock_signature) kind =
     let errors = [error ~signature ~location kind] in
     assert_equal [] (filter ~configuration ~resolution errors)
   in
-  let assert_unfiltered ?(location = Location.Instantiated.any) ?(signature = mock_signature) kind =
+  let assert_unfiltered ?(location = Location.Reference.any) ?(signature = mock_signature) kind =
     let errors = [error ~signature ~location kind] in
     assert_equal ~cmp:(List.equal equal) errors (filter ~configuration ~resolution errors)
   in
   (* Suppress stub errors. *)
-  let stub = { Location.Instantiated.any with Location.path = "stub.pyi" } in
+  let stub = { Location.Reference.any with Location.path = !&"stub" } in
   assert_unfiltered ~location:stub (undefined_attribute (Type.Primitive "Foo"));
-  assert_unfiltered
-    ~location:Location.Instantiated.any
-    (undefined_attribute (Type.Primitive "Foo"));
+  assert_unfiltered ~location:Location.Reference.any (undefined_attribute (Type.Primitive "Foo"));
 
   (* Suppress mock errors. *)
   assert_filtered (incompatible_return_type (Type.Primitive "unittest.mock.Mock") Type.integer);
   assert_unfiltered (incompatible_return_type Type.integer (Type.Primitive "unittest.mock.Mock"));
-  assert_filtered (undefined_attribute (Type.Primitive "MockChild"));
-  assert_filtered (undefined_attribute (Type.Primitive "NonCallableChild"));
-  assert_unfiltered (undefined_attribute (Type.Primitive "NonMockChild"));
-  assert_filtered (undefined_attribute (Type.Optional (Type.Primitive "NonCallableChild")));
+  assert_filtered (undefined_attribute (Type.Primitive "test.MockChild"));
+  assert_filtered (undefined_attribute (Type.Primitive "test.NonCallableChild"));
+  assert_unfiltered (undefined_attribute (Type.Primitive "test.NonMockChild"));
+  assert_filtered (undefined_attribute (Type.Optional (Type.Primitive "test.NonCallableChild")));
   assert_unfiltered (incompatible_return_type (Type.Optional Type.Bottom) Type.integer);
   assert_filtered (unexpected_keyword "foo" (Some "unittest.mock.call"));
   assert_unfiltered (unexpected_keyword "foo" None);
@@ -1157,8 +1144,8 @@ let test_filter _ =
     (inconsistent_override "__foo__" (StrengthenedPrecondition (NotFound (Keywords Type.integer))))
 
 
-let test_suppress _ =
-  let resolution = Test.resolution () in
+let test_suppress context =
+  let resolution = ScratchProject.setup ~context [] |> ScratchProject.build_resolution in
   let assert_suppressed mode ?(signature = mock_signature) ?location kind =
     assert_equal true (Error.suppress ~mode ~resolution (error ~signature ?location kind))
   in
@@ -1211,19 +1198,19 @@ let test_suppress _ =
   (* Always suppress synthetic locations. *)
   assert_suppressed
     Source.Infer
-    ~location:Location.Instantiated.synthetic
+    ~location:Location.Reference.synthetic
     (missing_return Type.integer);
   assert_suppressed
     Source.Declare
-    ~location:Location.Instantiated.synthetic
+    ~location:Location.Reference.synthetic
     (missing_return Type.integer);
   assert_suppressed
     Source.Default
-    ~location:Location.Instantiated.synthetic
+    ~location:Location.Reference.synthetic
     (missing_return Type.integer);
   assert_suppressed
     Source.Strict
-    ~location:Location.Instantiated.synthetic
+    ~location:Location.Reference.synthetic
     (missing_return Type.integer);
   assert_suppressed
     Source.Declare

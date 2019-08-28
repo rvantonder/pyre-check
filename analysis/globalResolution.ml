@@ -17,6 +17,10 @@ type generic_type_problems =
       actual: Type.t;
       expected: Type.Variable.Unary.t;
     }
+  | UnexpectedVariadic of {
+      actual: Type.OrderedTypes.t;
+      expected: Type.Variable.Unary.t list;
+    }
 [@@deriving compare, eq, sexp, show, hash]
 
 type type_parameters_mismatch = {
@@ -31,11 +35,12 @@ type class_metadata = {
   is_final: bool;
   extends_placeholder_stub_class: bool;
 }
-[@@deriving eq]
+[@@deriving eq, compare]
 
-type global = Annotation.t Node.t [@@deriving eq, show]
+type global = Annotation.t Node.t [@@deriving eq, show, compare]
 
 type t = {
+  ast_environment: AstEnvironment.ReadOnly.t;
   class_hierarchy: (module ClassHierarchy.Handler);
   aliases: Type.Primitive.t -> Type.alias option;
   module_definition: Reference.t -> Module.t option;
@@ -49,20 +54,95 @@ type t = {
   global: Reference.t -> global option;
 }
 
+type global_resolution_t = t
+
+module type AnnotatedClass = sig
+  type t
+
+  type class_data = {
+    instantiated: Type.t;
+    class_attributes: bool;
+    class_definition: t;
+  }
+
+  val create : Class.t Node.t -> t
+
+  val constructor : t -> instantiated:Type.t -> resolution:global_resolution_t -> Type.t
+
+  val is_protocol : t -> bool
+
+  val resolve_class : resolution:global_resolution_t -> Type.t -> class_data list option
+
+  val attributes
+    :  ?transitive:bool ->
+    ?class_attributes:bool ->
+    ?include_generated_attributes:bool ->
+    ?instantiated:Type.t ->
+    t ->
+    resolution:global_resolution_t ->
+    AnnotatedAttribute.t list
+end
+
 let create
-    ~class_hierarchy
+    ~ast_environment
     ~aliases
     ~module_definition
     ~class_definition
     ~class_metadata
-    ~constructor
     ~undecorated_signature
-    ~attributes
-    ~is_protocol
     ~global
-    ()
+    ~edges
+    ~backedges
+    ~indices
+    ~annotations
+    (module AnnotatedClass : AnnotatedClass)
   =
+  let constructor ~resolution class_name =
+    let instantiated = Type.Primitive class_name in
+    class_definition class_name
+    >>| AnnotatedClass.create
+    >>| AnnotatedClass.constructor ~instantiated ~resolution
+  in
+  let is_protocol annotation =
+    Type.split annotation
+    |> fst
+    |> Type.primitive_name
+    >>= class_definition
+    >>| AnnotatedClass.create
+    >>| AnnotatedClass.is_protocol
+    |> Option.value ~default:false
+  in
+  let attributes ~resolution annotation =
+    match AnnotatedClass.resolve_class ~resolution annotation with
+    | None -> None
+    | Some [] -> None
+    | Some [{ instantiated; class_attributes; class_definition }] ->
+        AnnotatedClass.attributes
+          class_definition
+          ~resolution
+          ~transitive:true
+          ~instantiated
+          ~class_attributes
+        |> Option.some
+    | Some (_ :: _) ->
+        (* These come from calling attributes on Unions, which are handled by solve_less_or_equal
+           indirectly by breaking apart the union before doing the instantiate_protocol_parameters.
+           Therefore, there is no reason to deal with joining the attributes together here *)
+        None
+  in
+  let class_hierarchy =
+    ( module struct
+      let edges = edges
+
+      let backedges key = backedges key >>| ClassHierarchy.Target.Set.of_tree
+
+      let indices = indices
+
+      let annotations = annotations
+    end : ClassHierarchy.Handler )
+  in
   {
+    ast_environment;
     class_hierarchy;
     aliases;
     module_definition;
@@ -189,16 +269,16 @@ let check_invalid_type_parameters resolution annotation =
                 in
                 ( Type.parametric name (Concrete (List.map generics ~f:(fun _ -> Type.Any))),
                   mismatch :: sofar ) )
-          | ListVariadic _, Any -> Type.parametric name given, sofar
-          | Unaries _, Variable _
-          | Unaries _, Any
-          | Unaries _, Map _ ->
-              (* TODO(T47348228): reject with a new kind of error *)
-              Type.parametric name given, sofar
-          | ListVariadic _, Map _
-          | ListVariadic _, Variable _
-          | ListVariadic _, Concrete _ ->
-              (* TODO(T47348228): accept w/ new kind of validation *)
+          | Concatenation _, Any -> Type.parametric name given, sofar
+          | Unaries generics, Concatenation _
+          | Unaries generics, Any ->
+              let mismatch =
+                { name; kind = UnexpectedVariadic { expected = generics; actual = given } }
+              in
+              Type.parametric name given, mismatch :: sofar
+          | Concatenation _, Concatenation _
+          | Concatenation _, Concrete _ ->
+              (* TODO(T47346673): accept w/ new kind of validation *)
               Type.parametric name given, sofar
         in
         match annotation with
@@ -353,6 +433,8 @@ let rec resolve_literal ({ class_definition; _ } as resolution) expression =
 
 let undecorated_signature { undecorated_signature; _ } = undecorated_signature
 
+let ast_environment { ast_environment; _ } = ast_environment
+
 let aliases { aliases; _ } = aliases
 
 let module_definition { module_definition; _ } = module_definition
@@ -397,7 +479,8 @@ let function_definitions resolution reference =
         qualifier ~lead:Reference.empty ~tail:(Reference.as_list reference)
       in
       let result =
-        Ast.SharedMemory.Sources.get qualifier
+        let ast_environment = ast_environment resolution in
+        AstEnvironment.ReadOnly.get_source ast_environment qualifier
         >>| Preprocessing.defines ~include_stubs:true ~include_nested:true
         >>| List.filter ~f:(fun { Node.value = { Define.signature = { name; _ }; _ }; _ } ->
                 Reference.equal reference name)
@@ -442,12 +525,29 @@ let is_compatible_with resolution = full_order resolution |> TypeOrder.is_compat
 
 let is_instantiated { class_hierarchy; _ } = ClassHierarchy.is_instantiated class_hierarchy
 
-let is_string_to_any_mapping resolution annotation =
-  (* TODO(T40377122): Remove special-casing of Dict[str, Any] in strict. *)
-  less_or_equal
-    resolution
-    ~left:annotation
-    ~right:(Type.optional (Type.parametric "typing.Mapping" (Concrete [Type.string; Type.Any])))
+let contains_prohibited_any resolution annotation =
+  let is_string_to_any_mapping resolution annotation =
+    (* TODO(T40377122): Remove special-casing of Dict[str, Any] in strict. *)
+    less_or_equal
+      resolution
+      ~left:annotation
+      ~right:(Type.optional (Type.parametric "typing.Mapping" (Concrete [Type.string; Type.Any])))
+  in
+  let module Exists = Type.Transform.Make (struct
+    type state = bool
+
+    let visit_children_before _ annotation = not (is_string_to_any_mapping resolution annotation)
+
+    let visit_children_after = false
+
+    let visit sofar annotation =
+      {
+        Type.Transform.transformed_annotation = annotation;
+        new_state = sofar || Type.is_any annotation;
+      }
+  end)
+  in
+  fst (Exists.visit false annotation)
 
 
 let parse_reference ?(allow_untracked = false) resolution reference =
@@ -464,8 +564,8 @@ let parse_as_list_variadic ({ aliases; _ } as resolution) name =
   | _ -> None
 
 
-let parse_as_list_variadic_map_operator { aliases; _ } expression =
-  Expression.delocalize expression |> Type.OrderedTypes.Map.parse ~aliases
+let parse_as_concatenation { aliases; _ } expression =
+  Expression.delocalize expression |> Type.OrderedTypes.Concatenation.parse ~aliases
 
 
 let parse_as_parameter_specification_instance_annotation
@@ -501,14 +601,14 @@ let is_invariance_mismatch ({ class_hierarchy; _ } as resolution) ~left ~right =
             |> function
             | List.Or_unequal_lengths.Ok list -> Some list
             | _ -> None )
-        | Some (ListVariadic _), _, _ ->
+        | Some (Concatenation _), _, _ ->
             (* TODO(T47346673): Do this check when list variadics have variance *)
             None
         | _ -> None
       in
       let due_to_invariant_variable (variance, left, right) =
         match variance with
-        | Type.Variable.Unary.Invariant -> less_or_equal resolution ~left ~right
+        | Type.Variable.Invariant -> less_or_equal resolution ~left ~right
         | _ -> false
       in
       zipped >>| List.exists ~f:due_to_invariant_variable |> Option.value ~default:false
@@ -586,4 +686,24 @@ let class_extends_placeholder_stub_class
   List.exists bases ~f:is_from_placeholder_stub
 
 
-let global { global; _ } = global
+let global { global; _ } reference =
+  (* TODO (T41143153): We might want to properly support this by unifying attribute lookup logic
+     for module and for class *)
+  match Reference.last reference with
+  | "__file__"
+  | "__name__" ->
+      let annotation =
+        Annotation.create_immutable ~global:true Type.string |> Node.create_with_default_location
+      in
+      Some annotation
+  | "__dict__" ->
+      let annotation =
+        Type.dictionary ~key:Type.string ~value:Type.Any
+        |> Annotation.create_immutable ~global:true
+        |> Node.create_with_default_location
+      in
+      Some annotation
+  | _ -> global reference
+
+
+let class_hierarchy { class_hierarchy; _ } = class_hierarchy

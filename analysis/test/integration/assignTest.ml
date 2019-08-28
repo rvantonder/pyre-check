@@ -28,10 +28,13 @@ let test_check_assign context =
       "Revealed type [-1]: Revealed type for `x` is `str`.";
       "Incompatible variable type [9]: x is declared to have type `str` "
       ^ "but is used as type `int`." ];
-  assert_default_type_errors {|
+  assert_default_type_errors
+    {|
+      import typing
       def foo(x: typing.Any) -> None:
         y: int = x
-    |} [];
+    |}
+    [];
   assert_type_errors
     {|
       def foo() -> None:
@@ -80,6 +83,7 @@ let test_check_assign context =
        path that doesn't define `x`." ];
   assert_type_errors
     {|
+      import typing
       from typing import Final
       x: Final[int] = 3
       x = 200
@@ -155,7 +159,26 @@ let test_check_assign context =
       a = A()
       a.foo = 1
     |}
-    []
+    [];
+  assert_type_errors
+    {|
+      import typing
+      x = typing.List[int]
+      reveal_type(x)
+
+      y = typing.Mapping[int, str]
+      reveal_type(y)
+    |}
+    [ "Revealed type [-1]: Revealed type for `x` is `typing.Type[typing.List[int]]`.";
+      "Revealed type [-1]: Revealed type for `y` is `typing.Type[typing.Mapping[int, str]]`." ];
+  assert_type_errors
+    {|
+      import typing
+      x = typing.List["foo"]
+      reveal_type(x)
+    |}
+    [ "Missing global annotation [5]: Globally accessible variable `x` has no type specified.";
+      "Revealed type [-1]: Revealed type for `x` is `unknown`." ]
 
 
 let () = "assign" >::: ["check_assign" >:: test_check_assign] |> Test.run

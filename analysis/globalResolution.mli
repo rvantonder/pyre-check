@@ -15,6 +15,10 @@ type generic_type_problems =
       actual: Type.t;
       expected: Type.Variable.Unary.t;
     }
+  | UnexpectedVariadic of {
+      actual: Type.OrderedTypes.t;
+      expected: Type.Variable.Unary.t list;
+    }
 [@@deriving compare, eq, sexp, show, hash]
 
 type type_parameters_mismatch = {
@@ -29,24 +33,54 @@ type class_metadata = {
   is_final: bool;
   extends_placeholder_stub_class: bool;
 }
-[@@deriving eq]
+[@@deriving eq, compare]
 
-type global = Annotation.t Node.t [@@deriving eq, show]
+type global = Annotation.t Node.t [@@deriving eq, show, compare]
 
 type t
 
+type global_resolution_t = t
+
+module type AnnotatedClass = sig
+  type t
+
+  type class_data = {
+    instantiated: Type.t;
+    class_attributes: bool;
+    class_definition: t;
+  }
+
+  val create : Class.t Node.t -> t
+
+  val constructor : t -> instantiated:Type.t -> resolution:global_resolution_t -> Type.t
+
+  val is_protocol : t -> bool
+
+  val resolve_class : resolution:global_resolution_t -> Type.t -> class_data list option
+
+  val attributes
+    :  ?transitive:bool ->
+    ?class_attributes:bool ->
+    ?include_generated_attributes:bool ->
+    ?instantiated:Type.t ->
+    t ->
+    resolution:global_resolution_t ->
+    AnnotatedAttribute.t list
+end
+
 val create
-  :  class_hierarchy:(module ClassHierarchy.Handler) ->
+  :  ast_environment:AstEnvironment.ReadOnly.t ->
   aliases:(Type.Primitive.t -> Type.alias option) ->
   module_definition:(Reference.t -> Module.t option) ->
   class_definition:(Type.Primitive.t -> Class.t Node.t option) ->
   class_metadata:(Type.Primitive.t -> class_metadata option) ->
-  constructor:(resolution:t -> Type.Primitive.t -> Type.t option) ->
   undecorated_signature:(Reference.t -> Type.t Type.Callable.overload option) ->
-  attributes:(resolution:t -> Type.t -> AnnotatedAttribute.t list option) ->
-  is_protocol:(Type.t -> bool) ->
   global:(Reference.t -> global option) ->
-  unit ->
+  edges:(int -> ClassHierarchy.Target.t list option) ->
+  backedges:(int -> ClassHierarchy.Target.Set.Tree.t option) ->
+  indices:(string -> int option) ->
+  annotations:(int -> string option) ->
+  (module AnnotatedClass) ->
   t
 
 val resolve_literal : t -> Expression.t -> Type.t
@@ -108,7 +142,11 @@ val parse_reference : ?allow_untracked:bool -> t -> Reference.t -> Type.t
 
 val parse_as_list_variadic : t -> Expression.t -> Type.Variable.Variadic.List.t option
 
-val parse_as_list_variadic_map_operator : t -> Expression.t -> Type.OrderedTypes.Map.t option
+val parse_as_concatenation
+  :  t ->
+  Expression.t ->
+  (Type.t Type.OrderedTypes.Concatenation.Middle.t, Type.t) Type.OrderedTypes.Concatenation.t
+  option
 
 val join : t -> Type.t -> Type.t -> Type.t
 
@@ -123,6 +161,8 @@ val widen
   Type.t
 
 val resolve_exports : t -> reference:Reference.t -> Reference.t
+
+val ast_environment : t -> AstEnvironment.ReadOnly.t
 
 val aliases : t -> Type.Primitive.t -> Type.alias option
 
@@ -156,7 +196,7 @@ val is_tracked : t -> Type.Primitive.t -> bool
 
 val contains_untracked : t -> Type.t -> bool
 
-val is_string_to_any_mapping : t -> Type.t -> bool
+val contains_prohibited_any : t -> Type.t -> bool
 
 val parse_as_parameter_specification_instance_annotation
   :  t ->
@@ -167,3 +207,5 @@ val parse_as_parameter_specification_instance_annotation
 val consistent_solution_exists : t -> Type.t -> Type.t -> bool
 
 val global : t -> Reference.t -> global option
+
+val class_hierarchy : t -> (module ClassHierarchy.Handler)

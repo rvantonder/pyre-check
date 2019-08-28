@@ -341,7 +341,7 @@ let test_check_variable_bindings context =
       class BadChild(ConstrainedBase[str]): pass
     |}
     [ "Invalid type parameters [24]: Type parameter `str` violates constraints on "
-      ^ "`Variable[T (bound to int)]` in generic type `ConstrainedBase`" ];
+      ^ "`Variable[T (bound to int)]` in generic type `ConstrainedBase`." ];
   assert_type_errors
     {|
       T = typing.TypeVar('T', bound=int)
@@ -354,6 +354,7 @@ let test_check_variable_bindings context =
 
 let test_unbound_variables context =
   let assert_type_errors = assert_type_errors ~context in
+  let assert_default_type_errors = assert_default_type_errors ~context in
   assert_type_errors
     {|
       def foo() -> None:
@@ -447,8 +448,7 @@ let test_unbound_variables context =
       ^ "incomplete, add an explicit annotation.";
       "Revealed type [-1]: Revealed type for `g` is `G[typing.Any]`.";
       "Incompatible return type [7]: Expected `G[int]` but got `G[typing.Any]`." ];
-  assert_type_errors
-    ~debug:false
+  assert_default_type_errors
     {|
       T_Explicit = typing.TypeVar("T_Explicit", int, str)
       class G(typing.Generic[T_Explicit]):
@@ -484,14 +484,13 @@ let test_unbound_variables context =
         return g
     |}
     [ "Invalid type parameters [24]: Type parameter `bool` violates constraints on "
-      ^ "`Variable[T_Explicit <: [int, str]]` in generic type `G`";
+      ^ "`Variable[T_Explicit <: [int, str]]` in generic type `G`.";
       "Incompatible variable type [9]: g is declared to have type `G[typing.Any]` but is used "
       ^ "as type `G[Variable[T_Explicit <: [int, str]]]`.";
       "Invalid type parameters [24]: Type parameter `bool` violates constraints on "
-      ^ "`Variable[T_Explicit <: [int, str]]` in generic type `G`";
+      ^ "`Variable[T_Explicit <: [int, str]]` in generic type `G`.";
       "Revealed type [-1]: Revealed type for `g` is `G[typing.Any]`." ];
-  assert_type_errors
-    ~debug:false
+  assert_default_type_errors
     {|
       T_Explicit = typing.TypeVar("T_Explicit", int, str)
       class G(typing.Generic[T_Explicit]):
@@ -503,9 +502,9 @@ let test_unbound_variables context =
         return g
     |}
     [ "Invalid type parameters [24]: Type parameter `bool` violates constraints on "
-      ^ "`Variable[T_Explicit <: [int, str]]` in generic type `G`";
+      ^ "`Variable[T_Explicit <: [int, str]]` in generic type `G`.";
       "Invalid type parameters [24]: Type parameter `bool` violates constraints on "
-      ^ "`Variable[T_Explicit <: [int, str]]` in generic type `G`";
+      ^ "`Variable[T_Explicit <: [int, str]]` in generic type `G`.";
       "Revealed type [-1]: Revealed type for `g` is `G[typing.Any]`." ];
   assert_type_errors
     {|
@@ -518,7 +517,7 @@ let test_unbound_variables context =
         reveal_type(g)
     |}
     [ "Invalid type parameters [24]: Type parameter `bool` violates constraints on "
-      ^ "`Variable[T_Explicit <: [int, str]]` in generic type `G`";
+      ^ "`Variable[T_Explicit <: [int, str]]` in generic type `G`.";
       "Revealed type [-1]: Revealed type for `g` is `G[typing.Any, bool]`." ];
   assert_type_errors
     {|
@@ -546,12 +545,16 @@ let test_unbound_variables context =
        annotation." ];
   assert_type_errors
     {|
+      import typing
+      import collections
       def foo() -> None:
         x: typing.Dict[int, typing.Dict[int, str]] = collections.defaultdict(dict)
     |}
     [];
   assert_type_errors
     {|
+      import typing
+      import collections
       def foo() -> None:
         x: typing.Dict[int, str] = collections.defaultdict(dict)
     |}
@@ -560,6 +563,7 @@ let test_unbound_variables context =
       ^ "typing.Dict[Variable[_T], Variable[_S]]]`." ];
   assert_type_errors
     {|
+      import typing
       def foo() -> typing.Tuple[typing.List[int], typing.List[str]]:
         return [], []
     |}
@@ -578,6 +582,7 @@ let test_unbound_variables context =
       ^ "but got `typing.List[Variable[_T]]`." ];
   assert_type_errors
     {|
+      import typing
       def bar(
           a: typing.Optional[typing.List[int]], b: typing.Optional[typing.List[str]]
       ) -> typing.Tuple[typing.List[int], typing.List[str]]:
@@ -591,6 +596,7 @@ let test_distinguish context =
   let assert_type_errors = assert_type_errors ~context in
   assert_type_errors
     {|
+      import typing
       _T1 = typing.TypeVar("_T1")
       _T2 = typing.TypeVar("_T2")
       class C(typing.Generic[_T1]):
@@ -604,6 +610,7 @@ let test_distinguish context =
     ["Revealed type [-1]: Revealed type for `A` is `typing.Tuple[Variable[_T2], Variable[_T1]]`."];
   assert_type_errors
     {|
+      import typing
       _T1 = typing.TypeVar("_T1")
       _T2 = typing.TypeVar("_T2")
       def foo(f: typing.Callable[[_T1], _T2], p: _T1) -> _T2:
@@ -614,6 +621,7 @@ let test_distinguish context =
     ["Revealed type [-1]: Revealed type for `v` is `Variable[_T2]`."];
   assert_type_errors
     {|
+      import typing
       _T1 = typing.TypeVar("_T1")
       _T2 = typing.TypeVar("_T2")
       def foo(f: typing.Callable[[_T1], _T2], p: _T1) -> _T2:
@@ -623,6 +631,7 @@ let test_distinguish context =
       ^ "anoynmous call but got `int`." ];
   assert_type_errors
     {|
+      import typing
       _T1 = typing.TypeVar("_T1")
       _T2 = typing.TypeVar("_T2")
       class B: pass
@@ -635,6 +644,7 @@ let test_distinguish context =
     ["Revealed type [-1]: Revealed type for `v` is `Variable[_T2]`."];
   assert_type_errors
     {|
+      import typing
       class C():
         def __init__(self, x: int) -> None:
           pass
@@ -646,6 +656,7 @@ let test_distinguish context =
     ["Revealed type [-1]: Revealed type for `v` is `typing.Iterator[C]`."];
   assert_type_errors
     {|
+      import typing
       T = typing.TypeVar("T")
       class C(typing.Generic[T]):
         def __init__(self, x: T) -> None:
@@ -658,6 +669,7 @@ let test_distinguish context =
     ["Revealed type [-1]: Revealed type for `v` is `typing.Iterator[C[int]]`."];
   assert_type_errors
     {|
+      import typing
       T = typing.TypeVar("T")
       class C(typing.Generic[T]):
         def __init__(self, x: T) -> None:
@@ -670,6 +682,7 @@ let test_distinguish context =
     ["Revealed type [-1]: Revealed type for `v` is `typing.Iterator[C[Variable[T]]]`."];
   assert_type_errors
     {|
+      import typing
       T = typing.TypeVar("T")
       def foo(x: T) -> typing.List[T]:
         return [x]
@@ -680,9 +693,10 @@ let test_distinguish context =
          bar(foo)
     |}
     [ "Mutually recursive type variables [36]: Solving type variables for call `bar` "
-      ^ "led to infinite recursion" ];
+      ^ "led to infinite recursion." ];
   assert_type_errors
     {|
+      import typing
       T = typing.TypeVar("T")
       def foo(x: T) -> T:
         return x
@@ -697,6 +711,7 @@ let test_distinguish context =
       ^ "` is incomplete, add an explicit annotation." ];
   assert_type_errors
     {|
+      import typing
       T = typing.TypeVar("T")
       def identity(x: T) -> T:
         return x
@@ -711,6 +726,7 @@ let test_integer_variables context =
   assert_type_errors
     ~context
     {|
+      import typing_extensions
       T = typing_extensions.IntVar("T")
       X = typing_extensions.IntVar("X")
       def baz(x: X) -> X:
@@ -730,6 +746,7 @@ let test_integer_variables context =
   assert_type_errors
     ~context
     {|
+      import typing_extensions
       X = typing_extensions.IntVar("X")
       def baz(x: X) -> X:
         return x
@@ -745,6 +762,7 @@ let test_nested_variable_error context =
   assert_type_errors
     ~context
     {|
+      import typing
       T1 = typing.TypeVar("T1")
       T2 = typing.TypeVar("T2", typing.List[T1], typing.Dict[str, T1])
     |}
@@ -780,7 +798,7 @@ let test_callable_parameter_variadics context =
          def foo(self) -> int: ...
     |}
     [ "Invalid type variable [34]: Cannot propagate callable parameter variadic `V`.  "
-      ^ "Classes parameterized by callable parameter variadics are not supported at this time" ];
+      ^ "Classes parameterized by callable parameter variadics are not supported at this time." ];
   assert_type_errors
     ~handle:"qualifier.py"
     {|
@@ -830,8 +848,8 @@ let test_list_variadics context =
       reveal_type(x)
       return x
     |}
-    [ "Incomplete type [37]: Type `typing.Tuple[ListVariadic[Ts]]` inferred for `x` is \
-       incomplete, add an explicit annotation.";
+    [ "Incomplete type [37]: Type `typing.Tuple[Ts]` inferred for `x` is incomplete, add an \
+       explicit annotation.";
       "Revealed type [-1]: Revealed type for `x` is `typing.Tuple[...]`." ];
   assert_type_errors
     {|
@@ -844,6 +862,24 @@ let test_list_variadics context =
       return x
     |}
     ["Revealed type [-1]: Revealed type for `x` is `typing.Tuple[int, str, bool]`."];
+  assert_type_errors
+    {|
+    from typing import List
+    Ts = pyre_extensions.ListVariadic("Ts")
+    def bad(x: List[Ts]) -> None:
+      pass
+    |}
+    [ "Invalid type parameters [24]: Concrete type parameter `Variable[_T]` expected, but a \
+       variadic type parameter `Ts` was given for generic type list." ];
+  assert_type_errors
+    {|
+     from typing import Dict
+     Ts = pyre_extensions.ListVariadic("Ts")
+     def bad(x: Dict[Ts]) -> None:
+       pass
+     |}
+    [ "Invalid type parameters [24]: Concrete type parameters `Variable[_T], Variable[_S]` \
+       expected, but a variadic type parameter `Ts` was given for generic type dict." ];
 
   (* Concatenation isn't implemented yet, and I'm not even sure this is going to be the final
    * syntax for it *)
@@ -859,8 +895,8 @@ let test_list_variadics context =
     [ "Undefined type [11]: Type `Ts` is not defined.";
       "Invalid type variable [34]: The type variable `Ts` isn't present in the function's \
        parameters.";
-      "Incomplete type [37]: Type `typing.Tuple[ListVariadic[Ts]]` inferred for `x` is \
-       incomplete, add an explicit annotation.";
+      "Incomplete type [37]: Type `typing.Tuple[Ts]` inferred for `x` is incomplete, add an \
+       explicit annotation.";
       "Revealed type [-1]: Revealed type for `x` is `typing.Tuple[...]`." ];
   assert_type_errors
     {|
@@ -941,8 +977,8 @@ let test_list_variadics context =
     |}
     [ "Revealed type [-1]: Revealed type for `call_with_tuple(foo, (1, \"A\", False))` is `str`.";
       "Revealed type [-1]: Revealed type for `call_with_tuple(bar, (True, 19, 37))` is `int`.";
-      "Incompatible parameter type [6]: Expected `typing.Tuple[ListVariadic[Ts]]` for 2nd \
-       anonymous parameter to call `call_with_tuple` but got `typing.Tuple[bool, float, int]`." ];
+      "Incompatible parameter type [6]: Expected `typing.Tuple[Ts]` for 2nd anonymous parameter \
+       to call `call_with_tuple` but got `typing.Tuple[bool, float, int]`." ];
   assert_type_errors
     {|
     from typing import Tuple, Optional, Callable, Protocol
@@ -978,6 +1014,30 @@ let test_list_variadics context =
     ["Revealed type [-1]: Revealed type for `loop(x, y, z)` is `typing.Tuple[int, str, bool]`."];
   assert_type_errors
     {|
+    from typing import Tuple, Optional, Callable
+    Ts = pyre_extensions.ListVariadic("Ts")
+    def loop( *args: Ts) -> Tuple[Ts]:
+      return args
+    def foo(x: int, y: str, z: bool, t: Tuple[Ts]) -> None:
+      l = loop(x, y, *t, z)
+      reveal_type(l)
+    |}
+    [ "Revealed type [-1]: Revealed type for `l` is `typing.Tuple[Concatenate[int, str, Ts, bool]]`."
+    ];
+  assert_type_errors
+    {|
+    from typing import Tuple, Optional, Callable
+    Ts = pyre_extensions.ListVariadic("Ts")
+    TsB = pyre_extensions.ListVariadic("TsB")
+    def loop( *args: Ts) -> Tuple[Ts]:
+      return args
+    def foo(tA: Tuple[Ts], tB: Tuple[TsB]) -> None:
+      loop( *tA, *tB)
+    |}
+    [ "Invalid argument [32]: Variadic type variable `Ts` cannot be made to contain `Ts, TsB`, \
+       concatenation of multiple variadic type variables is not yet implemented." ];
+  assert_type_errors
+    {|
     from typing import Tuple, Optional, Callable, TypeVar
     Ts = pyre_extensions.ListVariadic("Ts")
     TReturn = TypeVar("TReturn")
@@ -992,8 +1052,8 @@ let test_list_variadics context =
     |}
     [ "Revealed type [-1]: Revealed type for `call_with_args(foo, x, y, z)` is `str`.";
       "Revealed type [-1]: Revealed type for `call_with_args(bar, z, x, x)` is `int`.";
-      "Invalid argument [32]: Types `int, str, bool` conflict with existing constraints on \
-       `ListVariadic[Ts]`." ];
+      "Invalid argument [32]: Types `int, str, bool` conflict with existing constraints on `Ts`."
+    ];
   assert_type_errors
     {|
     from typing import Tuple, Optional, Callable, TypeVar
@@ -1009,7 +1069,7 @@ let test_list_variadics context =
     |}
     [ "Revealed type [-1]: Revealed type for `call_with_args(foo, *$parameter$x)` is `str`.";
       "Invalid argument [32]: Variable argument `y` has type `typing.Tuple[int, ...]` but must be \
-       a definite tuple to be included in variadic type variable `ListVariadic[Ts]`." ];
+       a definite tuple to be included in variadic type variable `Ts`." ];
   assert_type_errors
     {|
     from typing import Tuple, Optional, Callable, TypeVar
@@ -1024,9 +1084,8 @@ let test_list_variadics context =
       call_with_args(bar, *x, *y)
     |}
     [ "Revealed type [-1]: Revealed type for `call_with_args(foo, *$parameter$x, True)` is `str`.";
-      "Invalid argument [32]: Variadic type variable `ListVariadic[Ts]` cannot be made to contain \
-       `int, str, ListVariadic[Ts]`, concatenation of variadic type variables is not yet \
-       implemented." ];
+      "Invalid argument [32]: Types `Concatenate[int, str, Ts]` conflict with existing \
+       constraints on `Ts`." ];
   assert_type_errors
     {|
     from typing import Tuple, List, Generic, TypeVar
@@ -1042,7 +1101,7 @@ let test_list_variadics context =
         reveal_type(i)
     |}
     [ "Revealed type [-1]: Revealed type for `x` is `typing.Tuple[Map[list, Ts]]`.";
-      "Revealed type [-1]: Revealed type for `y` is `typing.Tuple[ListVariadic[Ts]]`.";
+      "Revealed type [-1]: Revealed type for `y` is `typing.Tuple[Ts]`.";
       "Revealed type [-1]: Revealed type for `i` is `object`.";
       "Revealed type [-1]: Revealed type for `i` is `object`." ];
   assert_type_errors
@@ -1060,7 +1119,7 @@ let test_list_variadics context =
         reveal_type(i)
     |}
     [ "Revealed type [-1]: Revealed type for `x` is `typing.Tuple[Map[list, Ts]]`.";
-      "Revealed type [-1]: Revealed type for `y` is `typing.Tuple[ListVariadic[Ts]]`.";
+      "Revealed type [-1]: Revealed type for `y` is `typing.Tuple[Ts]`.";
       "Revealed type [-1]: Revealed type for `i` is `object`.";
       "Revealed type [-1]: Revealed type for `i` is `object`." ];
   ()
@@ -1153,6 +1212,17 @@ let test_map context =
        `typing.Tuple[int, str]`.";
       "Revealed type [-1]: Revealed type for `await better_gather(*$local_foo$many)` is \
        `typing.Tuple[int, str, int, str, int, str, int, str, int]`." ];
+  assert_type_errors
+    {|
+     from typing import List
+     from pyre_extensions import ListVariadic
+     from pyre_extensions.type_variable_operators import Map
+     Ts = ListVariadic("Ts")
+     def bad(x: List[Map[List, Ts]]) -> None:
+      pass
+     |}
+    [ "Invalid type parameters [24]: Concrete type parameter `Variable[_T]` expected, but a \
+       variadic type parameter `Map[list, Ts]` was given for generic type list." ];
 
   ()
 
@@ -1227,6 +1297,71 @@ let test_user_defined_variadics context =
   ()
 
 
+let test_concatenation_operator context =
+  let assert_type_errors = assert_type_errors ~context in
+  assert_type_errors
+    {|
+    from typing import Generic, Tuple, List
+    from pyre_extensions.type_variable_operators import Concatenate
+    Ts = pyre_extensions.ListVariadic("Ts")
+    def add_on(t: Tuple[Ts]) -> Tuple[Concatenate[int, Ts, float]]:
+      ...
+    def strip_off(t: Tuple[Concatenate[int, Ts, bool]]) -> Tuple[Ts]:
+      ...
+    def bar(t: Tuple[int, str, bool]) -> None:
+      added = add_on(t)
+      reveal_type(added)
+      removed = strip_off(t)
+      reveal_type(removed)
+    |}
+    [ "Revealed type [-1]: Revealed type for `added` is `typing.Tuple[int, int, str, bool, float]`.";
+      "Revealed type [-1]: Revealed type for `removed` is `typing.Tuple[str]`." ];
+  assert_type_errors
+    {|
+    from typing import Generic, Tuple, List
+    from pyre_extensions.type_variable_operators import Concatenate, Map
+    Ts = pyre_extensions.ListVariadic("Ts")
+    def map_tuple(t: Tuple[Ts]) -> Tuple[Map[List, Ts]]:
+      ...
+    def unmap_tuple(t: Tuple[Map[List, Ts]]) -> Tuple[Ts]:
+      ...
+    def foo(t: Tuple[Concatenate[int, Ts, bool]]) -> None:
+      x = map_tuple(t)
+      reveal_type(x)
+      # this is not implemented yet (T48180915)
+      unmap_tuple(x)
+    |}
+    [ "Revealed type [-1]: Revealed type for `x` is `typing.Tuple[Concatenate[List[int], \
+       Map[list, Ts], List[bool]]]`.";
+      "Incompatible parameter type [6]: Expected `typing.Tuple[Map[list, Ts]]` for 1st anonymous \
+       parameter to call `unmap_tuple` but got `typing.Tuple[Concatenate[List[int], Map[list, \
+       Ts], List[bool]]]`." ];
+  assert_type_errors
+    {|
+    from typing import Generic, Tuple, List, TypeVar
+    from typing_extensions import Literal
+    from pyre_extensions.type_variable_operators import Concatenate
+    Ts = pyre_extensions.ListVariadic("Ts")
+    T = TypeVar("T")
+    class Tensor(typing.Generic[Concatenate[T, Ts]]):
+      def el(self) -> T: ...
+      def dims(self) -> Tuple[Ts]: ...
+    One = Literal[1]
+    Two = Literal[2]
+    Three = Literal[3]
+    def bar(t: Tensor[int, One, Two, Three]) -> None:
+      el = t.el()
+      reveal_type(el)
+      dims = t.dims()
+      reveal_type(dims)
+    |}
+    [ "Revealed type [-1]: Revealed type for `el` is `int`.";
+      "Revealed type [-1]: Revealed type for `dims` is \
+       `typing.Tuple[typing_extensions.Literal[1], typing_extensions.Literal[2], \
+       typing_extensions.Literal[3]]`." ];
+  ()
+
+
 let () =
   "typeVariable"
   >::: [ "check_unbounded_variables" >:: test_check_unbounded_variables;
@@ -1238,5 +1373,6 @@ let () =
          "callable_parameter_variadics" >:: test_callable_parameter_variadics;
          "list_variadics" >:: test_list_variadics;
          "map" >:: test_map;
-         "user_defined_variadics" >:: test_user_defined_variadics ]
+         "user_defined_variadics" >:: test_user_defined_variadics;
+         "concatenation" >:: test_concatenation_operator ]
   |> Test.run

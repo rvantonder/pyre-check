@@ -9,7 +9,6 @@ open Ast
 open Analysis
 open Expression
 open Statement
-open Pyre
 open Test
 
 let test_expand_relative_imports _ =
@@ -1609,7 +1608,7 @@ let test_expand_type_checking_imports _ =
 
 let test_expand_wildcard_imports context =
   let assert_expanded external_sources check_source expected =
-    let _ =
+    let _, ast_environment =
       ScratchProject.setup ~context ~external_sources ["test.py", check_source]
       |> ScratchProject.parse_sources
     in
@@ -1618,7 +1617,7 @@ let test_expand_wildcard_imports context =
       ~printer:(fun statement_list ->
         List.map statement_list ~f:Statement.show |> String.concat ~sep:", ")
       (Source.statements (parse expected))
-      (Source.statements (Option.value_exn (Ast.SharedMemory.Sources.get !&"test")))
+      (Source.statements (Option.value_exn (AstEnvironment.get_source ast_environment !&"test")))
   in
   assert_expanded
     ["a.py", "def foo(): pass"]
@@ -1659,7 +1658,7 @@ let test_expand_wildcard_imports context =
       from a import *
     |}
     {|
-      from a import y, foo, bar
+      from a import bar, foo, y
     |};
   assert_expanded
     [ ( "a.py",
@@ -1844,12 +1843,22 @@ let test_expand_implicit_returns _ =
 let test_defines _ =
   let assert_defines statements defines =
     let printer defines = List.map defines ~f:Define.show |> String.concat ~sep:"\n" in
+    let source = Source.create statements in
     assert_equal
       ~cmp:(List.equal Define.equal)
       ~printer
       defines
-      ( Preprocessing.defines ~include_toplevels:true (Source.create statements)
-      |> List.map ~f:Node.value )
+      (Preprocessing.defines ~include_toplevels:true source |> List.map ~f:Node.value);
+    assert_equal
+      ~cmp:Int.equal
+      ~printer:Int.to_string
+      ( Preprocessing.defines
+          ~include_stubs:true
+          ~include_nested:true
+          ~include_toplevels:true
+          source
+      |> List.length )
+      (Preprocessing.count_defines source)
   in
   let create_define name =
     {
@@ -2166,27 +2175,6 @@ let test_expand_typed_dictionaries _ =
   ()
 
 
-let test_try_preprocess _ =
-  let assert_try_preprocess source expected =
-    let parse source = parse ~handle:"test.py" source in
-    let parsed = source |> parse in
-    let expected = expected >>| parse in
-    let printer source =
-      source >>| Format.asprintf "%a" Source.pp |> Option.value ~default:"(none)"
-    in
-    let source_equal left right =
-      Source.equal { left with Source.hash = -1 } { right with Source.hash = -1 }
-    in
-    assert_equal
-      ~cmp:(Option.equal source_equal)
-      ~printer
-      expected
-      (Preprocessing.try_preprocess parsed)
-  in
-  assert_try_preprocess "from foo import *" None;
-  assert_try_preprocess "a = 3" (Some "$local_test$a = 3")
-
-
 let () =
   "preprocessing"
   >::: [ "expand_string_annotations" >:: test_expand_string_annotations;
@@ -2200,6 +2188,5 @@ let () =
          "defines" >:: test_defines;
          "classes" >:: test_classes;
          "typed_dictionary_stub_fix" >:: test_replace_mypy_extensions_stub;
-         "typed_dictionaries" >:: test_expand_typed_dictionaries;
-         "try_preprocess" >:: test_try_preprocess ]
+         "typed_dictionaries" >:: test_expand_typed_dictionaries ]
   |> Test.run

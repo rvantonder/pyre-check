@@ -1,4 +1,7 @@
-#!/usr/bin/env python3
+# Copyright (c) 2016-present, Facebook, Inc.
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
 
 import builtins
 import itertools
@@ -26,7 +29,7 @@ from IPython import paths
 from IPython.core import page
 from prompt_toolkit import prompt
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
-from prompt_toolkit.contrib.completers import PathCompleter
+from prompt_toolkit.completion import PathCompleter
 from prompt_toolkit.history import FileHistory, History
 from pygments import highlight
 from pygments.formatters import TerminalFormatter
@@ -38,6 +41,7 @@ from sqlalchemy.sql import func
 from sqlalchemy.sql.expression import or_
 
 from .analysis_output import AnalysisOutput, AnalysisOutputError
+from .base_parser import BaseParser
 from .db import DB
 from .decorators import UserError, catch_keyboard_interrupt, catch_user_error
 from .models import (
@@ -146,8 +150,15 @@ details              show additional information about the current trace frame
     LEAF_NAMES = {"source", "sink", "leaf"}
 
     SELF_SCOPE_KEY = "_interactive"
+    PARSER_CLASS_SCOPE_KEY = "_parser_class"
 
-    def __init__(self, database: DB, repository_directory: str = ""):
+    def __init__(
+        self,
+        *,
+        database: DB,
+        repository_directory: str = "",
+        parser_class: Type[BaseParser],
+    ):
         self.db = database
         self.scope_vars: Dict[str, Union[Callable, TraceKind]] = {
             "precondition": TraceKind.PRECONDITION,
@@ -175,6 +186,7 @@ details              show additional information about the current trace frame
             "analysis_output": self.analysis_output,
             "callable": self.callable,
             self.SELF_SCOPE_KEY: self,
+            self.PARSER_CLASS_SCOPE_KEY: parser_class,
         }
         self.repository_directory = repository_directory or os.getcwd()
         self.current_analysis_output: Optional[AnalysisOutput] = None
@@ -1065,6 +1077,7 @@ details              show additional information about the current trace frame
         )
         assert trace_frame.callee_location is not None
         location = trace_frame.callee_location
+        # pyre-fixme[16]: `Optional` has no attribute `line_no`.
         center_line_number = location.line_no
         begin_lineno = max(center_line_number - context, 1)
         end_lineno = min(center_line_number + context, len(file_lines))
@@ -1091,7 +1104,9 @@ details              show additional information about the current trace frame
             print(f"{prefix} {line}")
             if i == center_line_number:
                 print(
+                    # pyre-fixme[16]: `Optional` has no attribute `begin_column`.
                     " " * (len(prefix) + location.begin_column),
+                    # pyre-fixme[16]: `Optional` has no attribute `end_column`.
                     "^" * (location.end_column - location.begin_column),
                 )
 

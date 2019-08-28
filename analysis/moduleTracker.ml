@@ -9,11 +9,11 @@ open Pyre
 
 type t = SourcePath.t list Reference.Table.t
 
-let insert_source_path ~inserted existing_files =
+let insert_source_path ~configuration ~inserted existing_files =
   let rec insert sofar = function
     | [] -> List.rev_append sofar [inserted]
     | current_file :: rest as existing -> (
-      match SourcePath.same_module_compare inserted current_file with
+      match SourcePath.same_module_compare ~configuration inserted current_file with
       | 0 ->
           (* We have the following precondition for files that are in the same module: *)
           (* `same_module_compare a b = 0` implies `equal a b` *)
@@ -27,15 +27,24 @@ let insert_source_path ~inserted existing_files =
   insert [] existing_files
 
 
-let remove_source_path ~removed existing_files =
+let remove_source_path ~configuration ~removed existing_files =
   let rec remove sofar = function
     | [] -> existing_files
     | current_file :: rest -> (
-      match SourcePath.same_module_compare removed current_file with
+      match SourcePath.same_module_compare ~configuration removed current_file with
       | 0 ->
-          (* We have the following precondition for files that are in the same module: *)
-          (* `same_module_compare a b = 0` implies `equal a b` *)
-          assert (SourcePath.equal removed current_file);
+          let () =
+            (* For removed files, we only check for equality on relative path & priority. *)
+            (* There's a corner case (where symlink is involved) that may cause `removed` to have a
+               different `is_external` flag. *)
+            let partially_equal
+                { SourcePath.relative = left_relative; priority = left_priority; _ }
+                { SourcePath.relative = right_relative; priority = right_priority; _ }
+              =
+              String.equal left_relative right_relative && Int.equal left_priority right_priority
+            in
+            assert (partially_equal removed current_file)
+          in
           List.rev_append sofar rest
       | x when x > 0 -> existing_files
       | _ -> remove (current_file :: sofar) rest )
@@ -79,7 +88,8 @@ let create configuration =
     | Some ({ SourcePath.qualifier; _ } as source_path) ->
         let update_table = function
           | None -> [source_path]
-          | Some source_paths -> insert_source_path ~inserted:source_path source_paths
+          | Some source_paths ->
+              insert_source_path ~configuration ~inserted:source_path source_paths
         in
         Hashtbl.update tracker qualifier ~f:update_table
   in
@@ -106,17 +116,17 @@ let lookup_path ~configuration tracker path =
     None
 
 
-let mem = Hashtbl.mem
-
 let source_paths tracker = Hashtbl.data tracker |> List.filter_map ~f:List.hd
 
 let all_source_paths tracker = Hashtbl.data tracker |> List.concat
 
-let qualifiers tracker =
+let tracked_explicit_modules tracker =
   source_paths tracker |> List.map ~f:(fun { SourcePath.qualifier; _ } -> qualifier)
 
 
-let length = Hashtbl.length
+let is_module_tracked = Hashtbl.mem
+
+let explicit_module_count = Hashtbl.length
 
 module FileSystemEvent = struct
   type t =
@@ -150,7 +160,9 @@ let update ~configuration ~paths tracker =
             Hashtbl.set tracker ~key:qualifier ~data:[source_path];
             Some (IncrementalUpdate.New source_path)
         | Some source_paths ->
-            let new_source_paths = insert_source_path ~inserted:source_path source_paths in
+            let new_source_paths =
+              insert_source_path ~configuration ~inserted:source_path source_paths
+            in
             let new_source_path = List.hd_exn new_source_paths in
             Hashtbl.set tracker ~key:qualifier ~data:new_source_paths;
             if SourcePath.equal new_source_path source_path then
@@ -172,7 +184,7 @@ let update ~configuration ~paths tracker =
               Hashtbl.remove tracker qualifier;
               None
           | old_source_path :: _ -> (
-            match remove_source_path ~removed:source_path source_paths with
+            match remove_source_path ~configuration ~removed:source_path source_paths with
             | [] ->
                 (* Last remaining file for the module gets removed. *)
                 Hashtbl.remove tracker qualifier;

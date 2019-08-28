@@ -12,12 +12,21 @@ type result = {
   errors: Error.t list;
 }
 
-val analyze_sources
-  :  ?open_documents:string Pyre.Path.Map.t ->
+val run_check
+  :  ?open_documents:(Ast.Reference.t -> bool) ->
   scheduler:Scheduler.t ->
   configuration:Configuration.Analysis.t ->
   environment:Environment.t ->
-  Ast.SourcePath.t list ->
+  Ast.Source.t list ->
+  (module Analysis.Check.Signature) ->
+  Error.t list
+
+val analyze_sources
+  :  ?open_documents:(Ast.Reference.t -> bool) ->
+  scheduler:Scheduler.t ->
+  configuration:Configuration.Analysis.t ->
+  environment:Environment.t ->
+  Ast.Source.t list ->
   Error.t list
 
 val check : scheduler:Scheduler.t option -> configuration:Configuration.Analysis.t -> result

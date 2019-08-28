@@ -12,7 +12,7 @@ open Test
 
 let configuration = Configuration.Analysis.create ~infer:true ()
 
-let assert_backward precondition statement postcondition =
+let assert_backward ~resolution precondition statement postcondition =
   let module State = State (struct
     let configuration = configuration
 
@@ -36,7 +36,7 @@ let assert_backward precondition statement postcondition =
         in
         List.map annotations ~f:annotify |> Reference.Map.of_alist_exn
       in
-      Resolution.with_annotations (Test.resolution ()) ~annotations
+      Resolution.with_annotations resolution ~annotations
     in
     State.create ~resolution ()
   in
@@ -59,7 +59,9 @@ let assert_backward precondition statement postcondition =
        parsed)
 
 
-let test_backward _ =
+let test_backward context =
+  let resolution = ScratchProject.setup ~context [] |> ScratchProject.build_resolution in
+  let assert_backward = assert_backward ~resolution in
   assert_backward ["y", Type.integer] "pass" ["y", Type.integer];
 
   (* Assignments. *)
@@ -156,11 +158,15 @@ let assert_infer
     ?(infer = true)
     ?(show_error_traces = false)
     ?(fields = ["description"])
+    ~context
     source
     errors
   =
   let check_errors configuration global_resolution source =
+    let ast_environment = GlobalResolution.ast_environment global_resolution in
     Inference.run ~configuration ~global_resolution ~source
+    |> List.map
+         ~f:(Error.instantiate ~lookup:(AstEnvironment.ReadOnly.get_relative ast_environment))
   in
   let fields_of_error error =
     let field_of_error field =
@@ -171,16 +177,17 @@ let assert_infer
         | _ -> `String "TEST FAIL: ERROR ACCESSING FIELD IN ERROR JSON"
       in
       List.fold
-        ~init:(Error.to_json ~show_error_traces error)
+        ~init:(Error.Instantiated.to_json ~show_error_traces error)
         ~f:access_field
         (String.split ~on:'.' field)
     in
     List.map fields ~f:field_of_error
   in
-  let source = parse source |> Preprocessing.preprocess in
-  let configuration = Configuration.Analysis.create ~debug ~infer () in
-  let environment =
-    Test.environment ~configuration ~sources:(source :: Test.typeshed_stubs ()) ()
+  let configuration, source, environment =
+    let project = ScratchProject.setup ~context ["test.py", source] in
+    let sources, _, environment = ScratchProject.build_environment project in
+    let configuration = ScratchProject.configuration_of project in
+    { configuration with debug; infer }, List.hd_exn sources, environment
   in
   let global_resolution = Environment.resolution environment () in
   let to_string json = Yojson.Safe.sort json |> Yojson.Safe.to_string in
@@ -196,7 +203,8 @@ let assert_infer
     |> List.map ~f:to_string )
 
 
-let test_infer _ =
+let test_infer context =
+  let assert_infer = assert_infer ~context in
   (* TODO(T37338460): Unbreak inference of self parameter when it is returned. *)
   assert_infer
     {|
@@ -212,7 +220,7 @@ let test_infer _ =
           def ret_int(self):
               return 5
     |}
-    [{|"Test"|}];
+    [{|"test.Test"|}];
   assert_infer
     {|
       def returns_int ():
@@ -515,7 +523,8 @@ let test_infer _ =
     [{|{}|}]
 
 
-let test_infer_backward _ =
+let test_infer_backward context =
+  let assert_infer = assert_infer ~context in
   assert_infer
     ~fields:["inference.parameters"]
     {|

@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+# Copyright (c) 2016-present, Facebook, Inc.
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
 # pyre-strict
 
 import json
@@ -15,7 +19,8 @@ METADATA_GLOB = "*metadata.json"
 class Metadata(NamedTuple):
     analysis_root: str
     repo_root: Optional[str] = None
-
+    repository_name: Optional[str] = None
+    tool: Optional[str] = None
     analysis_tool_version: Optional[str] = None
     commit_hash: Optional[str] = None
     job_instance: Optional[int] = None
@@ -43,11 +48,13 @@ class AnalysisOutput(object):
         filename_spec: Optional[str] = None,
         file_handle: Optional[IO[str]] = None,
         metadata: Optional[Metadata] = None,
+        tool: Optional[str] = None,
     ) -> None:
         self.directory = directory
         self.filename_spec = filename_spec
         self.file_handle = file_handle
         self.metadata = metadata
+        self.tool = tool
 
         if not filename_spec and file_handle and hasattr(file_handle, "name"):
             self.filename_spec = file_handle.name
@@ -99,6 +106,8 @@ class AnalysisOutput(object):
                 analysis_root=analysis_root,
                 repo_root=repo_root,
                 job_instance=metadata.get("job_instance"),
+                tool=metadata.get("tool"),
+                repository_name=metadata.get("repository_name"),
             ),
         )
 
@@ -120,7 +129,10 @@ class AnalysisOutput(object):
         generator ends.
         """
         if self.file_handle:
+            # pyre-fixme[7]: Expected `Iterable[IO[str]]` but got
+            #  `Generator[Optional[IO[str]], None, None]`.
             yield self.file_handle
+            # pyre-fixme[16]: `Optional` has no attribute `close`.
             self.file_handle.close()
             self.file_handle = None
         else:
@@ -134,10 +146,13 @@ class AnalysisOutput(object):
         if self.is_sharded():
             yield from ShardedFile(self.filename_spec).get_filenames()
         elif self.filename_spec:
+            # pyre-fixme[7]: Expected `Iterable[str]` but got
+            #  `Generator[Optional[str], None, None]`.
             yield self.filename_spec
 
     def is_sharded(self) -> bool:
         if self.filename_spec:
+            # pyre-fixme[16]: `Optional` has no attribute `__getitem__`.
             return "@" in self.filename_spec
         else:
             return False

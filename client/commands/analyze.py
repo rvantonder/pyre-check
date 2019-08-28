@@ -24,6 +24,7 @@ class Analyze(Check):
         analysis_directory: AnalysisDirectory,
     ) -> None:
         super(Analyze, self).__init__(arguments, configuration, analysis_directory)
+        self._analysis = arguments.analysis  # type: str
         self._taint_models_path = (
             arguments.taint_models_path or configuration.taint_models_path
         )  # type: List[str]
@@ -32,11 +33,13 @@ class Analyze(Check):
 
     def _flags(self) -> List[str]:
         flags = super()._flags()
+        flags.extend(["-analysis", self._analysis])
         if self._taint_models_path:
             for path in self._taint_models_path:
                 flags.extend(["-taint-models", path])
-        if self._save_results_to:
-            flags.extend(["-save-results-to", self._save_results_to])
+        save_results_to = self._save_results_to
+        if save_results_to:
+            flags.extend(["-save-results-to", save_results_to])
         if self._dump_call_graph:
             flags.extend(["-dump-call-graph"])
         return flags

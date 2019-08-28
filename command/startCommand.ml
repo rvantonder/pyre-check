@@ -28,7 +28,7 @@ let handshake_message version =
 let computation_thread
     request_queue
     ({ Configuration.Server.pid_path; configuration = analysis_configuration; _ } as configuration)
-    state
+    ({ Server.State.environment; ast_environment; open_documents; _ } as state)
   =
   let errors_to_lsp_responses errors =
     let build_file_to_error_map error_list =
@@ -38,28 +38,39 @@ let computation_thread
           | None -> [error]
           | Some errors -> error :: errors
         in
-        let key = Error.path error in
+        let key = Error.Instantiated.path error in
         Hashtbl.update table key ~f:update
       in
       List.iter error_list ~f:add_to_table;
+      let add_empty_error_array reference =
+        let update = function
+          | None -> []
+          | Some errors -> errors
+        in
+        let open Analysis in
+        reference
+        |> Analysis.AstEnvironment.ReadOnly.get_relative (AstEnvironment.read_only ast_environment)
+        >>| Hashtbl.update table ~f:update
+        |> ignore
+      in
+      Ast.Reference.Table.iter_keys open_documents ~f:add_empty_error_array;
+      List.iter error_list ~f:add_to_table;
       Hashtbl.to_alist table
     in
-    let diagnostic_to_response = function
-      | Ok diagnostic_error ->
-          [ ( diagnostic_error
-            |> LanguageServer.Protocol.PublishDiagnostics.to_yojson
-            |> Yojson.Safe.to_string
-            |> fun serialized_diagnostic -> LanguageServerProtocolResponse serialized_diagnostic )
-          ]
-      | Error _ -> []
+    let relative_to_full_path relative =
+      let ast_environment = Analysis.Environment.ast_environment environment in
+      Ast.SourcePath.qualifier_of_relative relative
+      |> Analysis.AstEnvironment.ReadOnly.get_source_path ast_environment
+      >>| Ast.SourcePath.full_path ~configuration:analysis_configuration
     in
     build_file_to_error_map errors
-    |> List.map ~f:(fun (handle, errors) ->
-           LanguageServer.Protocol.PublishDiagnostics.of_errors
-             ~configuration:analysis_configuration
-             handle
-             errors)
-    |> List.concat_map ~f:diagnostic_to_response
+    |> List.filter_map ~f:(fun (handle, errors) ->
+           relative_to_full_path handle
+           >>| fun path ->
+           LanguageServer.Protocol.PublishDiagnostics.of_errors path errors
+           |> LanguageServer.Protocol.PublishDiagnostics.to_yojson
+           |> Yojson.Safe.to_string
+           |> fun serialized_diagnostic -> LanguageServerProtocolResponse serialized_diagnostic)
   in
   (* Decides what to broadcast to persistent clients after a request is processed. *)
   let broadcast_response state response =
@@ -424,6 +435,8 @@ let run_start_command
     saved_state_metadata
     configuration_file_hash
     store_type_check_resolution
+    transitive
+    new_incremental_check
     verbose
     expected_version
     sections
@@ -461,6 +474,14 @@ let run_start_command
     >>| List.map ~f:Path.create_absolute
   in
   let configuration =
+    let incremental_style =
+      if new_incremental_check then
+        Configuration.Analysis.FineGrained
+      else if transitive then
+        Transitive
+      else
+        Shallow
+    in
     Configuration.Analysis.create
       ~verbose
       ?expected_version
@@ -486,6 +507,7 @@ let run_start_command
       ~extensions
       ~local_root:(Path.create_absolute local_root)
       ~store_type_check_resolution
+      ~incremental_style
       ()
   in
   let log_path = log_path >>| Path.create_absolute in
@@ -568,5 +590,7 @@ let command =
            "-store-type-check-resolution"
            no_arg
            ~doc:"Store extra information, needed for `types_at_position` and `types` queries."
+      +> flag "-transitive" no_arg ~doc:"Calculate dependencies of changed files transitively."
+      +> flag "-new-incremental-check" no_arg ~doc:"Use the new fine grain dependency incremental"
       ++ Specification.base_command_line_arguments)
     run_start_command

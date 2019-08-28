@@ -51,59 +51,17 @@ module Target : sig
   module List : ListOrSet with type record = t list
 end
 
-type t = {
-  edges: Target.t list Int.Table.t;
-  backedges: Target.Set.t Int.Table.t;
-  indices: int Type.Primitive.Table.t;
-  annotations: Type.Primitive.t Int.Table.t;
-}
-[@@deriving show]
-
 (** The handler module for interfacing with ClassHierarchy lookups. See [Environment_handler] for
     more. *)
 module type Handler = sig
-  type ('key, 'table) lookup
+  val edges : int -> Target.t list option
 
-  val edges : unit -> (int, Target.t list) lookup
+  val backedges : int -> Target.Set.t option
 
-  val backedges : unit -> (int, Target.Set.t) lookup
+  val indices : Type.Primitive.t -> int option
 
-  val indices : unit -> (Type.Primitive.t, int) lookup
-
-  val annotations : unit -> (int, Type.Primitive.t) lookup
-
-  val find : ('key, 'value) lookup -> 'key -> 'value option
-
-  val find_unsafe : ('key, 'value) lookup -> 'key -> 'value
-
-  val contains : ('key, 'value) lookup -> 'key -> bool
-
-  val set : ('key, 'value) lookup -> key:'key -> data:'value -> unit
-
-  val add_key : int -> unit
-
-  val keys : unit -> int list
-
-  val length : ('key, 'value) lookup -> int
-
-  val show : unit -> string
+  val annotations : int -> Type.Primitive.t option
 end
-
-val handler : t -> (module Handler)
-(** Provides a default in-process environment handler constructed from a [ClassHierarchy.t]. *)
-
-val insert : (module Handler) -> Type.Primitive.t -> unit
-
-val connect
-  :  ?parameters:Type.OrderedTypes.t ->
-  (module Handler) ->
-  predecessor:Type.Primitive.t ->
-  successor:Type.Primitive.t ->
-  unit
-
-(* Disconnect the annotations from all of its successors, including any backedges. It does not
-   remove the annotations from the ClassHierarchy. *)
-val disconnect_successors : (module Handler) -> Type.Primitive.t list -> unit
 
 (* Returns true if the class hierarchy contains the given class. *)
 val contains : (module Handler) -> Type.Primitive.t -> bool
@@ -125,7 +83,8 @@ val successors : (module Handler) -> Type.Primitive.t -> Type.Primitive.t list
 
 type variables =
   | Unaries of Type.Variable.Unary.t list
-  | ListVariadic of Type.Variable.Variadic.List.t
+  | Concatenation of
+      (Type.Variable.Variadic.List.t, Type.Variable.Unary.t) Type.OrderedTypes.Concatenation.t
 [@@deriving compare, eq, sexp, show]
 
 val variables
@@ -146,15 +105,9 @@ val greatest_lower_bound
   Type.Primitive.t ->
   Type.Primitive.t list
 
-val deduplicate : (module Handler) -> annotations:Type.Primitive.t list -> unit
+val check_integrity : (module Handler) -> indices:int list -> unit
 
-val remove_extra_edges_to_object : (module Handler) -> Type.Primitive.t list -> unit
-
-val connect_annotations_to_object : (module Handler) -> Type.Primitive.t list -> unit
-
-val check_integrity : (module Handler) -> unit
-
-val to_dot : (module Handler) -> string
+val to_dot : (module Handler) -> indices:int list -> string
 
 val is_transitive_successor
   :  (module Handler) ->
@@ -177,15 +130,3 @@ val instantiate_predecessors_parameters
     parameters:Type.OrderedTypes.t ->
     TypeConstraints.Solution.t option) ->
   Type.OrderedTypes.t Option.t
-
-module Builder : sig
-  val create : unit -> t
-
-  val copy : t -> t
-
-  val builtin_types : Type.Primitive.Set.t
-
-  val add_default_order : (module Handler) -> unit
-
-  val default : unit -> t
-end

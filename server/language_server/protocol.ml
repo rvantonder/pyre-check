@@ -29,45 +29,35 @@ module PublishDiagnostics = struct
   include Types.PublishDiagnostics
 
   let diagnostic_severity error =
-    match Error.language_server_hint error with
+    let kind = Error.Instantiated.kind error in
+    match Error.language_server_hint kind with
     | true -> Some DiagnosticSeverity.Information
     | false -> Some DiagnosticSeverity.Error
 
 
-  let of_errors ~configuration relative errors =
+  let of_errors path errors =
     let diagnostic_of_error error =
-      let { Ast.Location.start; stop; _ } = TypeCheck.Error.location error in
+      let { Ast.Location.start; stop; _ } = TypeCheck.Error.Instantiated.location error in
       Diagnostic.
         {
           range = Range.create ~start ~stop;
           severity = diagnostic_severity error;
           code = None;
           source = Some "Pyre";
-          message = TypeCheck.Error.description error ~show_error_traces:true ~separator:"\n";
+          message =
+            TypeCheck.Error.Instantiated.description error ~show_error_traces:true ~separator:"\n";
         }
     in
-    let failed_response =
-      Format.asprintf "Valid path does not exist for %s." relative |> Or_error.error_string
-    in
-    (* TODO (T46153421): Do not rely on File.Handle *)
-    try
-      let path = File.Handle.create_for_testing relative |> File.Handle.to_path ~configuration in
-      match path with
-      | Some path ->
-          Ok
-            {
-              jsonrpc = "2.0";
-              method_ = "textDocument/publishDiagnostics";
-              parameters =
-                Some
-                  {
-                    PublishDiagnosticsParameters.uri = path |> Path.real_path |> Path.uri;
-                    diagnostics = List.map ~f:diagnostic_of_error errors;
-                  };
-            }
-      | None -> failed_response
-    with
-    | Unix.Unix_error _ -> failed_response
+    {
+      jsonrpc = "2.0";
+      method_ = "textDocument/publishDiagnostics";
+      parameters =
+        Some
+          {
+            PublishDiagnosticsParameters.uri = path |> Path.real_path |> Path.uri;
+            diagnostics = List.map ~f:diagnostic_of_error errors;
+          };
+    }
 
 
   let clear_diagnostics_for_uri ~uri =
@@ -178,12 +168,7 @@ module InitializeResponse = struct
                           save = Some { SaveOptions.include_text = Some false };
                         };
                     hover_provider = Some true;
-                    completion_provider =
-                      Some
-                        {
-                          CompletionOptions.resolve_provider = Some false;
-                          trigger_characters = Some ["."];
-                        };
+                    completion_provider = None;
                     signature_help_provider = None;
                     definition_provider = Some true;
                     references_provider = None;
@@ -222,24 +207,21 @@ end
 module TextDocumentDefinitionResponse = struct
   include Types.TextDocumentDefinitionResponse
 
-  let create ~configuration ~id ~location =
+  let create_with_result ~id result = { jsonrpc = "2.0"; id; result = Some result; error = None }
+
+  let create_empty ~id = create_with_result ~id []
+
+  let create ~id ~start ~stop ~path =
     let uri ~path =
-      File.Handle.create_for_testing path
-      |> File.Handle.to_path ~configuration
-      >>| Path.real_path
-      >>| Path.uri
+      try Some (Path.real_path path |> Path.uri) with
+      | Unix.Unix_error _ -> None
     in
-    {
-      jsonrpc = "2.0";
-      id;
-      result =
-        Some
-          ( location
-          >>= (fun { Ast.Location.start; stop; path } ->
-                uri ~path >>| fun uri -> { Location.uri; range = Range.create ~start ~stop })
-          |> Option.to_list );
-      error = None;
-    }
+    let result =
+      uri ~path
+      >>| (fun uri -> { Location.uri; range = Range.create ~start ~stop })
+      |> Option.to_list
+    in
+    create_with_result ~id result
 end
 
 module HoverResponse = struct

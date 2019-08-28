@@ -159,6 +159,7 @@ class StartTest(unittest.TestCase):
         # Shared analysis directories are prepared when starting.
         shared_analysis_directory = MagicMock()
         shared_analysis_directory.get_root = lambda: "."
+        shared_analysis_directory.get_pyre_server_directory = lambda: "./.pyre/server"
         with patch.object(
             commands.Command, "_call_client"
         ) as call_client, patch.object(
@@ -492,5 +493,28 @@ class StartTest(unittest.TestCase):
                 "hash",
                 "-search-path",
                 "path1,path2,path3",
+            ],
+        )
+        arguments = mock_arguments()
+        arguments.incremental_style = commands.IncrementalStyle.FINE_GRAINED
+        configuration = mock_configuration(version_hash="hash")
+        configuration.ignore_all_errors = ["/absolute/a", "/root/b"]
+        command = commands.Start(arguments, configuration, AnalysisDirectory("."))
+        self.assertEqual(
+            command._flags(),
+            [
+                "-logging-sections",
+                "parser",
+                "-project-root",
+                ".",
+                "-ignore-all-errors",
+                "/absolute/a;/root/b",
+                "-workers",
+                "5",
+                "-expected-binary-version",
+                "hash",
+                "-search-path",
+                "path1,path2,path3",
+                "-new-incremental-check",
             ],
         )

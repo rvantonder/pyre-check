@@ -96,7 +96,7 @@ let start_from_scratch ?old_state ~connections ~configuration () =
   let errors =
     let table = Ast.Reference.Table.create () in
     let add_error error =
-      let key = Error.path error |> Ast.SourcePath.qualifier_of_relative in
+      let key = Error.path error in
       Hashtbl.add_multi table ~key ~data:error
     in
     List.iter errors ~f:add_error;
@@ -113,7 +113,7 @@ let start_from_scratch ?old_state ~connections ~configuration () =
     last_integrity_check = Unix.time ();
     connections;
     lookups = String.Table.create ();
-    open_documents = Path.Map.empty;
+    open_documents = Ast.Reference.Table.create ();
   }
 
 

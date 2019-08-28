@@ -1,83 +1,198 @@
 package com.facebook.buck_project_builder.targets;
 
 import com.facebook.buck_project_builder.BuckCells;
+import com.facebook.buck_project_builder.BuckQuery;
 import com.facebook.buck_project_builder.BuilderException;
-import com.facebook.buck_project_builder.CommandLine;
-import com.facebook.buck_project_builder.SimpleLogger;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
-import com.google.gson.JsonSyntaxException;
 
 import javax.annotation.Nullable;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 public final class BuildTargetsCollector {
 
-  /**
-   * @return an array that contains all of the buck targets (including the dependencies), given a
-   *     list of targets we need to type check
-   */
-  public static ImmutableList<BuildTarget> collectBuckTargets(
-      String buckRoot, ImmutableList<String> targets) throws BuilderException {
-    return parseBuildTargetList(BuckCells.getCellMappings(), buckRoot, getBuildTargetJson(targets));
+  private final String buckRoot;
+  private final String outputDirectory;
+  private final PlatformSelector selector;
+  private final CommandRewriter rewriter;
+  private final Set<String> requiredRemoteFiles = new HashSet<>();
+
+  /** key: output path, value: source path */
+  private final Map<Path, Path> sources = new HashMap<>();
+
+  private final Set<String> unsupportedGeneratedSources = new HashSet<>();
+  private final Set<String> pythonWheelUrls = new HashSet<>();
+  private final Set<ThriftLibraryTarget> thriftLibraryTargets = new HashSet<>();
+  private final Set<String> swigLibraryBuildCommands = new HashSet<>();
+  private final Set<String> antlr4LibraryBuildCommands = new HashSet<>();
+
+  private final Set<String> conflictingFiles = new HashSet<>();
+
+  public BuildTargetsCollector(
+      String buckRoot,
+      String outputDirectory,
+      PlatformSelector selector,
+      CommandRewriter rewriter) {
+    this.buckRoot = buckRoot;
+    this.outputDirectory = outputDirectory;
+    this.selector = selector;
+    this.rewriter = rewriter;
   }
 
-  /**
-   * Exposed for testing. Do not call it directly.
-   *
-   * @return a list of parsed json targets from target json.
-   */
-  static ImmutableList<BuildTarget> parseBuildTargetList(
-      ImmutableMap<String, String> cellMappings, String buckRoot, JsonObject targetJsonMap) {
-    Set<String> requiredRemoteFiles = new HashSet<>();
+  @VisibleForTesting
+  Map<Path, Path> getSources() {
+    return sources;
+  }
+
+  @VisibleForTesting
+  Set<String> getPythonWheelUrls() {
+    return pythonWheelUrls;
+  }
+
+  @VisibleForTesting
+  Set<ThriftLibraryTarget> getThriftLibraryTargets() {
+    return thriftLibraryTargets;
+  }
+
+  @VisibleForTesting
+  Set<String> getSwigLibraryBuildCommands() {
+    return swigLibraryBuildCommands;
+  }
+
+  @VisibleForTesting
+  Set<String> getAntlr4LibraryBuildCommands() {
+    return antlr4LibraryBuildCommands;
+  }
+
+  @VisibleForTesting
+  Set<String> getUnsupportedGeneratedSources() {
+    return unsupportedGeneratedSources;
+  }
+
+  public Set<String> getConflictingFiles() {
+    return conflictingFiles;
+  }
+
+  /** @return a builder that contains all the target information necessary for building. */
+  public BuildTargetsBuilder getBuilder(long startTime, ImmutableList<String> targets)
+      throws BuilderException {
+    collectBuildTargets(BuckCells.getCellMappings(), BuckQuery.getBuildTargetJson(targets));
+    // Filter thrift libraries
+    this.thriftLibraryTargets.removeIf(
+        target -> {
+          String commandString = target.getCommand();
+          return commandString.contains("py:")
+              && this.thriftLibraryTargets.contains(
+                  new ThriftLibraryTarget(
+                      commandString.replace("py:", "mstch_pyi:"),
+                      target.getBaseModulePath(),
+                      target.getSources()));
+        });
+    return new BuildTargetsBuilder(
+        startTime,
+        this.buckRoot,
+        this.outputDirectory,
+        targets,
+        ImmutableMap.copyOf(this.sources),
+        ImmutableSet.copyOf(this.unsupportedGeneratedSources),
+        ImmutableSet.copyOf(this.pythonWheelUrls),
+        ImmutableSet.copyOf(this.thriftLibraryTargets),
+        ImmutableSet.copyOf(this.swigLibraryBuildCommands),
+        ImmutableSet.copyOf(this.antlr4LibraryBuildCommands));
+  }
+
+  @VisibleForTesting
+  void collectBuildTargets(ImmutableMap<String, String> cellMappings, JsonObject targetJsonMap) {
     // The first pass collects python_library that refers to a remote python_file
     for (Map.Entry<String, JsonElement> entry : targetJsonMap.entrySet()) {
       JsonObject targetJsonObject = entry.getValue().getAsJsonObject();
-      addRemotePythonFiles(targetJsonObject, requiredRemoteFiles, targetJsonMap);
+      addRemotePythonFiles(targetJsonObject, targetJsonMap);
     }
-    ImmutableSet<String> immutableRequiredRemoteFiles = ImmutableSet.copyOf(requiredRemoteFiles);
     // The second pass parses all normal targets and remote_file target with version information
     // collected above.
-    ImmutableList.Builder<BuildTarget> buildTargetListBuilder = ImmutableList.builder();
     for (Map.Entry<String, JsonElement> entry : targetJsonMap.entrySet()) {
       String buildTargetName = entry.getKey();
       String cellPath = BuckCells.getCellPath(buildTargetName, cellMappings);
       JsonObject targetJsonObject = entry.getValue().getAsJsonObject();
-      BuildTarget parsedTarget =
-          parseBuildTarget(
-              targetJsonObject, cellPath, buckRoot, buildTargetName, immutableRequiredRemoteFiles);
-      if (parsedTarget != null) {
-        buildTargetListBuilder.add(parsedTarget);
-      }
+      collectBuildTarget(targetJsonObject, cellPath, buildTargetName);
     }
-    return buildTargetListBuilder.build();
   }
 
-  private static @Nullable String getSupportedPlatformDependency(
-      JsonElement platformDependenciesField) {
-    for (JsonElement platformDependencyTuple : platformDependenciesField.getAsJsonArray()) {
-      JsonArray pair = platformDependencyTuple.getAsJsonArray();
-      if (!pair.get(0).getAsString().equals("py3-platform007$")) {
-        continue;
-      }
-      return pair.get(1).getAsJsonArray().get(0).getAsString();
+  private void collectBuildTarget(
+      JsonObject targetJsonObject, @Nullable String cellPath, String buildTargetName) {
+    String type = targetJsonObject.get("buck.type").getAsString();
+    switch (type) {
+      case "python_binary":
+      case "python_library":
+      case "python_test":
+        PythonTarget pythonTarget =
+            PythonTarget.parse(
+                cellPath, this.buckRoot, this.outputDirectory, this.selector, targetJsonObject);
+        if (pythonTarget != null) {
+          pythonTarget.getSources().forEach(this::addSourceMapping);
+          pythonTarget
+              .getUnsupportedGeneratedSources()
+              .forEach(this::addUnsupportedGeneratedSource);
+        }
+        return;
+      case "genrule":
+        // Thrift library targets have genrule rule type.
+        ThriftLibraryTarget thriftLibraryTarget =
+            ThriftLibraryTarget.parse(cellPath, this.buckRoot, this.rewriter, targetJsonObject);
+        if (thriftLibraryTarget != null) {
+          this.thriftLibraryTargets.add(thriftLibraryTarget);
+          return;
+        }
+        String antlr4LibraryCommand =
+            Antlr4LibraryTarget.parseCommand(
+                cellPath, this.buckRoot, this.outputDirectory, this.rewriter, targetJsonObject);
+        if (antlr4LibraryCommand != null) {
+          this.antlr4LibraryBuildCommands.add(antlr4LibraryCommand);
+        }
+        return;
+      case "cxx_genrule":
+        // Swig library targets have cxx_genrule rule type.
+        String swigLibraryCommand =
+            SwigLibraryTarget.parseCommand(
+                cellPath, this.buckRoot, this.outputDirectory, this.rewriter, targetJsonObject);
+        if (swigLibraryCommand != null) {
+          this.swigLibraryBuildCommands.add(swigLibraryCommand);
+        }
+        return;
+      case "remote_file":
+        if (this.requiredRemoteFiles.contains(buildTargetName)) {
+          this.pythonWheelUrls.add(targetJsonObject.get("url").getAsString());
+        }
+        return;
+      default:
     }
-    return null;
   }
 
-  private static void addRemotePythonFiles(
-      JsonObject targetJsonObject, Set<String> requiredRemoteFiles, JsonObject targetJsonMap) {
+  private void addSourceMapping(Path outputPath, Path sourcePath) {
+    Path existingSourcePath = this.sources.get(outputPath);
+    if (existingSourcePath != null && !existingSourcePath.equals(sourcePath)) {
+      this.conflictingFiles.add(
+          Paths.get(this.outputDirectory).relativize(outputPath).normalize().toString());
+      return;
+    }
+    this.sources.put(outputPath, sourcePath);
+  }
+
+  private void addUnsupportedGeneratedSource(String generatedSourcePath) {
+    unsupportedGeneratedSources.add(generatedSourcePath);
+  }
+
+  private void addRemotePythonFiles(JsonObject targetJsonObject, JsonObject targetJsonMap) {
     if (!targetJsonObject.get("buck.type").getAsString().equals("python_library")
         || targetJsonObject.get("deps") != null) {
       // remote_file's corresponding top level python_library must not have deps field.
@@ -87,7 +202,8 @@ public final class BuildTargetsCollector {
     if (platformDependenciesField == null) {
       return;
     }
-    String versionedSuffix = getSupportedPlatformDependency(platformDependenciesField);
+    String versionedSuffix =
+        this.selector.getSupportedPlatformDependency(platformDependenciesField);
     if (versionedSuffix == null) {
       return;
     }
@@ -96,124 +212,11 @@ public final class BuildTargetsCollector {
     if (versionedTarget == null) {
       return;
     }
-    String wheelSuffix = getSupportedPlatformDependency(versionedTarget.get("platform_deps"));
+    String wheelSuffix =
+        this.selector.getSupportedPlatformDependency(versionedTarget.get("platform_deps"));
     if (wheelSuffix == null) {
       return;
     }
-    requiredRemoteFiles.add("//" + basePath + wheelSuffix + "-remote");
-  }
-
-  /**
-   * Exposed for testing. Do not call it directly.
-   *
-   * @return the parsed build target, or null if it is a non-python related target.
-   */
-  static @Nullable BuildTarget parseBuildTarget(
-      JsonObject targetJsonObject,
-      @Nullable String cellPath,
-      String buckRoot,
-      String buildTargetName,
-      ImmutableSet<String> requiredRemoteFiles) {
-    String type = targetJsonObject.get("buck.type").getAsString();
-    switch (type) {
-      case "python_binary":
-      case "python_library":
-      case "python_test":
-        return PythonTarget.parse(cellPath, targetJsonObject);
-      case "genrule":
-        // Thrift library targets have genrule rule type.
-        BuildTarget parsedTarget = ThriftLibraryTarget.parse(cellPath, buckRoot, targetJsonObject);
-        if (parsedTarget != null) {
-          return parsedTarget;
-        }
-        return Antlr4LibraryTarget.parse(cellPath, buckRoot, targetJsonObject);
-      case "cxx_genrule":
-        // Swig library targets have cxx_genrule rule type.
-        return SwigLibraryTarget.parse(cellPath, buckRoot, targetJsonObject);
-      case "remote_file":
-        return requiredRemoteFiles.contains(buildTargetName)
-            ? RemoteFileTarget.parse(targetJsonObject)
-            : null;
-      default:
-        return null;
-    }
-  }
-
-  private static JsonObject getBuildTargetJson(ImmutableList<String> targets)
-      throws BuilderException {
-    if (targets.isEmpty()) {
-      throw new BuilderException("Targets should not be empty.");
-    }
-    SimpleLogger.info("Querying targets' information...");
-    long start = System.currentTimeMillis();
-    ImmutableList<String> buildCommand = getBuildCommand(targets);
-    try (InputStream commandLineOutput = CommandLine.getCommandLineOutput(buildCommand)) {
-      JsonElement parsedJson = new JsonParser().parse(new InputStreamReader(commandLineOutput));
-      long buckQueryTime = System.currentTimeMillis() - start;
-      SimpleLogger.info("Found targets' information in " + buckQueryTime + "ms.");
-      if (!parsedJson.isJsonObject()) {
-        throw new BuilderException(
-            String.format(
-                "Unexpected `buck query` output. It should always be a json object.\nBad json: %s. Query: %s.",
-                parsedJson, String.join(" ", buildCommand)));
-      }
-      return parsedJson.getAsJsonObject();
-    } catch (IOException exception) {
-      throw new BuilderException(
-          "Cannot compute all targets to build due to IO Exception. Reason: "
-              + exception.getMessage());
-    } catch (JsonSyntaxException exception) {
-      throw new BuilderException(
-          "Unexpected JSON syntax error in produced buck targets. Reason: "
-              + exception.getMessage());
-    }
-  }
-
-  static String normalizeTarget(String target) {
-    if (target.contains("//")) {
-      return target;
-    }
-    return "//" + target;
-  }
-
-  private static ImmutableList<String> getBuildCommand(ImmutableList<String> targets) {
-    /*
-     * The command that we will run has the form:
-     *
-     * buck query \
-     *   "kind([all build rule types we have to support], deps(%s))" [TARGETS]
-     *   --output-attributes [all attributes in the json that we care about]
-     *
-     * We use
-     * - `kind` to filter by the types of build rules
-     * - `deps(%s)` to get all transitive dependencies
-     * - `--output-attributes` to get only wanted fields in json
-     *
-     * See: https://buck.build/command/query.html for more detail.
-     */
-    return ImmutableList.<String>builder()
-        .add("buck")
-        .add("query")
-        .add(
-            "kind('python_binary|python_library|python_test|genrule|cxx_genrule|remote_file', deps(%s))")
-        .addAll(
-            targets.stream()
-                .map(BuildTargetsCollector::normalizeTarget)
-                .collect(Collectors.toList()))
-        .add("--output-attributes")
-        .add("buck.type")
-        .add("buck.base_path")
-        .add("base_module")
-        .add("labels")
-        .add("srcs")
-        .add("versioned_srcs")
-        .add("platform_srcs")
-        .add("cmd")
-        .add("url")
-        .add("binary_src")
-        .add("name")
-        .add("deps")
-        .add("platform_deps")
-        .build();
+    this.requiredRemoteFiles.add("//" + basePath + wheelSuffix + "-remote");
   }
 }

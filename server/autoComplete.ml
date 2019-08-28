@@ -11,8 +11,14 @@ open Pyre
 let remove_dot ~cursor_position:{ Location.line; column } source =
   let line_rewriter line_index original_line =
     (* Pyre line number starts at 1. *)
-    if line_index + 1 = line then (* Remove DOT to make the source parsable. *)
-      let line_substring = Substring.of_string original_line in
+    let line_substring = Substring.of_string original_line in
+    if
+      Int.equal (line_index + 1) line
+      && (not (Int.equal column 0))
+      (* Make sure pos and len are within bounds of the line_substring *)
+      && String.length original_line - column >= 0
+      && column - 1 <= Substring.length line_substring
+    then (* Remove DOT to make the source parsable. *)
       let before_dot_segment = Substring.sub ~pos:0 ~len:(column - 1) line_substring in
       let after_dot_segment =
         Substring.sub ~pos:column ~len:(String.length original_line - column) line_substring
@@ -44,8 +50,8 @@ let find_module_reference ~cursor_position:{ Location.line; column } source =
   |> Reference.create
 
 
-let get_exported_imports ~module_reference =
-  SharedMemory.Sources.get module_reference
+let get_exported_imports ~ast_environment module_reference =
+  AstEnvironment.ReadOnly.get_source ast_environment module_reference
   >>| Source.statements
   >>| List.concat_map ~f:(function
           | { Node.value = Statement.Import { imports; _ }; _ } ->
@@ -106,16 +112,15 @@ let get_class_attributes_list
   class_data_list |> List.map ~f:get_attributes_name_and_type |> List.concat
 
 
-let get_module_members_list
-    ~resolution
-    ~cursor_position:{ Location.line; column }
-    ~module_reference
-    module_definition
+let get_module_members_list ~resolution ~cursor_position:{ Location.line; column } module_reference
   =
   let open LanguageServer.Types in
   let position = Position.from_pyre_position ~line ~column in
   let text_edit_range = { Range.start = position; end_ = position } in
-  let exported_imports = get_exported_imports ~module_reference in
+  let ast_environment =
+    Resolution.global_resolution resolution |> GlobalResolution.ast_environment
+  in
+  let exported_imports = get_exported_imports ~ast_environment module_reference in
   let get_member_name_and_type member_reference =
     (* We remove members which are exported by importing some other modules. They should not show
        up in autocompletion. *)
@@ -128,15 +133,16 @@ let get_module_members_list
         ~item_name:(Reference.last member_reference)
         ~item_type:(Resolution.resolve_reference resolution fully_qualified_member_reference)
   in
-  List.filter_map (Module.wildcard_exports module_definition) ~f:get_member_name_and_type
+  AstEnvironment.ReadOnly.get_wildcard_exports ast_environment module_reference
+  >>= fun wildcard_exports -> Some (List.filter_map wildcard_exports ~f:get_member_name_and_type)
 
 
 let get_completion_items ~state ~configuration ~path ~cursor_position =
   let { State.open_documents; module_tracker; environment; _ } = state in
   match Analysis.ModuleTracker.lookup_path ~configuration module_tracker path with
   | None -> []
-  | Some _ -> (
-    match Path.Map.find open_documents path with
+  | Some { SourcePath.qualifier; _ } -> (
+    match Reference.Table.find open_documents qualifier with
     | None -> []
     | Some content ->
         let content = remove_dot ~cursor_position content in
@@ -207,10 +213,7 @@ let get_completion_items ~state ~configuration ~path ~cursor_position =
             (* Find module members only if class attribute completion fails *)
             File.content file
             >>= find_module_reference ~cursor_position
-            >>= (fun module_reference ->
-                  module_reference
-                  |> GlobalResolution.module_definition global_resolution
-                  >>| get_module_members_list ~resolution ~cursor_position ~module_reference)
+            >>= get_module_members_list ~resolution ~cursor_position
             |> Option.value ~default:[]
           else
             class_attributes_list

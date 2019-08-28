@@ -31,6 +31,7 @@ class FastBuckBuilder(BuckBuilder):
         buck_root: str,
         output_directory: Optional[str] = None,
         buck_builder_binary: Optional[str] = None,
+        buck_builder_target: Optional[str] = None,
         debug_mode=False,
     ) -> None:
         self._buck_root = buck_root
@@ -38,36 +39,54 @@ class FastBuckBuilder(BuckBuilder):
             prefix="pyre_tmp_"
         )
         self._buck_builder_binary = buck_builder_binary
+        self._buck_builder_target = buck_builder_target
         self._debug_mode = debug_mode
         self.conflicting_files = []
         self.unsupported_files = []
 
-    def build(self, targets: Iterable[str]) -> List[str]:
-        if self._debug_mode:
-            executable_parts = [
-                "buck",
-                "run",
-                "//tools/pyre/tools/buck_project_builder",
-                "--",
-                "--debug",
-            ]
-        else:
-            builder_binary = self._buck_builder_binary
-            executable_parts = (
-                [builder_binary]
-                if builder_binary
-                else ["buck", "run", "//tools/pyre/tools/buck_project_builder", "--"]
+    def _get_builder_executable(self) -> str:
+        builder_binary = self._buck_builder_binary
+        if not self._debug_mode:
+            if builder_binary is None:
+                raise BuckException(
+                    "--buck-builder-binary must be provided "
+                    "if --buck-builder-debug is not enabled."
+                )
+            return builder_binary
+        target = self._buck_builder_target
+        if target is None:
+            raise BuckException(
+                "--buck-builder-target must be provided "
+                "if --buck-builder-debug is enabled."
             )
-        command = (
-            executable_parts
-            + [
-                "--buck_root",
-                self._buck_root,
-                "--output_directory",
-                self._output_directory,
-            ]
-            + list(targets)
+        binary_relative_path = (
+            subprocess.check_output(
+                [
+                    "buck",
+                    "build",
+                    "--show-output",
+                    "//tools/pyre/facebook/fb_buck_project_builder",
+                ],
+                stderr=subprocess.DEVNULL,
+            )
+            .decode()
+            .strip()
+            .split(" ")[1]
         )
+        return os.path.join(self._buck_root, binary_relative_path)
+
+    def build(self, targets: Iterable[str]) -> List[str]:
+        command = [
+            self._get_builder_executable(),
+            "-J-Djava.net.preferIPv6Addresses=true",
+            "-J-Djava.net.preferIPv6Stack=true",
+            "--buck_root",
+            self._buck_root,
+            "--output_directory",
+            self._output_directory,
+        ] + list(targets)
+        if self._debug_mode:
+            command.append("--debug")
         with subprocess.Popen(
             command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         ) as buck_builder_process:
@@ -186,10 +205,8 @@ def _normalize(targets: List[str]) -> List[Tuple[str, str]]:
             .decode()
             .strip()
             .split("\n")
-        )
-        targets_to_destinations = cast(
-            List[str], list(filter(bool, targets_to_destinations))
-        )
+        )  # type: List[str]
+        targets_to_destinations = list(filter(bool, targets_to_destinations))
         # The output is of the form //target //corresponding.par
         result = []
         for target in targets_to_destinations:

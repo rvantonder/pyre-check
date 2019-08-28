@@ -9,10 +9,12 @@ open Ast
 open Analysis
 open Test
 
-let assert_deobfuscation source expected =
-  let environment = environment () in
-  let global_resolution = Environment.resolution environment () in
-  let configuration = mock_configuration in
+let assert_deobfuscation ~context source expected =
+  let configuration, global_resolution =
+    let project = ScratchProject.setup ~context [] in
+    let _, _, environment = ScratchProject.build_environment project in
+    ScratchProject.configuration_of project, Environment.resolution environment ()
+  in
   let handle = "qualifier.py" in
   let actual =
     let source = parse ~handle source in
@@ -23,12 +25,14 @@ let assert_deobfuscation source expected =
     | _ -> failwith "Did not generate a source"
   in
   let source_equal left right =
-    Source.equal { left with Source.hash = -1 } { right with Source.hash = -1 }
+    let metadata = Source.Metadata.create_for_testing () in
+    Source.equal { left with Source.metadata } { right with Source.metadata }
   in
   assert_equal ~cmp:source_equal ~printer:Source.show (parse ~handle expected) actual
 
 
-let test_forward _ =
+let test_forward context =
+  let assert_deobfuscation = assert_deobfuscation ~context in
   (* Basic propagation. *)
   assert_deobfuscation {|
       a = 1
@@ -61,7 +65,6 @@ let test_forward _ =
       a = 2
       a
     |} {|
-      a = 1
       2
     |};
   assert_deobfuscation {|
@@ -80,7 +83,6 @@ let test_forward _ =
       b
     |}
     {|
-      a = 1
       a = foo()
       a
     |};
@@ -91,7 +93,6 @@ let test_forward _ =
       a
     |}
     {|
-      a = 1
       a = 1 + 1
       a
     |};
@@ -203,7 +204,8 @@ let test_forward _ =
     |}
 
 
-let test_scheduling _ =
+let test_scheduling context =
+  let assert_deobfuscation = assert_deobfuscation ~context in
   assert_deobfuscation
     {|
       a = 1
@@ -262,7 +264,8 @@ let test_scheduling _ =
     |}
 
 
-let test_dead_store_elimination _ =
+let test_dead_store_elimination context =
+  let assert_deobfuscation = assert_deobfuscation ~context in
   assert_deobfuscation {|
       a = 1
       a
@@ -293,7 +296,8 @@ let test_dead_store_elimination _ =
     |}
 
 
-let test_fixup _ =
+let test_fixup context =
+  let assert_deobfuscation = assert_deobfuscation ~context in
   (* Fix empty bodies. *)
   assert_deobfuscation
     {|

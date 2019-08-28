@@ -84,6 +84,7 @@ and type_variable_origin =
 and type_variance_origin =
   | Parameter
   | Return
+  | Inheritance of Type.t
 
 and illegal_action_on_incomplete_type =
   | Naming
@@ -147,9 +148,10 @@ type kind =
     }
   | AnalysisFailure of Type.t
   | IllegalAnnotationTarget of Expression.t
-  | ImpossibleIsinstance of {
+  | ImpossibleAssertion of {
       expression: Expression.t;
-      mismatch: mismatch;
+      annotation: Type.t;
+      statement: Statement.t;
     }
   | IncompatibleAttributeType of {
       parent: Type.t;
@@ -223,7 +225,11 @@ type kind =
   | MissingReturnAnnotation of missing_annotation
   | MutuallyRecursiveTypeVariables of Reference.t option
   | NotCallable of Type.t
-  | ProhibitedAny of missing_annotation
+  | ProhibitedAny of {
+      is_type_alias: bool;
+      missing_annotation: missing_annotation;
+    }
+  | RedefinedClass of Reference.t
   | RedundantCast of Type.t
   | RevealedType of {
       expression: Expression.t;
@@ -268,6 +274,7 @@ type kind =
   | UnusedIgnore of int list
   (* Additional errors. *)
   (* TODO(T38384376): split this into a separate module. *)
+  | DeadStore of Identifier.t
   | Deobfuscation of Source.t
   | UnawaitedAwaitable of unawaited_awaitable
 [@@deriving compare, eq, sexp, show, hash]
@@ -300,7 +307,7 @@ let code = function
   | RedundantCast _ -> 22
   | Unpack _ -> 23
   | InvalidTypeParameters _ -> 24
-  | ImpossibleIsinstance _ -> 25
+  | ImpossibleAssertion _ -> 25
   | TypedDictionaryAccessWithNonLiteral _ -> 26
   | TypedDictionaryKeyNotFound _ -> 27
   | UnexpectedKeyword _ -> 28
@@ -324,18 +331,21 @@ let code = function
   | InvalidTypeVariance _ -> 46
   | InvalidMethodSignature _ -> 47
   | InvalidException _ -> 48
+  | UnsafeCast _ -> 49
+  | RedefinedClass _ -> 50
   (* Additional errors. *)
-  | UnawaitedAwaitable _ -> 101
-  | Deobfuscation _ -> 102
-  | UnsafeCast _ -> 103
+  | UnawaitedAwaitable _ -> 1001
+  | Deobfuscation _ -> 1002
+  | DeadStore _ -> 1003
 
 
 let name = function
   | AbstractClass _ -> "Abstract class"
   | AnalysisFailure _ -> "Analysis failure"
+  | DeadStore _ -> "Dead store"
   | Deobfuscation _ -> "Deobfuscation"
   | IllegalAnnotationTarget _ -> "Illegal annotation target"
-  | ImpossibleIsinstance _ -> "Impossible isinstance check"
+  | ImpossibleAssertion _ -> "Impossible assertion"
   | IncompatibleAttributeType _ -> "Incompatible attribute type"
   | IncompatibleAwaitableType _ -> "Incompatible awaitable type"
   | IncompatibleConstructorAnnotation _ -> "Incompatible constructor annotation"
@@ -366,6 +376,7 @@ let name = function
   | MutuallyRecursiveTypeVariables _ -> "Mutually recursive type variables"
   | NotCallable _ -> "Call error"
   | ProhibitedAny _ -> "Prohibited any"
+  | RedefinedClass _ -> "Redefined class"
   | RedundantCast _ -> "Redundant cast"
   | RevealedType _ -> "Revealed type"
   | TooManyArguments _ -> "Too many arguments"
@@ -401,8 +412,6 @@ let weaken_literals kind =
     | missing -> missing
   in
   match kind with
-  | ImpossibleIsinstance ({ mismatch : mismatch; _ } as isinstance) ->
-      ImpossibleIsinstance { isinstance with mismatch = weaken_mismatch mismatch }
   | IncompatibleAttributeType
       ({ incompatible_type = { mismatch; _ } as incompatible; _ } as attribute) ->
       IncompatibleAttributeType
@@ -437,8 +446,9 @@ let weaken_literals kind =
       MissingParameterAnnotation (weaken_missing_annotation missing_annotation)
   | MissingReturnAnnotation missing_annotation ->
       MissingReturnAnnotation (weaken_missing_annotation missing_annotation)
-  | ProhibitedAny missing_annotation ->
-      ProhibitedAny (weaken_missing_annotation missing_annotation)
+  | ProhibitedAny { is_type_alias; missing_annotation } ->
+      ProhibitedAny
+        { is_type_alias; missing_annotation = weaken_missing_annotation missing_annotation }
   | Unpack { expected_count; unpack_problem = UnacceptableType annotation } ->
       Unpack
         { expected_count; unpack_problem = UnacceptableType (Type.weaken_literals annotation) }
@@ -489,6 +499,7 @@ let messages ~concise ~signature location kind =
       [Format.asprintf "Terminating analysis - type `%a` not defined." pp_type annotation]
   | AnalysisFailure annotation ->
       [Format.asprintf "Terminating analysis because type `%a` is not defined." pp_type annotation]
+  | DeadStore name -> [Format.asprintf "Value assigned to `%a` is never used." pp_identifier name]
   | Deobfuscation source -> [Format.asprintf "\n%a" Source.pp source]
   | IllegalAnnotationTarget _ when concise -> ["Target cannot be annotated."]
   | IllegalAnnotationTarget expression ->
@@ -504,7 +515,7 @@ let messages ~concise ~signature location kind =
         | Naming -> "add an explicit annotation."
         | Calling ->
             "cannot be called. "
-            ^ "Separate the expression into an assignment and give it an explicit annotation"
+            ^ "Separate the expression into an assignment and give it an explicit annotation."
         | AttributeAccess attribute ->
             Format.asprintf
               "so attribute `%s` cannot be accessed. Separate the expression into an assignment \
@@ -516,17 +527,23 @@ let messages ~concise ~signature location kind =
           inferred
           (Expression.show_sanitized target)
           consequence ]
-  | ImpossibleIsinstance _ when concise -> ["isinstance check will always fail."]
-  | ImpossibleIsinstance { expression; mismatch = { actual; expected; _ } } ->
-      let expression_string = Expression.show expression in
+  | ImpossibleAssertion _ when concise -> ["Assertion will always fail."]
+  | ImpossibleAssertion { expression; annotation; statement } ->
+      let statement_string =
+        Statement.show statement
+        |> String.chop_prefix_exn ~prefix:"assert"
+        |> String.strip ~drop:(function
+               | ' '
+               | ',' ->
+                   true
+               | _ -> false)
+      in
       [ Format.asprintf
-          "`%s` has type `%a`, checking if `%s` not isinstance `%a` will always fail."
-          expression_string
+          "`%s` has type `%a`, assertion `%s` will always fail."
+          (Expression.show expression)
           pp_type
-          actual
-          expression_string
-          pp_type
-          expected ]
+          annotation
+          statement_string ]
   | IncompatibleAwaitableType actual ->
       [Format.asprintf "Expected an awaitable but got `%a`." pp_type actual]
   | IncompatibleOverload kind -> (
@@ -755,7 +772,7 @@ let messages ~concise ~signature location kind =
             variable ]
     | ListVariadicVariable { variable; mismatch = CantConcatenate _ } ->
         [ Format.asprintf
-            "Concatenating ListVariadics for variable `%a` is not yet supported."
+            "Concatenating multiple ListVariadics for variable `%a` is not yet supported."
             Type.OrderedTypes.pp_concise
             variable ] )
   | InvalidArgument argument -> (
@@ -797,7 +814,7 @@ let messages ~concise ~signature location kind =
         in
         [ Format.asprintf
             "Variadic type variable `%a` cannot be made to contain `%s`, concatenation of \
-             variadic type variables is not yet implemented."
+             multiple variadic type variables is not yet implemented."
             (Type.Record.OrderedTypes.pp_concise ~pp_type)
             variable
             unconcatenatable ] )
@@ -861,11 +878,30 @@ let messages ~concise ~signature location kind =
   | InvalidTypeParameters { name; kind = GlobalResolution.ViolateConstraints { expected; actual } }
     ->
       [ Format.asprintf
-          "Type parameter `%a` violates constraints on `%a` in generic type `%s`"
+          "Type parameter `%a` violates constraints on `%a` in generic type `%s`."
           pp_type
           actual
           pp_type
           (Type.Variable expected)
+          name ]
+  | InvalidTypeParameters { name; kind = GlobalResolution.UnexpectedVariadic { expected; actual } }
+    ->
+      let parameter_pluralization =
+        match expected with
+        | [_] -> "parameter"
+        | _ -> "parameters"
+      in
+      let expected_types =
+        List.map ~f:(fun unary -> Format.asprintf "%a" pp_type (Type.Variable unary)) expected
+        |> String.concat ~sep:", "
+      in
+      [ Format.asprintf
+          "Concrete type %s `%s` expected, but a variadic type parameter `%a` was given for \
+           generic type %s."
+          parameter_pluralization
+          expected_types
+          Type.OrderedTypes.pp_concise
+          actual
           name ]
   | InvalidTypeVariable { annotation; origin } when concise -> (
       let format : ('b, Format.formatter, unit, string) format4 =
@@ -881,13 +917,13 @@ let messages ~concise ~signature location kind =
           let name = Type.Variable.Variadic.Parameters.name variable in
           if origin = ClassToplevel then
             [ "Classes parameterized by callable parameter variadics are not supported at "
-              ^ "this time" ]
+              ^ "this time." ]
           else
             [Format.asprintf format name]
       | Type.Variable.ListVariadic variable ->
           let name = Type.Variable.Variadic.List.name variable in
           if origin = ClassToplevel then
-            ["Classes parameterized by list variadics are not supported at this time"]
+            ["Classes parameterized by list variadics are not supported at this time."]
           else
             [Format.asprintf format name] )
   | InvalidTypeVariable { annotation; origin } -> (
@@ -908,7 +944,7 @@ let messages ~concise ~signature location kind =
           if origin = ClassToplevel then
             [ Format.asprintf
                 "Cannot propagate callable parameter variadic `%s`.  Classes parameterized by \
-                 callable parameter variadics are not supported at this time"
+                 callable parameter variadics are not supported at this time."
                 name ]
           else
             [Format.asprintf format name]
@@ -917,21 +953,40 @@ let messages ~concise ~signature location kind =
           if origin = ClassToplevel then
             [ Format.asprintf
                 "Cannot propagate list variadic `%s`.  Classes parameterized by list variadics \
-                 are not supported at this time"
+                 are not supported at this time."
                 name ]
           else
             [Format.asprintf format name] )
   | InvalidTypeVariance { origin; _ } when concise -> (
     match origin with
     | Parameter -> ["Parameter type cannot be covariant."]
-    | Return -> ["Return type cannot be contravariant."] )
+    | Return -> ["Return type cannot be contravariant."]
+    | Inheritance _ ->
+        ["Subclasses cannot use more permissive type variables than their superclasses."] )
   | InvalidTypeVariance { annotation; origin } ->
-      let format : ('a, Format.formatter, unit, string) format4 =
+      let formatted =
         match origin with
-        | Parameter -> "The type variable `%a` is covariant and cannot be a parameter type."
-        | Return -> "The type variable `%a` is contravariant and cannot be a return type."
+        | Parameter ->
+            Format.asprintf
+              "The type variable `%a` is covariant and cannot be a parameter type."
+              pp_type
+              annotation
+        | Return ->
+            Format.asprintf
+              "The type variable `%a` is contravariant and cannot be a return type."
+              pp_type
+              annotation
+        | Inheritance parent ->
+            Format.asprintf
+              "The type variable `%a` is incompatible with parent class type variable `%a` \
+               because subclasses cannot use more permissive type variables than their \
+               superclasses."
+              pp_type
+              annotation
+              pp_type
+              parent
       in
-      [ Format.asprintf format pp_type annotation;
+      [ formatted;
         "See `https://pyre-check.org/docs/error-types.html#35-invalid-type-variance` for details."
       ]
   | InvalidInheritance invalid_inheritance -> (
@@ -979,7 +1034,7 @@ let messages ~concise ~signature location kind =
         [Format.asprintf "`%a` cannot be reassigned. It is a read-only property." pp_reference name]
     )
   | InvalidClass name when concise ->
-      [Format.asprintf "`%a` non-abstract class with abstract methods" pp_reference name]
+      [Format.asprintf "`%a` non-abstract class with abstract methods." pp_reference name]
   | InvalidClass name ->
       [ Format.asprintf
           "`%a` is a non-abstract class with abstract methods. Did you mean to make this class \
@@ -1199,7 +1254,7 @@ let messages ~concise ~signature location kind =
             annotation ]
     | Some given_annotation when Type.contains_any given_annotation ->
         [ Format.asprintf
-            "Parameter `%a` is used as type `%a` and must have a type that does not contain `Any`"
+            "Parameter `%a` is used as type `%a` and must have a type that does not contain `Any`."
             pp_reference
             name
             pp_type
@@ -1271,7 +1326,7 @@ let messages ~concise ~signature location kind =
         | Some callee -> Format.asprintf "call `%a`" pp_reference callee
         | _ -> "anoynmous call"
       in
-      [Format.asprintf "Solving type variables for %s led to infinite recursion" callee]
+      [Format.asprintf "Solving type variables for %s led to infinite recursion." callee]
   | NotCallable
       ( Type.Callable { implementation = { parameters = ParameterVariadicTypeVariable _; _ }; _ }
       as annotation ) ->
@@ -1281,12 +1336,14 @@ let messages ~concise ~signature location kind =
           pp_type
           annotation ]
   | NotCallable annotation -> [Format.asprintf "`%a` is not a function." pp_type annotation]
-  | ProhibitedAny { given_annotation; _ } when concise ->
+  | ProhibitedAny { is_type_alias; missing_annotation = { given_annotation; _ } } when concise ->
+      let annotation_kind = if is_type_alias then "Aliased" else "Given" in
       if Option.value_map given_annotation ~f:Type.is_any ~default:false then
-        ["Given annotation cannot be `Any`."]
+        [Format.asprintf "%s annotation cannot be `Any`." annotation_kind]
       else
-        ["Given annotation cannot contain `Any`."]
-  | ProhibitedAny { name; annotation = Some annotation; given_annotation; _ }
+        [Format.asprintf "%s annotation cannot contain `Any`." annotation_kind]
+  | ProhibitedAny
+      { missing_annotation = { name; annotation = Some annotation; given_annotation; _ }; _ }
     when Type.is_concrete annotation -> (
     match given_annotation with
     | Some given_annotation when Type.is_any given_annotation ->
@@ -1303,12 +1360,20 @@ let messages ~concise ~signature location kind =
             name
             pp_type
             annotation ] )
-  | ProhibitedAny { name; given_annotation; _ } -> (
+  | ProhibitedAny { is_type_alias = false; missing_annotation = { name; given_annotation; _ } }
+    -> (
     match given_annotation with
     | Some given_annotation when Type.is_any given_annotation ->
         [Format.asprintf "Explicit annotation for `%a` cannot be `Any`." pp_reference name]
     | _ -> [Format.asprintf "Explicit annotation for `%a` cannot contain `Any`." pp_reference name]
     )
+  | ProhibitedAny { is_type_alias = true; missing_annotation = { name; given_annotation; _ } } -> (
+    match given_annotation with
+    | Some Type.Any -> [Format.asprintf "`%a` cannot alias to `Any`." pp_reference name]
+    | _ -> [Format.asprintf "`%a` cannot alias to a type containing `Any`." pp_reference name] )
+  | RedefinedClass name when concise -> [Format.asprintf "Class `%a` redefined" pp_reference name]
+  | RedefinedClass name ->
+      [Format.asprintf "Class `%a` conflicts with an imported class." pp_reference name]
   | RedundantCast _ when concise -> ["The cast is redundant."]
   | RedundantCast annotation ->
       [Format.asprintf "The value being cast is already of type `%a`." pp_type annotation]
@@ -1702,7 +1767,7 @@ end)
 
 let due_to_analysis_limitations { kind; _ } =
   match kind with
-  | ImpossibleIsinstance { mismatch = { actual; _ }; _ }
+  | ImpossibleAssertion { annotation = actual; _ }
   | IncompatibleAwaitableType actual
   | IncompatibleParameterType { mismatch = { actual; _ }; _ }
   | IncompatibleReturnType { mismatch = { actual; _ }; _ }
@@ -1718,7 +1783,7 @@ let due_to_analysis_limitations { kind; _ } =
   | InvalidType (InvalidType actual)
   | InvalidType (FinalNested actual)
   | NotCallable actual
-  | ProhibitedAny { given_annotation = Some actual; _ }
+  | ProhibitedAny { missing_annotation = { given_annotation = Some actual; _ }; _ }
   | RedundantCast actual
   | UninitializedAttribute { mismatch = { actual; _ }; _ }
   | Unpack { unpack_problem = UnacceptableType actual; _ } ->
@@ -1726,6 +1791,7 @@ let due_to_analysis_limitations { kind; _ } =
   | Top -> true
   | UndefinedAttribute { origin = Class { annotation; _ }; _ } -> Type.is_unknown annotation
   | AnalysisFailure _
+  | DeadStore _
   | Deobfuscation _
   | IllegalAnnotationTarget _
   | IncompatibleConstructorAnnotation _
@@ -1755,6 +1821,7 @@ let due_to_analysis_limitations { kind; _ } =
   | TypedDictionaryAccessWithNonLiteral _
   | TypedDictionaryKeyNotFound _
   | Unpack _
+  | RedefinedClass _
   | RevealedType _
   | UnsafeCast _
   | UnawaitedAwaitable _
@@ -1781,6 +1848,7 @@ let due_to_mismatch_with_any local_resolution { kind; _ } =
     && GlobalResolution.consistent_solution_exists resolution actual expected
   in
   match kind with
+  | ImpossibleAssertion { annotation = actual; _ }
   | IncompatibleAwaitableType actual
   | InvalidArgument (ConcreteVariable { annotation = actual; _ })
   | InvalidArgument
@@ -1789,7 +1857,6 @@ let due_to_mismatch_with_any local_resolution { kind; _ } =
   | UndefinedAttribute { origin = Class { annotation = actual; _ }; _ }
   | Unpack { unpack_problem = UnacceptableType actual; _ } ->
       Type.is_any actual
-  | ImpossibleIsinstance { mismatch = { actual; actual_expressions; expected; _ }; _ }
   | InconsistentOverride
       {
         override = StrengthenedPrecondition (Found { actual; actual_expressions; expected; _ });
@@ -1825,6 +1892,7 @@ let due_to_mismatch_with_any local_resolution { kind; _ } =
   | InvalidException { annotation = actual; _ } ->
       Type.is_any actual || (Type.is_union actual && Type.contains_any actual)
   | AnalysisFailure _
+  | DeadStore _
   | Deobfuscation _
   | IllegalAnnotationTarget _
   | IncompatibleConstructorAnnotation _
@@ -1849,6 +1917,7 @@ let due_to_mismatch_with_any local_resolution { kind; _ } =
   | MissingReturnAnnotation _
   | MutuallyRecursiveTypeVariables _
   | ProhibitedAny _
+  | RedefinedClass _
   | RedundantCast _
   | RevealedType _
   | UnsafeCast _
@@ -1874,15 +1943,16 @@ let less_or_equal ~resolution left right =
     GlobalResolution.less_or_equal resolution ~left:left.actual ~right:right.actual
     && GlobalResolution.less_or_equal resolution ~left:left.expected ~right:right.expected
   in
-  Location.Instantiated.equal left.location right.location
+  Location.equal left.location right.location
   &&
   match left.kind, right.kind with
   | AnalysisFailure left, AnalysisFailure right -> Type.equal left right
+  | DeadStore left, DeadStore right -> Identifier.equal left right
   | Deobfuscation left, Deobfuscation right -> Source.equal left right
   | IllegalAnnotationTarget left, IllegalAnnotationTarget right -> Expression.equal left right
-  | ImpossibleIsinstance left, ImpossibleIsinstance right
-    when Expression.equal left.expression right.expression ->
-      less_or_equal_mismatch left.mismatch right.mismatch
+  | ImpossibleAssertion left, ImpossibleAssertion right
+    when Statement.equal left.statement right.statement ->
+      GlobalResolution.less_or_equal resolution ~left:left.annotation ~right:right.annotation
   | IncompatibleAwaitableType left, IncompatibleAwaitableType right ->
       GlobalResolution.less_or_equal resolution ~left ~right
   | IncompatibleParameterType left, IncompatibleParameterType right
@@ -1988,7 +2058,7 @@ let less_or_equal ~resolution left right =
     | Abstract left_name, Protocol right_name ->
         Reference.equal left_name right_name
     | _, _ -> false )
-  | ProhibitedAny left, ProhibitedAny right
+  | ProhibitedAny { missing_annotation = left; _ }, ProhibitedAny { missing_annotation = right; _ }
   | MissingParameterAnnotation left, MissingParameterAnnotation right
   | MissingReturnAnnotation left, MissingReturnAnnotation right
   | ( MissingAttributeAnnotation { missing_annotation = left; _ },
@@ -2050,9 +2120,10 @@ let less_or_equal ~resolution left right =
       Reference.equal_sanitized left.class_name right.class_name
   | _, Top -> true
   | AnalysisFailure _, _
+  | DeadStore _, _
   | Deobfuscation _, _
   | IllegalAnnotationTarget _, _
-  | ImpossibleIsinstance _, _
+  | ImpossibleAssertion _, _
   | IncompatibleAttributeType _, _
   | IncompatibleAwaitableType _, _
   | IncompatibleConstructorAnnotation _, _
@@ -2083,6 +2154,7 @@ let less_or_equal ~resolution left right =
   | MutuallyRecursiveTypeVariables _, _
   | NotCallable _, _
   | ProhibitedAny _, _
+  | RedefinedClass _, _
   | RedundantCast _, _
   | RevealedType _, _
   | UnsafeCast _, _
@@ -2136,6 +2208,7 @@ let join ~resolution left right =
   let kind =
     match left.kind, right.kind with
     | AnalysisFailure left, AnalysisFailure right -> AnalysisFailure (Type.union [left; right])
+    | DeadStore left, DeadStore right when Identifier.equal left right -> DeadStore left
     | Deobfuscation left, Deobfuscation right when Source.equal left right -> Deobfuscation left
     | IllegalAnnotationTarget left, IllegalAnnotationTarget right when Expression.equal left right
       ->
@@ -2191,7 +2264,14 @@ let join ~resolution left right =
         MissingOverloadImplementation left
     | NotCallable left, NotCallable right ->
         NotCallable (GlobalResolution.join resolution left right)
-    | ProhibitedAny left, ProhibitedAny right -> ProhibitedAny (join_missing_annotation left right)
+    | ( ProhibitedAny { is_type_alias = is_type_alias_left; missing_annotation = left },
+        ProhibitedAny { is_type_alias = is_type_alias_right; missing_annotation = right } )
+      when is_type_alias_left = is_type_alias_right ->
+        ProhibitedAny
+          {
+            is_type_alias = is_type_alias_left;
+            missing_annotation = join_missing_annotation left right;
+          }
     | RedundantCast left, RedundantCast right ->
         RedundantCast (GlobalResolution.join resolution left right)
     | ( RevealedType
@@ -2374,9 +2454,10 @@ let join ~resolution left right =
     | _, Top ->
         Top
     | AnalysisFailure _, _
+    | DeadStore _, _
     | Deobfuscation _, _
     | IllegalAnnotationTarget _, _
-    | ImpossibleIsinstance _, _
+    | ImpossibleAssertion _, _
     | IncompatibleAttributeType _, _
     | IncompatibleAwaitableType _, _
     | IncompatibleConstructorAnnotation _, _
@@ -2407,6 +2488,7 @@ let join ~resolution left right =
     | MutuallyRecursiveTypeVariables _, _
     | NotCallable _, _
     | ProhibitedAny _, _
+    | RedefinedClass _, _
     | RedundantCast _, _
     | RevealedType _, _
     | UnsafeCast _, _
@@ -2423,10 +2505,11 @@ let join ~resolution left right =
     | AbstractClass _, _
     | Unpack _, _
     | UnusedIgnore _, _ ->
+        let { location; _ } = left in
         Log.debug
           "Incompatible type in error join at %a: %a %a"
-          Location.Instantiated.pp
-          (location left)
+          Location.pp
+          location
           pp_kind
           left.kind
           pp_kind
@@ -2434,7 +2517,7 @@ let join ~resolution left right =
         Top
   in
   let location =
-    if Location.Instantiated.compare left.location right.location <= 0 then
+    if Location.compare left.location right.location <= 0 then
       left.location
     else
       right.location
@@ -2579,7 +2662,6 @@ let filter ~configuration ~resolution errors =
     let is_unknown_callable_error { kind; _ } =
       (* TODO(T41494196): Remove when we have AnyCallable escape hatch. *)
       match kind with
-      | ImpossibleIsinstance { mismatch = { expected; actual; _ }; _ }
       | InconsistentOverride
           { override = StrengthenedPrecondition (Found { expected; actual; _ }); _ }
       | InconsistentOverride { override = WeakenedPostcondition { expected; actual; _ }; _ }
@@ -2597,12 +2679,14 @@ let filter ~configuration ~resolution errors =
         | _ -> false )
       | _ -> false
     in
-    let is_stub_error { kind; location; _ } =
-      let is_stub_path () = Location.path location |> String.is_suffix ~suffix:".pyi" in
+    let is_stub_error { kind; location = { Location.path; _ }; _ } =
       match kind with
       | UninitializedAttribute _
-      | MissingOverloadImplementation _ ->
-          is_stub_path ()
+      | MissingOverloadImplementation _ -> (
+          let ast_environment = GlobalResolution.ast_environment resolution in
+          match AstEnvironment.ReadOnly.get_source_path ast_environment path with
+          | Some { SourcePath.is_stub; _ } -> is_stub
+          | _ -> false )
       | _ -> false
     in
     is_stub_error error
@@ -2618,7 +2702,7 @@ let filter ~configuration ~resolution errors =
   | _ -> List.filter ~f:(fun error -> not (should_filter error)) errors
 
 
-let suppress ~mode ~resolution error =
+let suppress ~mode ~resolution ({ location; _ } as error) =
   let suppress_in_strict ({ kind; _ } as error) =
     if due_to_analysis_limitations error then
       true
@@ -2667,7 +2751,10 @@ let suppress ~mode ~resolution error =
     | _ ->
         due_to_analysis_limitations error
         || due_to_mismatch_with_any resolution error
-        || (Define.Signature.is_untyped signature && not (Define.Signature.is_toplevel signature))
+        || Define.Signature.is_untyped signature
+           && not
+                ( Define.Signature.is_toplevel signature
+                || Define.Signature.is_class_toplevel signature )
   in
   let suppress_in_infer { kind; _ } =
     match kind with
@@ -2675,10 +2762,10 @@ let suppress ~mode ~resolution error =
     | MissingParameterAnnotation { annotation = Some actual; _ }
     | MissingAttributeAnnotation { missing_annotation = { annotation = Some actual; _ }; _ }
     | MissingGlobalAnnotation { annotation = Some actual; _ } ->
-        Type.is_untyped actual
+        Type.is_untyped actual || Type.contains_unknown actual || Type.is_undeclared actual
     | _ -> true
   in
-  if Location.Instantiated.equal Location.Instantiated.synthetic (location error) then
+  if Location.equal Location.Reference.synthetic location then
     true
   else
     try
@@ -2713,10 +2800,11 @@ let dequalify
   let kind =
     match kind with
     | AnalysisFailure annotation -> AnalysisFailure (dequalify annotation)
+    | DeadStore name -> DeadStore name
     | Deobfuscation left -> Deobfuscation left
     | IllegalAnnotationTarget left -> IllegalAnnotationTarget left
-    | ImpossibleIsinstance ({ mismatch; _ } as isinstance) ->
-        ImpossibleIsinstance { isinstance with mismatch = dequalify_mismatch mismatch }
+    | ImpossibleAssertion ({ annotation; _ } as assertion) ->
+        ImpossibleAssertion { assertion with annotation = dequalify annotation }
     | IncompatibleAwaitableType actual -> IncompatibleAwaitableType (dequalify actual)
     | IncompatibleConstructorAnnotation annotation ->
         IncompatibleConstructorAnnotation (dequalify annotation)
@@ -2786,8 +2874,14 @@ let dequalify
     | MissingOverloadImplementation name -> MissingOverloadImplementation name
     | MutuallyRecursiveTypeVariables callee -> MutuallyRecursiveTypeVariables callee
     | NotCallable annotation -> NotCallable (dequalify annotation)
-    | ProhibitedAny ({ annotation; _ } as missing_annotation) ->
-        ProhibitedAny { missing_annotation with annotation = annotation >>| dequalify }
+    | ProhibitedAny { is_type_alias; missing_annotation = { annotation; _ } as missing_annotation }
+      ->
+        ProhibitedAny
+          {
+            is_type_alias;
+            missing_annotation = { missing_annotation with annotation = annotation >>| dequalify };
+          }
+    | RedefinedClass name -> RedefinedClass name
     | RedundantCast annotation -> RedundantCast (dequalify annotation)
     | RevealedType { expression; annotation } ->
         RevealedType { expression; annotation = dequalify_annotation annotation }
@@ -2888,8 +2982,7 @@ let create_mismatch ~resolution ~actual ~actual_expression ~expected ~covariant 
   }
 
 
-let language_server_hint error =
-  match kind error with
+let language_server_hint = function
   | MissingReturnAnnotation _
   | MissingAttributeAnnotation _
   | MissingParameterAnnotation _

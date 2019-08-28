@@ -27,6 +27,11 @@ let is_generator { Define.body; _ } =
       | false, _ -> false
   end)
   in
+  let body =
+    List.filter body ~f:(function
+        | { Node.value = Statement.(Define _ | Class _); _ } -> false
+        | _ -> true)
+  in
   YieldVisit.visit false (Source.create body)
 
 
@@ -71,22 +76,14 @@ let create_overload ?location ~resolution ({ Define.signature = { parameters; _ 
             Named { named with annotation = parse_as_annotation annotation }
         | KeywordOnly ({ annotation; _ } as named) ->
             KeywordOnly { named with annotation = parse_as_annotation annotation }
-        | Variable (Map _)
-        | Variable (Variadic _) ->
-            failwith "impossible"
+        | Variable (Concatenation _) -> failwith "impossible"
         | Variable (Concrete annotation) -> (
-            let parsed_as_list_variadic () =
-              annotation >>= GlobalResolution.parse_as_list_variadic resolution
+            let parsed_as_concatentation () =
+              annotation >>= GlobalResolution.parse_as_concatenation resolution
             in
-            let parsed_as_map_operator () =
-              annotation >>= GlobalResolution.parse_as_list_variadic_map_operator resolution
-            in
-            match parsed_as_list_variadic () with
-            | Some variable -> Parameter.Variable (Variadic variable)
-            | None -> (
-              match parsed_as_map_operator () with
-              | Some map -> Parameter.Variable (Map map)
-              | None -> Parameter.Variable (Concrete (parse_as_annotation annotation)) ) )
+            match parsed_as_concatentation () with
+            | Some concatenation -> Parameter.Variable (Concatenation concatenation)
+            | None -> Parameter.Variable (Concrete (parse_as_annotation annotation)) )
         | Keywords annotation -> Keywords (parse_as_annotation annotation)
       in
       match parameters with

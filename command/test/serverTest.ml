@@ -24,18 +24,17 @@ let file ~local_root ?content path =
 
 
 let test_language_server_protocol_json_format context =
-  let open TypeCheck.Error in
-  let local_root = bracket_tmpdir context |> Path.create_absolute in
-  let configuration = Configuration.Analysis.create ~local_root () in
-  let filename =
-    let path = Path.create_relative ~root:local_root ~relative:"filename.py" in
-    File.write (File.create ~content:"" path);
-    "filename.py"
+  let handle = "filename.py" in
+  let configuration =
+    let project = ScratchProject.setup ~context [handle, ""] in
+    let _ = ScratchProject.parse_sources project in
+    ScratchProject.configuration_of project
   in
-  Ast.SharedMemory.Sources.add (Source.create ~relative:filename []);
-  let ({ Error.location; _ } as type_error) =
+  let { Configuration.Analysis.local_root; _ } = configuration in
+  let type_error =
     CommandTest.make_errors
-      ~handle:filename
+      ~context
+      ~handle
       {|
         class unittest.mock.Base: ...
         class unittest.mock.NonCallableMock: ...
@@ -44,7 +43,6 @@ let test_language_server_protocol_json_format context =
       |}
     |> List.hd_exn
   in
-  let type_error = { type_error with location = { location with Location.path = filename } } in
   let normalize string =
     (* Working around OS inconsitencies. *)
     string
@@ -52,9 +50,9 @@ let test_language_server_protocol_json_format context =
     |> String.concat
     |> String.filter ~f:(fun character -> not (Char.is_whitespace character))
   in
+  let path = Path.create_relative ~root:local_root ~relative:handle in
   let json_error =
-    LanguageServer.Protocol.PublishDiagnostics.of_errors ~configuration filename [type_error]
-    |> Or_error.ok_exn
+    LanguageServer.Protocol.PublishDiagnostics.of_errors path [type_error]
     |> LanguageServer.Protocol.PublishDiagnostics.to_yojson
     |> Yojson.Safe.sort
     |> Yojson.Safe.to_string
@@ -84,18 +82,11 @@ let test_language_server_protocol_json_format context =
           }
         }
      |}
-      (Path.create_relative ~root:local_root ~relative:filename |> Path.absolute)
+      (Path.create_relative ~root:local_root ~relative:handle |> Path.absolute)
     |> Test.trim_extra_indentation
     |> normalize
   in
-  assert_equal ~printer:ident ~cmp:String.equal json_error_expect json_error;
-  let malformed_response =
-    LanguageServer.Protocol.PublishDiagnostics.of_errors
-      ~configuration
-      "nonexistent_file"
-      [type_error]
-  in
-  assert_true (Or_error.is_error malformed_response)
+  assert_equal ~printer:ident ~cmp:String.equal json_error_expect json_error
 
 
 let test_server_stops context =
@@ -304,7 +295,7 @@ let test_protocol_type_check context =
         def foo() -> None:
           return 1
     |} in
-  let errors = CommandTest.make_errors ~handle source in
+  let errors = CommandTest.make_errors ~context ~handle source in
   assert_response ~sources:[handle, source] ~request:[] errors;
   assert_response ~sources:[handle, source] ~request:[handle] errors;
   assert_response ~sources:[handle, source] ~request:["wrong_handle.pyi"] [];
@@ -996,7 +987,7 @@ let test_incremental_typecheck context =
   let { Configuration.Analysis.local_root; _ } = configuration in
   let path = Path.create_relative ~root:local_root ~relative:handle in
   let stub_path = Path.create_relative ~root:local_root ~relative:stub_handle in
-  let errors = CommandTest.make_errors ~handle source in
+  let errors = CommandTest.make_errors ~context ~handle source in
   assert_response
     ~state
     ~request:(Protocol.Request.TypeCheckRequest [path])
@@ -1018,7 +1009,7 @@ let test_incremental_typecheck context =
     ~request:(Protocol.Request.TypeCheckRequest [update_file stub_path ~content:""])
     (Protocol.TypeCheckResponse []);
   let source = "def foo() -> int: return \"\"" in
-  let errors = CommandTest.make_errors ~handle:stub_handle source in
+  let errors = CommandTest.make_errors ~context ~handle:stub_handle source in
   assert_response
     ~state
     ~request:(Protocol.Request.TypeCheckRequest [update_file stub_path ~content:source])
@@ -1046,7 +1037,7 @@ let test_did_save_with_content context =
     ScratchServer.start ~context [handle, source]
   in
   let { Configuration.Analysis.local_root; _ } = configuration in
-  let errors = CommandTest.make_errors ~handle source in
+  let errors = CommandTest.make_errors ~context ~handle source in
   let request =
     LanguageServer.Protocol.DidSaveTextDocument.create ~root:local_root handle (Some source)
     |> Or_error.ok_exn
@@ -1181,13 +1172,14 @@ let test_incremental_lookups context =
   let { Request.state; _ } = Request.process ~state ~configuration:server_configuration ~request in
   let global_resolution = Environment.resolution state.State.environment () in
   let annotations =
-    Ast.SharedMemory.Sources.get qualifier
+    let ast_environment = GlobalResolution.ast_environment global_resolution in
+    AstEnvironment.ReadOnly.get_source ast_environment qualifier
     |> (fun value -> Option.value_exn value)
     |> Lookup.create_of_source global_resolution
     |> Lookup.get_all_annotations
     |> List.map ~f:(fun (key, data) ->
-           Format.asprintf "%a/%a" Location.Instantiated.pp key Type.pp data
-           |> String.chop_prefix_exn ~prefix:handle)
+           Format.asprintf "%a/%a" Location.Reference.pp key Type.pp data
+           |> String.chop_prefix_exn ~prefix:(Reference.show qualifier))
     |> List.sort ~compare:String.compare
   in
   assert_equal
@@ -1276,10 +1268,7 @@ let test_language_scheduler_definition context =
       path
   in
   let expected_response =
-    LanguageServer.Protocol.TextDocumentDefinitionResponse.create
-      ~configuration
-      ~id:(int_request_id 3)
-      ~location:None
+    LanguageServer.Protocol.TextDocumentDefinitionResponse.create_empty ~id:(int_request_id 3)
     |> LanguageServer.Protocol.TextDocumentDefinitionResponse.to_yojson
     |> Yojson.Safe.to_string
   in
@@ -1320,11 +1309,14 @@ let test_incremental_attribute_caching context =
     ScratchServer.start ~context [handle, content_with_annotation]
   in
   let assert_errors ~state expected =
-    let get_error_strings { State.errors; _ } =
+    let get_error_strings { State.errors; environment; _ } =
+      let ast_environment = Environment.ast_environment environment in
       Hashtbl.to_alist errors
       |> List.map ~f:snd
       |> List.concat
-      |> List.map ~f:(Error.description ~show_error_traces:false)
+      |> List.map ~f:(fun error ->
+             Error.instantiate ~lookup:(AstEnvironment.ReadOnly.get_relative ast_environment) error
+             |> Error.Instantiated.description ~show_error_traces:false)
     in
     let printer = String.concat ~sep:"\n" in
     assert_equal ~printer expected (get_error_strings state)

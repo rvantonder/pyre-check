@@ -1,0 +1,550 @@
+@generated
+{
+  "kind": "model",
+  "data": {
+    "callable": "Ovr{properties.Class::my_property}",
+    "sources": [
+      {
+        "port": "result",
+        "taint": [
+          {
+            "root": { "filename": "*", "line": -1, "start": -1, "end": -1 },
+            "leaves": [
+              {
+                "kind": "Test",
+                "name": "__test_source",
+                "on_all_flows": true
+              }
+            ],
+            "features": [ { "always-via": "special_source" } ]
+          }
+        ]
+      }
+    ],
+    "sinks": [],
+    "tito": [
+      {
+        "port": "formal(self)[tainted]",
+        "taint": [
+          {
+            "decl": null,
+            "leaves": [ { "kind": "LocalReturn", "name": "" } ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "Ovr{properties.Class::uses_property_but_no_tito_taint}",
+    "sources": [
+      {
+        "port": "result",
+        "taint": [
+          {
+            "call": {
+              "position": {
+                "filename": "*",
+                "line": -1,
+                "start": -1,
+                "end": -1
+              },
+              "resolves_to": [ "properties.OtherDerived.my_property" ],
+              "port": "result",
+              "length": 1
+            },
+            "leaves": [
+              {
+                "kind": "Test",
+                "name": "__test_source",
+                "on_all_flows": true
+              }
+            ],
+            "features": [ { "always-via": "special_source" } ]
+          }
+        ]
+      }
+    ],
+    "sinks": [],
+    "tito": [
+      {
+        "port": "formal(self)[tainted]",
+        "taint": [
+          {
+            "decl": null,
+            "leaves": [ { "kind": "LocalReturn", "name": "" } ],
+            "features": [ { "always-via": "tito" } ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "Ovr{properties.Class::uses_property}",
+    "sources": [
+      {
+        "port": "result",
+        "taint": [
+          {
+            "root": { "filename": "*", "line": -1, "start": -1, "end": -1 },
+            "leaves": [
+              {
+                "kind": "Test",
+                "name": "__test_source",
+                "on_all_flows": true
+              }
+            ],
+            "features": [
+              { "via": "tito" },
+              { "always-via": "special_source" }
+            ]
+          },
+          {
+            "call": {
+              "position": {
+                "filename": "*",
+                "line": -1,
+                "start": -1,
+                "end": -1
+              },
+              "resolves_to": [ "properties.OtherDerived.my_property" ],
+              "port": "result",
+              "length": 1
+            },
+            "leaves": [
+              {
+                "kind": "Test",
+                "name": "__test_source",
+                "on_all_flows": true
+              }
+            ],
+            "features": [
+              { "via": "tito" },
+              { "always-via": "special_source" }
+            ]
+          }
+        ]
+      }
+    ],
+    "sinks": [],
+    "tito": [
+      {
+        "port": "formal(self)[tainted]",
+        "taint": [
+          {
+            "decl": null,
+            "leaves": [ { "kind": "LocalReturn", "name": "" } ],
+            "features": [ { "always-via": "tito" } ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "properties.Class.my_property",
+    "sources": [],
+    "sinks": [],
+    "tito": [
+      {
+        "port": "formal(self)[tainted]",
+        "taint": [
+          {
+            "decl": null,
+            "leaves": [ { "kind": "LocalReturn", "name": "" } ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "properties.Class.uses_other",
+    "sources": [
+      {
+        "port": "result",
+        "taint": [
+          {
+            "call": {
+              "position": {
+                "filename": "properties.py",
+                "line": 24,
+                "start": 15,
+                "end": 32
+              },
+              "resolves_to": [ "properties.OtherDerived.my_property" ],
+              "port": "result",
+              "length": 1
+            },
+            "leaves": [
+              {
+                "kind": "Test",
+                "name": "__test_source",
+                "on_all_flows": true
+              }
+            ],
+            "features": [ { "always-via": "special_source" } ]
+          }
+        ]
+      }
+    ],
+    "sinks": [],
+    "tito": [
+      {
+        "port": "formal(other)[tainted]",
+        "taint": [
+          {
+            "decl": null,
+            "tito": [ { "line": 24, "start": 15, "end": 20 } ],
+            "leaves": [ { "kind": "LocalReturn", "name": "" } ],
+            "features": [ { "always-via": "tito" } ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "properties.Class.uses_property",
+    "sources": [
+      {
+        "port": "result",
+        "taint": [
+          {
+            "root": {
+              "filename": "properties.py",
+              "line": 16,
+              "start": 23,
+              "end": 38
+            },
+            "tito": [ { "line": 17, "start": 15, "end": 19 } ],
+            "leaves": [
+              {
+                "kind": "Test",
+                "name": "__test_source",
+                "on_all_flows": true
+              }
+            ],
+            "features": [
+              { "via": "tito" },
+              { "always-via": "special_source" }
+            ]
+          },
+          {
+            "call": {
+              "position": {
+                "filename": "properties.py",
+                "line": 17,
+                "start": 15,
+                "end": 31
+              },
+              "resolves_to": [ "properties.OtherDerived.my_property" ],
+              "port": "result",
+              "length": 1
+            },
+            "tito": [ { "line": 17, "start": 15, "end": 19 } ],
+            "leaves": [
+              {
+                "kind": "Test",
+                "name": "__test_source",
+                "on_all_flows": true
+              }
+            ],
+            "features": [
+              { "via": "tito" },
+              { "always-via": "special_source" }
+            ]
+          }
+        ]
+      }
+    ],
+    "sinks": [],
+    "tito": [
+      {
+        "port": "formal(self)[tainted]",
+        "taint": [
+          {
+            "decl": null,
+            "tito": [ { "line": 17, "start": 15, "end": 19 } ],
+            "leaves": [ { "kind": "LocalReturn", "name": "" } ],
+            "features": [ { "always-via": "tito" } ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "properties.Class.uses_property_but_no_tito_taint",
+    "sources": [
+      {
+        "port": "result",
+        "taint": [
+          {
+            "call": {
+              "position": {
+                "filename": "properties.py",
+                "line": 21,
+                "start": 15,
+                "end": 31
+              },
+              "resolves_to": [ "properties.OtherDerived.my_property" ],
+              "port": "result",
+              "length": 1
+            },
+            "leaves": [
+              {
+                "kind": "Test",
+                "name": "__test_source",
+                "on_all_flows": true
+              }
+            ],
+            "features": [ { "always-via": "special_source" } ]
+          }
+        ]
+      }
+    ],
+    "sinks": [],
+    "tito": [
+      {
+        "port": "formal(self)[tainted]",
+        "taint": [
+          {
+            "decl": null,
+            "tito": [ { "line": 21, "start": 15, "end": 19 } ],
+            "leaves": [ { "kind": "LocalReturn", "name": "" } ],
+            "features": [ { "always-via": "tito" } ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "properties.Derived.uses_property",
+    "sources": [
+      {
+        "port": "result",
+        "taint": [
+          {
+            "root": {
+              "filename": "properties.py",
+              "line": 29,
+              "start": 23,
+              "end": 38
+            },
+            "tito": [ { "line": 30, "start": 15, "end": 19 } ],
+            "leaves": [
+              {
+                "kind": "Test",
+                "name": "__test_source",
+                "on_all_flows": true
+              }
+            ],
+            "features": [
+              { "always-via": "tito" },
+              { "always-via": "special_source" }
+            ]
+          }
+        ]
+      }
+    ],
+    "sinks": [],
+    "tito": [
+      {
+        "port": "formal(self)[tainted]",
+        "taint": [
+          {
+            "decl": null,
+            "tito": [ { "line": 30, "start": 15, "end": 19 } ],
+            "leaves": [ { "kind": "LocalReturn", "name": "" } ],
+            "features": [ { "always-via": "tito" } ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "properties.Derived.uses_property_but_no_tito_taint",
+    "sources": [],
+    "sinks": [],
+    "tito": [
+      {
+        "port": "formal(self)[tainted]",
+        "taint": [
+          {
+            "decl": null,
+            "tito": [ { "line": 34, "start": 15, "end": 19 } ],
+            "leaves": [ { "kind": "LocalReturn", "name": "" } ],
+            "features": [ { "always-via": "tito" } ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "properties.OtherDerived.my_property",
+    "sources": [
+      {
+        "port": "result",
+        "taint": [
+          {
+            "root": {
+              "filename": "properties.py",
+              "line": 40,
+              "start": 15,
+              "end": 30
+            },
+            "leaves": [
+              {
+                "kind": "Test",
+                "name": "__test_source",
+                "on_all_flows": true
+              }
+            ],
+            "features": [ { "always-via": "special_source" } ]
+          }
+        ]
+      }
+    ],
+    "sinks": [],
+    "tito": []
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "properties.OtherDerived.uses_property_but_no_tito_taint",
+    "sources": [
+      {
+        "port": "result",
+        "taint": [
+          {
+            "call": {
+              "position": {
+                "filename": "properties.py",
+                "line": 44,
+                "start": 15,
+                "end": 31
+              },
+              "resolves_to": [ "properties.OtherDerived.my_property" ],
+              "port": "result",
+              "length": 1
+            },
+            "leaves": [
+              {
+                "kind": "Test",
+                "name": "__test_source",
+                "on_all_flows": true
+              }
+            ],
+            "features": [ { "always-via": "special_source" } ]
+          }
+        ]
+      }
+    ],
+    "sinks": [],
+    "tito": []
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "properties.TaintedGetterAndSetter.my_property",
+    "sources": [
+      {
+        "port": "result",
+        "taint": [ { "decl": null, "leaves": [ { "kind": "Test" } ] } ]
+      }
+    ],
+    "sinks": [],
+    "tito": [
+      {
+        "port": "formal(value)",
+        "taint": [
+          {
+            "decl": null,
+            "leaves": [ { "kind": "ParameterUpdate0" } ],
+            "features": [ { "always-via": "string_concat_lhs" } ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "properties.TaintedGetterAndSetter.my_property",
+    "sources": [
+      {
+        "port": "result",
+        "taint": [ { "decl": null, "leaves": [ { "kind": "Test" } ] } ]
+      }
+    ],
+    "sinks": [],
+    "tito": [
+      {
+        "port": "formal(value)",
+        "taint": [
+          {
+            "decl": null,
+            "leaves": [ { "kind": "ParameterUpdate0" } ],
+            "features": [ { "always-via": "string_concat_lhs" } ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "properties.TaintedGetterAndSetter.uses_property",
+    "sources": [
+      {
+        "port": "result",
+        "taint": [
+          {
+            "root": {
+              "filename": "properties.py",
+              "line": 58,
+              "start": 15,
+              "end": 31
+            },
+            "leaves": [
+              {
+                "kind": "Test",
+                "name": "properties.TaintedGetterAndSetter.my_property",
+                "on_all_flows": true
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "sinks": [],
+    "tito": []
+  }
+}

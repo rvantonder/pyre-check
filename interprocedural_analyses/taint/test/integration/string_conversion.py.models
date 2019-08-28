@@ -1,0 +1,322 @@
+@generated
+{
+  "kind": "issue",
+  "data": {
+    "callable": "string_conversion.repr_is_tainted",
+    "callable_line": 23,
+    "code": 5001,
+    "line": 25,
+    "start": 9,
+    "end": 16,
+    "filename": "string_conversion.py",
+    "message":
+      "Possible shell injection. Data from [UserControlled] source(s) may reach [RemoteCodeExecution] sink(s)",
+    "traces": [
+      {
+        "name": "forward",
+        "roots": [
+          {
+            "call": {
+              "position": {
+                "filename": "string_conversion.py",
+                "line": 25,
+                "start": 9,
+                "end": 16
+              },
+              "resolves_to": [ "string_conversion.ReprIsTainted.__repr__" ],
+              "port": "result",
+              "length": 1
+            },
+            "leaves": [
+              {
+                "kind": "UserControlled",
+                "name": "Obj{django.http.Request.GET}",
+                "on_all_flows": true
+              }
+            ],
+            "features": [
+              { "always-has": "first-index" },
+              { "always-first-index": "tainted" }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "backward",
+        "roots": [
+          {
+            "root": {
+              "filename": "string_conversion.py",
+              "line": 25,
+              "start": 9,
+              "end": 16
+            },
+            "leaves": [
+              {
+                "kind": "RemoteCodeExecution",
+                "name": "eval",
+                "on_all_flows": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "issue",
+  "data": {
+    "callable": "string_conversion.str_falls_back_to_repr",
+    "callable_line": 28,
+    "code": 5001,
+    "line": 30,
+    "start": 9,
+    "end": 15,
+    "filename": "string_conversion.py",
+    "message":
+      "Possible shell injection. Data from [UserControlled] source(s) may reach [RemoteCodeExecution] sink(s)",
+    "traces": [
+      {
+        "name": "forward",
+        "roots": [
+          {
+            "call": {
+              "position": {
+                "filename": "string_conversion.py",
+                "line": 30,
+                "start": 9,
+                "end": 15
+              },
+              "resolves_to": [ "string_conversion.ReprIsTainted.__repr__" ],
+              "port": "result",
+              "length": 1
+            },
+            "leaves": [
+              {
+                "kind": "UserControlled",
+                "name": "Obj{django.http.Request.GET}",
+                "on_all_flows": true
+              }
+            ],
+            "features": [
+              { "always-has": "first-index" },
+              { "always-first-index": "tainted" }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "backward",
+        "roots": [
+          {
+            "root": {
+              "filename": "string_conversion.py",
+              "line": 30,
+              "start": 9,
+              "end": 15
+            },
+            "leaves": [
+              {
+                "kind": "RemoteCodeExecution",
+                "name": "eval",
+                "on_all_flows": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "issue",
+  "data": {
+    "callable": "string_conversion.str_is_tainted",
+    "callable_line": 18,
+    "code": 5001,
+    "line": 20,
+    "start": 9,
+    "end": 15,
+    "filename": "string_conversion.py",
+    "message":
+      "Possible shell injection. Data from [UserControlled] source(s) may reach [RemoteCodeExecution] sink(s)",
+    "traces": [
+      {
+        "name": "forward",
+        "roots": [
+          {
+            "call": {
+              "position": {
+                "filename": "string_conversion.py",
+                "line": 20,
+                "start": 9,
+                "end": 15
+              },
+              "resolves_to": [ "string_conversion.StrIsTainted.__str__" ],
+              "port": "result",
+              "length": 1
+            },
+            "leaves": [
+              {
+                "kind": "UserControlled",
+                "name": "Obj{django.http.Request.GET}",
+                "on_all_flows": true
+              }
+            ],
+            "features": [
+              { "always-has": "first-index" },
+              { "always-first-index": "tainted" }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "backward",
+        "roots": [
+          {
+            "root": {
+              "filename": "string_conversion.py",
+              "line": 20,
+              "start": 9,
+              "end": 15
+            },
+            "leaves": [
+              {
+                "kind": "RemoteCodeExecution",
+                "name": "eval",
+                "on_all_flows": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "Ovr{object::__repr__}",
+    "sources": [
+      {
+        "port": "result",
+        "taint": [
+          {
+            "root": { "filename": "*", "line": -1, "start": -1, "end": -1 },
+            "leaves": [
+              {
+                "kind": "UserControlled",
+                "name": "Obj{django.http.Request.GET}",
+                "on_all_flows": true
+              }
+            ],
+            "features": [
+              { "always-has": "first-index" },
+              { "always-first-index": "tainted" }
+            ]
+          }
+        ]
+      }
+    ],
+    "sinks": [],
+    "tito": []
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "Ovr{object::__str__}",
+    "sources": [
+      {
+        "port": "result",
+        "taint": [
+          {
+            "root": { "filename": "*", "line": -1, "start": -1, "end": -1 },
+            "leaves": [
+              {
+                "kind": "UserControlled",
+                "name": "Obj{django.http.Request.GET}",
+                "on_all_flows": true
+              }
+            ],
+            "features": [
+              { "always-has": "first-index" },
+              { "always-first-index": "tainted" }
+            ]
+          }
+        ]
+      }
+    ],
+    "sinks": [],
+    "tito": []
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "string_conversion.ReprIsTainted.__repr__",
+    "sources": [
+      {
+        "port": "result",
+        "taint": [
+          {
+            "root": {
+              "filename": "string_conversion.py",
+              "line": 15,
+              "start": 15,
+              "end": 26
+            },
+            "leaves": [
+              {
+                "kind": "UserControlled",
+                "name": "Obj{django.http.Request.GET}",
+                "on_all_flows": true
+              }
+            ],
+            "features": [
+              { "always-has": "first-index" },
+              { "always-first-index": "tainted" }
+            ]
+          }
+        ]
+      }
+    ],
+    "sinks": [],
+    "tito": []
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "string_conversion.StrIsTainted.__str__",
+    "sources": [
+      {
+        "port": "result",
+        "taint": [
+          {
+            "root": {
+              "filename": "string_conversion.py",
+              "line": 10,
+              "start": 15,
+              "end": 26
+            },
+            "leaves": [
+              {
+                "kind": "UserControlled",
+                "name": "Obj{django.http.Request.GET}",
+                "on_all_flows": true
+              }
+            ],
+            "features": [
+              { "always-has": "first-index" },
+              { "always-first-index": "tainted" }
+            ]
+          }
+        ]
+      }
+    ],
+    "sinks": [],
+    "tito": []
+  }
+}

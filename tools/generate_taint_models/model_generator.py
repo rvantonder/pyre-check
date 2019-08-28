@@ -12,6 +12,8 @@ import os
 from abc import ABC, abstractmethod
 from typing import Any, Callable, ClassVar, Dict, Iterable, List, Optional, Set, Type
 
+from .get_annotated_free_functions_with_decorator import DecoratorAnnotationSpec
+
 
 LOG: logging.Logger = logging.getLogger(__name__)
 
@@ -60,6 +62,8 @@ class Configuration:
     stub_root: ClassVar[Optional[str]] = ""
     graphql_module: ClassVar[str] = ""
     blacklisted_globals: ClassVar[Set[str]] = set()
+    blacklisted_global_directories: ClassVar[Set[str]] = set()
+    annotation_specs: ClassVar[List[DecoratorAnnotationSpec]] = []
 
 
 class Registry:
@@ -69,7 +73,7 @@ class Registry:
 
     @classmethod
     def register(
-        cls, name: str, generator: Type[ModelGenerator], include_by_default: bool = True
+        cls, name: str, generator: Type[ModelGenerator], include_by_default: bool
     ) -> None:
         cls.generators[name] = generator
         if include_by_default:

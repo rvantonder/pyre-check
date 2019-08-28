@@ -13,10 +13,9 @@ val populate
   Source.t list ->
   unit
 
-val shared_handler : Environment.t
-
 val populate_shared_memory
   :  configuration:Configuration.Analysis.t ->
   scheduler:Scheduler.t ->
-  Reference.t list ->
-  unit
+  ast_environment:AstEnvironment.ReadOnly.t ->
+  Source.t list ->
+  Environment.t

@@ -18,7 +18,7 @@ from . import (
     assert_writable_directory,
     buck,
     commands,
-    get_binary_version,
+    get_binary_version_from_file,
     is_capable_terminal,
     log,
     log_statistics,
@@ -27,7 +27,7 @@ from . import (
     switch_root,
     translate_arguments,
 )
-from .commands import Command, ExitCode  # noqa
+from .commands import Command, ExitCode, IncrementalStyle  # noqa
 from .configuration import Configuration
 from .exceptions import EnvironmentException
 from .filesystem import AnalysisDirectory
@@ -204,6 +204,7 @@ def main() -> int:
         default=None,
         help="Location of the buck builder binary",
     )
+    parser.add_argument("--buck-builder-target", default=None, help=argparse.SUPPRESS)
 
     parser.add_argument(
         "--exclude",
@@ -266,9 +267,11 @@ def main() -> int:
         ),
     )
     incremental.add_argument(
-        "--transitive",
-        action="store_true",
-        help="Calculate transitive dependencies of changed files.",
+        "--incremental-style",
+        type=IncrementalStyle,
+        choices=list(IncrementalStyle),
+        default=IncrementalStyle.SHALLOW,
+        help="How to approach doing incremental checks.",
     )
     rage = parsed_commands.add_parser(
         commands.Rage.NAME,
@@ -297,6 +300,9 @@ def main() -> int:
 
     analyze = parsed_commands.add_parser(commands.Analyze.NAME)
     analyze.set_defaults(command=commands.Analyze)
+    analyze.add_argument(
+        "analysis", nargs="?", default="taint", help="Type of analysis to run: {taint}"
+    )
     analyze.add_argument(
         "--taint-models-path",
         action="append",
@@ -344,9 +350,11 @@ def main() -> int:
         help="Do not spawn a watchman client in the background.",
     )
     start.add_argument(
-        "--transitive",
-        action="store_true",
-        help="Calculate transitive dependencies of changed files.",
+        "--incremental-style",
+        type=IncrementalStyle,
+        choices=list(IncrementalStyle),
+        default=IncrementalStyle.SHALLOW,
+        help="How to approach doing incremental checks.",
     )
     start.set_defaults(command=commands.Start)
 
@@ -373,9 +381,11 @@ def main() -> int:
         help="Do not spawn a watchman client in the background.",
     )
     restart.add_argument(
-        "--transitive",
-        action="store_true",
-        help="Calculate transitive dependencies of changed files.",
+        "--incremental-style",
+        type=IncrementalStyle,
+        choices=list(IncrementalStyle),
+        default=IncrementalStyle.SHALLOW,
+        help="How to approach doing incremental checks.",
     )
     restart.set_defaults(command=commands.Restart)
 
@@ -456,7 +466,7 @@ def main() -> int:
             # pyre-fixme[16]: `Namespace` has no attribute `nonblocking`.
             arguments.nonblocking = False
             # pyre-fixme[16]: `Namespace` has no attribute `transitive`.
-            arguments.transitive = False
+            arguments.incremental_style = IncrementalStyle.SHALLOW
         else:
             watchman_link = "https://facebook.github.io/watchman/docs/install.html"
             LOG.warning(
@@ -487,6 +497,17 @@ def main() -> int:
         if arguments.command in [commands.Initialize]:
             analysis_directory = AnalysisDirectory(".")
         else:
+            if arguments.version:
+                binary_version = get_binary_version_from_file(
+                    arguments.local_configuration
+                )
+                log.stdout.write(
+                    "binary version: {}\nclient version: {}".format(
+                        binary_version, __version__
+                    )
+                )
+                return ExitCode.SUCCESS
+
             configuration = Configuration(
                 local_configuration=arguments.local_configuration,
                 search_path=arguments.search_path,
@@ -498,15 +519,6 @@ def main() -> int:
             if configuration.disabled:
                 LOG.log(
                     log.SUCCESS, "Pyre will not run due to being explicitly disabled"
-                )
-                return ExitCode.SUCCESS
-
-            if arguments.version:
-                binary_version = get_binary_version(configuration)
-                log.stdout.write(
-                    "binary version: {}\nclient version: {}".format(
-                        binary_version, __version__
-                    )
                 )
                 return ExitCode.SUCCESS
 
@@ -562,6 +574,7 @@ def main() -> int:
                     "exit_code": exit_code,
                     "runtime": int((time.time() - start) * 1000),
                 },
+                normals={"cwd": os.getcwd()},
             )
 
     return exit_code

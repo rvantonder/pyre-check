@@ -14,7 +14,13 @@ let record_and_merge_call_graph ~environment ~call_graph ~source =
   let record_and_merge_call_graph map call_graph =
     Map.merge_skewed map call_graph ~combine:(fun ~key:_ left _ -> left)
   in
-  DependencyGraph.create_callgraph ~environment ~source |> record_and_merge_call_graph call_graph
+  let use_type_checking_callgraph =
+    Sys.getenv "PYRE_USE_TYPE_CHECKING_CALLGRAPH"
+    >>| String.equal "true"
+    |> Option.value ~default:false
+  in
+  DependencyGraph.create_callgraph ~use_type_checking_callgraph ~environment ~source
+  |> record_and_merge_call_graph call_graph
 
 
 let record_overrides overrides =
@@ -63,6 +69,7 @@ let callables ~resolution ~source =
 
 let analyze
     ~scheduler
+    ~analysis_kind
     ~configuration:( { Configuration.StaticAnalysis.configuration; dump_call_graph; _ } as
                    analysis_configuration )
     ~environment
@@ -71,13 +78,14 @@ let analyze
   =
   let global_resolution = Environment.resolution environment () in
   let resolution = TypeCheck.resolution global_resolution () in
+  let ast_environment = Environment.ast_environment environment in
   Log.info "Recording overrides...";
   let timer = Timer.start () in
   let overrides =
     let combine ~key:_ left right = List.rev_append left right in
     let build_overrides overrides qualifier =
       try
-        match Ast.SharedMemory.Sources.get qualifier with
+        match AstEnvironment.ReadOnly.get_source ast_environment qualifier with
         | None -> overrides
         | Some source ->
             let new_overrides = DependencyGraph.create_overrides ~environment ~source in
@@ -109,7 +117,7 @@ let analyze
   let callgraph =
     let build_call_graph call_graph qualifier =
       try
-        Ast.SharedMemory.Sources.get qualifier
+        AstEnvironment.ReadOnly.get_source ast_environment qualifier
         >>| (fun source -> record_and_merge_call_graph ~environment ~call_graph ~source)
         |> Option.value ~default:call_graph
       with
@@ -144,7 +152,7 @@ let analyze
         callable :: callables, stubs
     in
     let make_callables result qualifier =
-      Ast.SharedMemory.Sources.get qualifier
+      AstEnvironment.ReadOnly.get_source ast_environment qualifier
       >>| (fun source ->
             callables ~resolution:(Resolution.global_resolution resolution) ~source
             |> List.fold ~f:classify_source ~init:result)
@@ -152,10 +160,6 @@ let analyze
     in
     List.fold qualifiers ~f:make_callables ~init:([], [])
   in
-  (* TODO(T41380664): generalize this to handle more than taint analysis. The
-     analysis_configuration here should be picked from the command line somehow and it would
-     indicate which analysis to run (taint vs others), and also contain particular analysis options
-     passed the the analysis initialization code. *)
   let configuration_json =
     let taint_models_directories =
       configuration.Configuration.Analysis.taint_models_directories
@@ -164,7 +168,7 @@ let analyze
     in
     `Assoc ["taint", `Assoc ["model_directories", `List taint_models_directories]]
   in
-  let analyses = [Taint.Analysis.abstract_kind] in
+  let analyses = [analysis_kind] in
   (* Initialize and add initial models of analyses to shared mem. *)
   let () =
     Analysis.initialize
@@ -210,6 +214,7 @@ let analyze
     | exn ->
         Interprocedural.Analysis.save_results
           ~configuration:analysis_configuration
+          ~environment
           ~analyses
           all_callables;
         raise exn
@@ -217,6 +222,7 @@ let analyze
   let () =
     Interprocedural.Analysis.save_results
       ~configuration:analysis_configuration
+      ~environment
       ~analyses
       all_callables
   in

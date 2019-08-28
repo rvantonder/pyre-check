@@ -78,7 +78,7 @@ module CoverageValue = struct
   let unmarshall value = Marshal.from_string value 0
 end
 
-module SharedMemory = Memory.WithCache (Reference.Key) (CoverageValue)
+module SharedMemory = Memory.WithCache.Make (SharedMemoryKeys.ReferenceKey) (CoverageValue)
 
 let add coverage ~qualifier = SharedMemory.add qualifier coverage
 
@@ -91,16 +91,16 @@ type aggregate = {
   source_files: int;
 }
 
-let coverage ~number_of_files ~sources =
+let coverage ~sources =
+  let sources = List.filter sources ~f:(fun { Source.is_external; _ } -> not is_external) in
+  let number_of_files = List.length sources in
   let strict_coverage, declare_coverage =
     List.fold
       ~init:(0, 0)
-      ~f:(fun (prev_strict, prev_declare) qualifier ->
-        match Ast.SharedMemory.Sources.get qualifier with
-        | Some { Source.metadata = { Source.Metadata.local_mode; _ }; _ } ->
-            ( (prev_strict + if Source.equal_mode local_mode Source.Strict then 1 else 0),
-              prev_declare + if Source.equal_mode local_mode Source.Declare then 1 else 0 )
-        | None -> prev_strict, prev_declare)
+      ~f:
+        (fun (prev_strict, prev_declare) { Source.metadata = { Source.Metadata.local_mode; _ }; _ } ->
+        ( (prev_strict + if Source.equal_mode local_mode Source.Strict then 1 else 0),
+          prev_declare + if Source.equal_mode local_mode Source.Declare then 1 else 0 ))
       sources
   in
   {

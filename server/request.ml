@@ -27,6 +27,11 @@ let errors_of_path ~configuration ~state:{ State.module_tracker; errors; _ } pat
   |> Option.value ~default:[]
 
 
+let instantiate_error ~state:{ State.environment; _ } error =
+  let ast_environment = Environment.ast_environment environment in
+  Error.instantiate ~lookup:(AstEnvironment.ReadOnly.get_relative ast_environment) error
+
+
 let parse_lsp ~configuration ~state:{ State.symlink_targets_to_sources; _ } ~request =
   let open LanguageServer.Types in
   let log_method_error method_name =
@@ -156,17 +161,6 @@ let parse_lsp ~configuration ~state:{ State.symlink_targets_to_sources; _ } ~req
           None )
     | "textDocument/completion" -> (
       match CompletionRequest.of_yojson request with
-      | Ok
-          {
-            CompletionRequest.parameters =
-              Some { textDocument = { TextDocumentIdentifier.uri; _ }; position; _ };
-            id;
-            _;
-          } ->
-          uri_to_path ~uri
-          >>| fun path ->
-          CompletionRequest
-            { Protocol.CompletionRequest.id; path; position = to_pyre_position position }
       | Ok _ -> None
       | Error yojson_error ->
           Log.log ~section:`Server "Error: %s" yojson_error;
@@ -308,8 +302,7 @@ module AnnotationEdit = struct
     | _ -> false
 
 
-  let create_range ~error ~file =
-    let error_kind = Error.kind error in
+  let create_range ~error:{ Error.kind = error_kind; location; _ } ~file =
     let token =
       match error_kind with
       | Error.MissingReturnAnnotation _ -> Some "):"
@@ -328,7 +321,7 @@ module AnnotationEdit = struct
         match error_kind with
         | Error.IncompatibleReturnType { define_location; _ } -> Location.line define_location
         | Error.IncompatibleVariableType { declare_location; _ } -> Location.line declare_location
-        | _ -> Error.location error |> Location.line
+        | _ -> Location.line location
       in
       line - 1
     in
@@ -364,10 +357,9 @@ module AnnotationEdit = struct
 
   let create ~file ~error =
     error
-    >>| (fun error ->
-          let error_kind = Error.kind error in
+    >>| (fun ({ Error.kind; _ } as error) ->
           let new_text =
-            match error_kind with
+            match kind with
             | Error.MissingReturnAnnotation { annotation = Some annotation; _ } ->
                 Some (" -> " ^ Type.show (Type.weaken_literals annotation))
             | Error.MissingAttributeAnnotation
@@ -383,7 +375,7 @@ module AnnotationEdit = struct
           in
           let range = create_range ~error ~file in
           let title =
-            if is_replacement_edit error_kind then
+            if is_replacement_edit kind then
               "Fix annotation"
             else
               "Add annotation"
@@ -408,8 +400,8 @@ let process_type_query_request
     ~request
   =
   let process_request () =
-    let order = Environment.class_hierarchy environment in
     let global_resolution = Environment.resolution environment () in
+    let order = GlobalResolution.class_hierarchy global_resolution in
     let resolution = TypeCheck.resolution global_resolution () in
     let parse_and_validate ?(unknown_is_top = false) expression =
       let annotation =
@@ -442,6 +434,21 @@ let process_type_query_request
         raise (ClassHierarchy.Untracked annotation)
     in
     match request with
+    | TypeQuery.RunCheck { check_name; paths } ->
+        let source_paths =
+          List.filter_map
+            paths
+            ~f:(Analysis.ModuleTracker.lookup_path ~configuration module_tracker)
+        in
+        let errors =
+          IncrementalStaticAnalysis.run_additional_check
+            ~configuration
+            ~scheduler:state.scheduler
+            ~environment
+            ~source_paths
+            ~check:check_name
+        in
+        TypeQuery.Response (TypeQuery.Errors errors)
     | TypeQuery.Attributes annotation ->
         let to_attribute { Node.value = { Annotated.Class.Attribute.name; annotation; _ }; _ } =
           let annotation = Annotation.annotation annotation in
@@ -465,13 +472,12 @@ let process_type_query_request
         let extend_map map ~new_map =
           Map.merge_skewed map new_map ~combine:(fun ~key:_ value _ -> value)
         in
-        let qualifiers = ModuleTracker.qualifiers module_tracker in
+        let qualifiers = ModuleTracker.tracked_explicit_modules module_tracker in
+        let ast_environment = Environment.ast_environment environment in
         let map = Analysis.Environment.shared_memory_hash_to_key_map ~qualifiers () in
         (* AST shared memory. *)
         let map =
-          map
-          |> extend_map ~new_map:(Ast.SharedMemory.Sources.compute_hashes_to_keys ~keys:qualifiers)
-          |> extend_map ~new_map:(Ast.SharedMemory.Handles.compute_hashes_to_keys ~keys:qualifiers)
+          map |> extend_map ~new_map:(AstEnvironment.shared_memory_hash_to_key_map qualifiers)
         in
         (* Resolution shared memory. *)
         let map =
@@ -489,7 +495,7 @@ let process_type_query_request
         let map =
           let keys =
             let open Statement.Define in
-            List.filter_map qualifiers ~f:Ast.SharedMemory.Sources.get
+            List.filter_map qualifiers ~f:(AstEnvironment.ReadOnly.get_source ast_environment)
             |> List.concat_map
                  ~f:
                    (Preprocessing.defines
@@ -538,13 +544,6 @@ let process_type_query_request
         in
         let serialize_decoded decoded =
           match decoded with
-          | Ast.SharedMemory.Sources.Sources.Decoded (key, value) ->
-              Some
-                ( Ast.SharedMemory.Sources.SourceValue.description,
-                  Reference.show key,
-                  value >>| Source.show )
-          | Ast.SharedMemory.Handles.Paths.Decoded (key, value) ->
-              Some (Ast.SharedMemory.Handles.PathValue.description, Reference.show key, value)
           | Coverage.SharedMemory.Decoded (key, value) ->
               Some (Coverage.CoverageValue.description, Reference.show key, value >>| Coverage.show)
           | Analysis.Dependencies.Callgraph.SharedMemory.Decoded (key, value) ->
@@ -559,6 +558,13 @@ let process_type_query_request
                 ( ResolutionSharedMemory.TypeAnnotationsValue.description,
                   Reference.show key,
                   value >>| ResolutionSharedMemory.show_annotations )
+          | ResolutionSharedMemory.Keys.Decoded (key, value) ->
+              Some
+                ( ResolutionSharedMemory.AnnotationsKeyValue.description,
+                  Reference.show key,
+                  value >>| List.map ~f:Reference.show >>| String.concat ~sep:"," )
+          | _ when Option.is_some (AstEnvironment.serialize_decoded decoded) ->
+              AstEnvironment.serialize_decoded decoded
           | _ -> Environment.serialize_decoded decoded
         in
         let build_response { TypeQuery.decoded; undecodable_keys } = function
@@ -581,19 +587,17 @@ let process_type_query_request
               | Some first, Some second -> (
                   let equal =
                     match first, second with
-                    | ( Ast.SharedMemory.Sources.Sources.Decoded (_, first),
-                        Ast.SharedMemory.Sources.Sources.Decoded (_, second) ) ->
-                        Option.equal Source.equal first second
-                    | ( Ast.SharedMemory.Handles.Paths.Decoded (_, first),
-                        Ast.SharedMemory.Handles.Paths.Decoded (_, second) ) ->
-                        Option.equal String.equal first second
                     | ( Coverage.SharedMemory.Decoded (_, first),
                         Coverage.SharedMemory.Decoded (_, second) ) ->
                         Option.equal Coverage.equal first second
                     | ( ResolutionSharedMemory.Decoded (_, first),
                         ResolutionSharedMemory.Decoded (_, second) ) ->
                         Option.equal ResolutionSharedMemory.equal_annotations first second
-                    | _ -> Environment.decoded_equal first second
+                    | _ when Option.is_some (AstEnvironment.decoded_equal first second) ->
+                        Option.value_exn (AstEnvironment.decoded_equal first second)
+                    | _ when Option.is_some (Environment.decoded_equal first second) ->
+                        Option.value_exn (Environment.decoded_equal first second)
+                    | _ -> false
                   in
                   match serialize_decoded first, serialize_decoded second with
                   | Some (kind, key, first_value), Some (_, _, second_value) ->
@@ -626,6 +630,7 @@ let process_type_query_request
           List.filter_map paths ~f:(ModuleTracker.lookup_path ~configuration module_tracker)
           |> List.map ~f:(fun { SourcePath.qualifier; _ } -> qualifier)
         in
+        let ast_environment = Environment.ast_environment environment in
         let get_dependencies = Environment.dependencies environment in
         let dependency_set = Dependencies.transitive_of_list ~get_dependencies ~modules in
         let dependencies =
@@ -634,7 +639,7 @@ let process_type_query_request
             define_to_name (Source.top_level_define source)
           in
           Reference.Set.to_list dependency_set
-          |> List.filter_map ~f:Ast.SharedMemory.Sources.get
+          |> List.filter_map ~f:(AstEnvironment.ReadOnly.get_source ast_environment)
           |> List.map ~f:source_to_define_name
         in
         TypeQuery.Response (TypeQuery.References dependencies)
@@ -662,7 +667,7 @@ let process_type_query_request
         in
         let timer = Timer.start () in
         (* Normalize the environment for comparison. *)
-        let qualifiers = ModuleTracker.qualifiers module_tracker in
+        let qualifiers = ModuleTracker.tracked_explicit_modules module_tracker in
         Analysis.Environment.normalize_shared_memory qualifiers;
         Memory.SharedMemory.save_table_sqlite path |> ignore;
         let { Memory.SharedMemory.used_slots; _ } = Memory.SharedMemory.hash_stats () in
@@ -812,11 +817,31 @@ let process_type_query_request
         let { State.state; resolved = annotation; _ } =
           State.forward_expression ~state ~expression
         in
-        match State.errors state with
+        let errors =
+          let filter_use_unimported_module_error { Error.kind; _ } =
+            match kind with
+            | UndefinedName reference ->
+                (* Drop the error if it refers to a module that actually exist but not imported,
+                   since type query does not let you import modules. *)
+                GlobalResolution.resolve_exports global_resolution ~reference
+                |> GlobalResolution.module_definition global_resolution
+                |> Option.is_none
+            | _ -> true
+          in
+          List.filter (State.errors state) ~f:filter_use_unimported_module_error
+        in
+        match errors with
         | [] -> TypeQuery.Response (TypeQuery.Type annotation)
         | errors ->
             let descriptions =
-              List.map errors ~f:(Analysis.Error.description ~show_error_traces:false)
+              let lookup reference =
+                let ast_environment = Environment.ast_environment environment in
+                AstEnvironment.ReadOnly.get_source_path ast_environment reference
+                >>| fun { SourcePath.relative; _ } -> relative
+              in
+              errors
+              |> List.map ~f:(Analysis.Error.instantiate ~lookup)
+              |> List.map ~f:(Analysis.Error.Instantiated.description ~show_error_traces:false)
               |> String.concat ~sep:", "
             in
             TypeQuery.Error (Format.sprintf "Expression had errors: %s" descriptions) )
@@ -909,6 +934,7 @@ let process_type_query_request
 
 let process_type_check_request ~state ~configuration paths =
   let state, response = IncrementalCheck.recheck ~state ~configuration paths in
+  let response = List.map response ~f:(instantiate_error ~state) in
   { state; response = Some (TypeCheckResponse response) }
 
 
@@ -919,19 +945,29 @@ let process_display_type_errors_request ~state ~configuration paths =
     | [] -> Hashtbl.data errors |> List.concat |> List.sort ~compare:Error.compare
     | _ -> List.concat_map ~f:(errors_of_path ~configuration ~state) paths
   in
+  let errors = List.map errors ~f:(instantiate_error ~state) in
   { state; response = Some (TypeCheckResponse errors) }
 
 
 let process_get_definition_request
-    ~state
+    ~state:({ State.environment; _ } as state)
     ~configuration
     ~request:{ DefinitionRequest.id; path; position }
   =
   let response =
+    let ast_environment = Environment.ast_environment environment in
     let open LanguageServer.Protocol in
-    let definition = LookupCache.find_definition ~state ~configuration path position in
-    TextDocumentDefinitionResponse.create ~configuration ~id ~location:definition
-    |> TextDocumentDefinitionResponse.to_yojson
+    let response =
+      match LookupCache.find_definition ~state ~configuration path position with
+      | None -> TextDocumentDefinitionResponse.create_empty ~id
+      | Some { Location.start; stop; path } -> (
+        match AstEnvironment.ReadOnly.get_source_path ast_environment path with
+        | None -> TextDocumentDefinitionResponse.create_empty ~id
+        | Some source_path ->
+            let path = SourcePath.full_path ~configuration source_path in
+            TextDocumentDefinitionResponse.create ~id ~start ~stop ~path )
+    in
+    TextDocumentDefinitionResponse.to_yojson response
     |> Yojson.Safe.to_string
     |> (fun response -> LanguageServerProtocolResponse response)
     |> Option.some
@@ -1090,34 +1126,44 @@ let rec process
           (* Make sure the IDE flushes its state about this file, by sending back all the errors
              for this file. *)
           let { State.open_documents; _ } = state in
-          let open_documents =
-            Path.Map.set
-              open_documents
-              ~key:path
-              ~data:(File.create path |> File.content |> Option.value ~default:"")
+          let _ =
+            match ModuleTracker.lookup_path ~configuration module_tracker path with
+            | Some { SourcePath.qualifier; _ } ->
+                Reference.Table.set
+                  open_documents
+                  ~key:qualifier
+                  ~data:(File.create path |> File.content |> Option.value ~default:"")
+            | _ -> ()
           in
           (* We do not recheck dependencies because nothing changes when we open a document, and we
              do the type checking here just to make type checking resolution appear in shared
              memory. *)
           process_type_check_request
-            ~state:{ state with open_documents }
+            ~state
             ~configuration:{ configuration with ignore_dependencies = true }
             [path]
       | CloseDocument path ->
           let { State.open_documents; _ } = state in
-          let open_documents = Path.Map.remove open_documents path in
+          let _ =
+            match ModuleTracker.lookup_path ~configuration module_tracker path with
+            | Some { SourcePath.qualifier; _ } -> Reference.Table.remove open_documents qualifier
+            | _ -> ()
+          in
           LookupCache.evict_path ~state ~configuration path;
-          { state = { state with open_documents }; response = None }
+          { state; response = None }
       | DocumentChange file ->
           (* On change, update open document's content but do not trigger recheck. *)
           let { State.open_documents; _ } = state in
-          let open_documents =
-            Path.Map.set
-              open_documents
-              ~key:(File.path file)
-              ~data:(File.content file |> Option.value ~default:"")
+          let _ =
+            match ModuleTracker.lookup_path ~configuration module_tracker (File.path file) with
+            | Some { SourcePath.qualifier; _ } ->
+                Reference.Table.set
+                  open_documents
+                  ~key:qualifier
+                  ~data:(File.content file |> Option.value ~default:"")
+            | _ -> ()
           in
-          { state = { state with open_documents }; response = None }
+          { state; response = None }
       | SaveDocument path ->
           (* On save, evict entries from the lookup cache. The updated source will be picked up at
              the next lookup (if any). *)

@@ -64,10 +64,17 @@ let test_process_type_query_request context =
   let { ScratchServer.configuration; state; _ } =
     ScratchServer.start
       ~context
-      ["test.py", {|
+      [ "test.py", {|
         def foo(a: int) -> int:
           return a
-      |}]
+      |};
+        ( "await.py",
+          {|
+        async def await_me() -> int: ...
+        async def bar():
+          await_me()
+       |}
+        ) ]
   in
   let assert_response request expected_response =
     let actual_response =
@@ -83,9 +90,9 @@ let test_process_type_query_request context =
     assert_equal ~cmp:String.equal ~printer:Fn.id expected_response actual_response
   in
   let { Configuration.Analysis.local_root; _ } = configuration in
-  let test_path = Path.create_relative ~root:local_root ~relative:"test.py" in
+  let path relative = Path.create_relative ~root:local_root ~relative in
   assert_response
-    (Protocol.TypeQuery.CoverageInFile test_path)
+    (Protocol.TypeQuery.CoverageInFile (path "test.py"))
     {| {
          "response": {
             "types": [
@@ -161,12 +168,42 @@ let test_process_type_query_request context =
     {|{"response":{"type":"float"}}|};
   assert_response
     (Protocol.TypeQuery.NormalizeType (parse_single_expression "yerp"))
-    {|{"error":"Type `yerp` was not found in the type order."}|}
+    {|{"error":"Type `yerp` was not found in the type order."}|};
+  assert_response
+    (Protocol.TypeQuery.RunCheck { check_name = "awaitable"; paths = [path "test.py"] })
+    {|
+    {
+        "response": {"errors": []}
+    }
+    |};
+
+  assert_response
+    (Protocol.TypeQuery.RunCheck { check_name = "awaitable"; paths = [path "await.py"] })
+    {|
+    {
+        "response": {
+            "errors": [
+                {
+                    "line": 4,
+                    "column": 2,
+                    "path": "await.py",
+                    "code": 1001,
+                    "name": "Unawaited awaitable",
+                    "description": "Unawaited awaitable [1001]: `await.await_me()` is never awaited. `await.await_me()` is defined on line 4",
+                    "long_description": "Unawaited awaitable [1001]: `await.await_me()` is never awaited.\n`await.await_me()` is defined on line 4",
+                    "concise_description": "Unawaited awaitable [1001]: `await.await_me()` is never awaited.\n`await.await_me()` is defined on line 4",
+                    "inference": {},
+                    "define": "await.bar"
+                }
+            ]
+        }
+    }
+    |}
 
 
 let assert_errors_equal ~actual_errors ~expected_errors =
   let actual_errors =
-    List.map actual_errors ~f:(Analysis.Error.description ~show_error_traces:false)
+    List.map actual_errors ~f:(Analysis.Error.Instantiated.description ~show_error_traces:false)
   in
   let equal left right =
     List.equal
@@ -227,18 +264,14 @@ let test_process_type_check_request context =
       ?(sources = [])
       ~check
       ~expected_errors
-      ?(incremental_transitive_dependencies = false)
+      ?(incremental_style = Configuration.Analysis.Shallow)
       ()
     =
     let actual_errors =
       (* Start with empty files *)
       let { ScratchServer.configuration; state; _ } =
         let check = List.map check ~f:(fun (relative, _) -> relative, "") in
-        ScratchServer.start
-          ~incremental_transitive_dependencies
-          ~context
-          ~external_sources:sources
-          check
+        ScratchServer.start ~incremental_style ~context ~external_sources:sources check
       in
       let paths =
         let { Configuration.Analysis.local_root; _ } = configuration in
@@ -293,7 +326,7 @@ let test_process_type_check_request context =
 
   (* Indirect dependency. *)
   assert_response
-    ~incremental_transitive_dependencies:true
+    ~incremental_style:Transitive
     ~sources:
       [ "library.py", "def function() -> int: ...";
         ( "client.py",
@@ -320,7 +353,7 @@ let test_process_type_check_request context =
     ~expected_errors:[]
     ();
   assert_response
-    ~incremental_transitive_dependencies:true
+    ~incremental_style:Transitive
     ~sources:["a.py", "var = 42"; "b.py", "from a import *"; "c.py", "from b import *"]
     ~check:["a.py", "var = 1337"]
     ~expected_errors:[]
@@ -479,7 +512,10 @@ let test_create_annotation_edit context =
       due_to_invariance = false;
     }
   in
-  let location = { Location.Instantiated.any with start = { line = 0; column = 0 } } in
+  let location = { Location.Reference.any with start = { line = 0; column = 0 } } in
+  let instantiated_location =
+    { Location.Instantiated.any with start = { line = 0; column = 0 } }
+  in
   let assert_edit ~source ~error ~expected_text ~expected_range =
     let file =
       let path = Path.create_relative ~root ~relative:"test.py" in
@@ -614,7 +650,7 @@ let test_create_annotation_edit context =
            Analysis.Error.location;
            kind =
              Analysis.Error.IncompatibleVariableType
-               { name = !&"x"; mismatch = mock_mismatch; declare_location = location };
+               { name = !&"x"; mismatch = mock_mismatch; declare_location = instantiated_location };
            signature = +mock_signature;
          })
 
@@ -630,25 +666,21 @@ let test_open_document_state context =
     ScratchServer.start ~context ["a.py", ""; "b.py", ""]
   in
   let create_path name = Path.create_relative ~root:local_root ~relative:name in
-  let mock_map ~name ~content =
-    let file = create_path name |> File.create ~content:"" in
-    Path.Map.singleton (File.path file) content
-  in
   let assert_open_documents ~start ~request ~expected =
     let state = { state with open_documents = start } in
     let ({ state = { open_documents; _ }; _ } : Request.response) =
       Request.process ~configuration:server_configuration ~state ~request
     in
-    assert_true (Path.Map.equal String.equal open_documents expected)
+    assert_true (Reference.Table.equal open_documents expected String.equal)
   in
   assert_open_documents
-    ~start:Path.Map.empty
+    ~start:(Reference.Table.create ())
     ~request:(Protocol.Request.OpenDocument (create_path "a.py"))
-    ~expected:(mock_map ~name:"a.py" ~content:"");
+    ~expected:(Reference.Table.of_alist_exn [!&"a", ""]);
   assert_open_documents
-    ~start:(mock_map ~name:"a.py" ~content:"")
+    ~start:(Reference.Table.of_alist_exn [!&"a", ""])
     ~request:(Protocol.Request.CloseDocument (create_path "a.py"))
-    ~expected:Path.Map.empty
+    ~expected:(Reference.Table.create ())
 
 
 let test_resolution_shared_memory_added_for_open_documents context =
@@ -665,9 +697,7 @@ let test_resolution_shared_memory_added_for_open_documents context =
   File.write test_file_a;
   File.write test_file_b;
   let paths = [test_path_a; test_path_b] in
-  let state =
-    { state with open_documents = Path.Map.singleton (File.path test_file_a) test_code }
-  in
+  let state = { state with open_documents = Reference.Table.of_alist_exn [!&"a", test_code] } in
   let contains_resolution_shared_memory_reference key_string =
     key_string |> Reference.create |> Analysis.ResolutionSharedMemory.get |> Option.is_some
   in

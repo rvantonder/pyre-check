@@ -10,14 +10,16 @@ open Analysis
 open Expression
 open Pyre
 open Test
-open AnnotatedTest
 module Resolution = Analysis.Resolution
 module Signature = Annotated.Signature
 open Signature
 
-let resolution =
-  populate
-    {|
+let test_select context =
+  let resolution =
+    ScratchProject.setup
+      ~context
+      [ ( "__init__.py",
+          {|
       _T = typing.TypeVar('_T')
       _S = typing.TypeVar('_S')
       _R = typing.TypeVar('_R', int, float)
@@ -47,21 +49,19 @@ let resolution =
       class ExtendsDictStrInt(typing.Dict[str, int]): pass
       optional: typing.Optional[int]
     |}
-  |> fun environment -> TypeCheck.resolution (Environment.resolution environment ()) ()
-
-
-let parse_annotation annotation =
-  (* Allow untracked to create callables with unknowns, which would otherwise be generated from
-     Callable.create on defines. *)
-  annotation
-  |> parse_single_expression
-  |> GlobalResolution.parse_annotation
-       ~allow_untracked:true
-       ~allow_invalid_type_parameters:true
-       (Resolution.global_resolution resolution)
-
-
-let test_select _ =
+        ) ]
+    |> ScratchProject.build_resolution
+  in
+  let parse_annotation annotation =
+    (* Allow untracked to create callables with unknowns, which would otherwise be generated from
+       Callable.create on defines. *)
+    annotation
+    |> parse_single_expression
+    |> GlobalResolution.parse_annotation
+         ~allow_untracked:true
+         ~allow_invalid_type_parameters:true
+         (Resolution.global_resolution resolution)
+  in
   let assert_select ?(allow_undefined = false) ?name callable arguments expected =
     let parse_callable callable =
       callable
@@ -434,7 +434,7 @@ let test_select _ =
       ( "[[_R], _R]",
         Type.literal_string "string",
         "\"string\"",
-        Type.variable ~constraints:(Type.Variable.Unary.Explicit [Type.integer; Type.float]) "_R",
+        Type.variable ~constraints:(Type.Variable.Explicit [Type.integer; Type.float]) "_R",
         None,
         1 ));
   assert_select "[[typing.List[_R]], _R]" "([1])" (`Found "[[typing.List[int]], int]");
@@ -446,9 +446,7 @@ let test_select _ =
         Type.list Type.string,
         "['string']",
         Type.list
-          (Type.variable
-             ~constraints:(Type.Variable.Unary.Explicit [Type.integer; Type.float])
-             "_R"),
+          (Type.variable ~constraints:(Type.Variable.Explicit [Type.integer; Type.float]) "_R"),
         None,
         1 ));
   assert_select "[[], _R]" "()" (`Found "[[], _R]");
@@ -472,7 +470,7 @@ let test_select _ =
         "union",
         Type.variable
           "_T_float_or_str"
-          ~constraints:(Type.Variable.Unary.Explicit [Type.float; Type.string]),
+          ~constraints:(Type.Variable.Explicit [Type.float; Type.string]),
         None,
         1 ));
   assert_select
@@ -635,7 +633,10 @@ let test_select _ =
       ( "[[Variable(Ts)], int]",
         Some
           (MismatchWithListVariadicTypeVariable
-             ( Variable (Type.Variable.Variadic.List.create "Ts"),
+             ( Concatenation
+                 (Type.OrderedTypes.Concatenation.create
+                    (Type.OrderedTypes.Concatenation.Middle.create_bare
+                       (Type.Variable.Variadic.List.create "Ts"))),
                NotDefiniteTuple
                  {
                    expression = +Name (Name.Identifier "unbounded_tuple");
@@ -648,7 +649,10 @@ let test_select _ =
       ( "[[typing.Tuple[$literal_one, $literal_string], $literal_one, $literal_string], int]",
         Some
           (MismatchWithListVariadicTypeVariable
-             ( Variable (Type.Variable.Variadic.List.create "Ts"),
+             ( Concatenation
+                 (Type.OrderedTypes.Concatenation.create
+                    (Type.OrderedTypes.Concatenation.Middle.create_bare
+                       (Type.Variable.Variadic.List.create "Ts"))),
                ConstraintFailure (Concrete [Type.float]) )) ));
   assert_select
     "[[pyre_extensions.type_variable_operators.Map[typing.List, Ts]], int]"

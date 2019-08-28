@@ -71,7 +71,7 @@ let run
         ~excludes
         ~extensions
         ~local_root:(Path.create_absolute local_root)
-        ~incremental_transitive_dependencies:transitive
+        ~incremental_style:(if transitive then Transitive else Shallow)
         ()
     in
     (fun () ->
@@ -87,7 +87,8 @@ let run
               [ ( "errors",
                   `List
                     (List.map
-                       ~f:(fun error -> Analysis.Error.to_json ~show_error_traces error)
+                       ~f:(fun error ->
+                         Analysis.Error.Instantiated.to_json ~show_error_traces error)
                        errors) ) ]
         | _ -> failwith "Unexpected response in incremental check."
       in

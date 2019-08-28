@@ -6,8 +6,16 @@
 open Core
 open Pyre
 
+let get_analysis_kind = function
+  | "taint" -> Taint.Analysis.abstract_kind
+  | "liveness" -> DeadStore.Analysis.abstract_kind
+  | _ ->
+      Log.error "Invalid analysis kind specified.";
+      failwith "bad argument"
+
+
 let run_analysis
-    _taint
+    analysis
     result_json_path
     dump_call_graph
     verbose
@@ -89,20 +97,21 @@ let run_analysis
       | _ -> 10
     in
     let scheduler = Scheduler.create ~configuration ~bucket_multiplier () in
-    let errors =
+    let errors, ast_environment =
       Service.Check.check ~scheduler:(Some scheduler) ~configuration
       |> fun { module_tracker; environment; _ } ->
-      let qualifiers =
-        Analysis.ModuleTracker.source_paths module_tracker
-        |> List.map ~f:(fun { Ast.SourcePath.qualifier; _ } -> qualifier)
+      let qualifiers = Analysis.ModuleTracker.tracked_explicit_modules module_tracker in
+      let errors =
+        Service.StaticAnalysis.analyze
+          ~scheduler
+          ~analysis_kind:(get_analysis_kind analysis)
+          ~configuration:
+            { Configuration.StaticAnalysis.configuration; result_json_path; dump_call_graph }
+          ~environment
+          ~qualifiers
+          ()
       in
-      Service.StaticAnalysis.analyze
-        ~scheduler
-        ~configuration:
-          { Configuration.StaticAnalysis.configuration; result_json_path; dump_call_graph }
-        ~environment
-        ~qualifiers
-        ()
+      errors, Analysis.Environment.ast_environment environment
     in
     let { Caml.Gc.minor_collections; major_collections; compactions; _ } = Caml.Gc.stat () in
     Statistics.performance
@@ -115,7 +124,11 @@ let run_analysis
       ();
 
     (* Print results. *)
-    List.map errors ~f:(fun error -> Interprocedural.Error.to_json ~show_error_traces error)
+    List.map errors ~f:(fun error ->
+        Interprocedural.Error.instantiate
+          ~lookup:(Analysis.AstEnvironment.ReadOnly.get_relative ast_environment)
+          error
+        |> Interprocedural.Error.Instantiated.to_json ~show_error_traces)
     |> (fun result -> Yojson.Safe.pretty_to_string (`List result))
     |> Log.print "%s";
     Scheduler.destroy scheduler)
@@ -127,7 +140,7 @@ let command =
     ~summary:"Runs a static analysis without a server (default)."
     Command.Spec.(
       empty
-      +> flag "-taint" no_arg ~doc:"Run the taint analysis."
+      +> flag "-analysis" (optional_with_default "taint" string) ~doc:"Type of analysis to run."
       +> flag
            "-save-results-to"
            (optional string)

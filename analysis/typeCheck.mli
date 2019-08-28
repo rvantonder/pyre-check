@@ -10,7 +10,7 @@ module Error = AnalysisError
 
 module ErrorMap : sig
   type key = {
-    location: Location.Instantiated.t;
+    location: Location.t;
     kind: int;
   }
   [@@deriving compare, sexp]
@@ -77,6 +77,7 @@ module State (Context : Context) : Signature
 
 val resolution
   :  GlobalResolution.t ->
+  ?imports:Reference.Set.t ->
   ?annotations:Annotation.t Reference.Map.t ->
   unit ->
   Resolution.t

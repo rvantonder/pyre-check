@@ -47,6 +47,34 @@ let test_remove_dot _ =
       a = 1 + 1
       variable1
       b = 2 + 2
+    |};
+
+  (* Edge case: DOT is in column 0, avoid erroring in this case. *)
+  assert_remove_dot
+    ~position:{ line = 3; column = 0 }
+    ~original:{|
+      a = 1 + 1
+      .
+      b = 2 + 2
+    |}
+    ~expected:{|
+      a = 1 + 1
+      .
+      b = 2 + 2
+    |};
+
+  (* Edge case: pos and len are past end. *)
+  assert_remove_dot
+    ~position:{ line = 4; column = 20 }
+    ~original:{|
+      a = 1 + 1
+      variable1.
+      b = 2 + 2
+    |}
+    ~expected:{|
+      a = 1 + 1
+      variable1.
+      b = 2 + 2
     |}
 
 
@@ -77,14 +105,22 @@ let test_find_module_reference _ =
 
 let test_get_completion_items context =
   let open LanguageServer in
-  let assert_completion_items ~cursor_position ~source ~expected =
+  let assert_completion_items ?external_sources ~cursor_position ~source expected =
     let handle = "test.py" in
-    let { ScratchServer.configuration; state; _ } = ScratchServer.start ~context [handle, ""] in
+    let { ScratchServer.configuration; state; _ } =
+      ScratchServer.start ~context ?external_sources [handle, ""]
+    in
     let path =
       let { Configuration.Analysis.local_root; _ } = configuration in
       Path.create_relative ~root:local_root ~relative:handle
     in
-    let state = { state with open_documents = PyrePath.Map.singleton path source } in
+    let state =
+      {
+        state with
+        open_documents =
+          Reference.Table.of_alist_exn [SourcePath.qualifier_of_relative handle, source];
+      }
+    in
     let actual = AutoComplete.get_completion_items ~state ~configuration ~path ~cursor_position in
     assert_equal ~printer:Types.CompletionItems.show expected actual
   in
@@ -100,8 +136,12 @@ let test_get_completion_items context =
     { Types.CompletionItems.label; kind; detail; textEdit = { range; newText = new_text } }
   in
   (* Class attributes completion *)
-  let source =
-    {|
+  let cursor_position = { Location.line = 8; column = 4 } in
+  assert_completion_items
+    ~cursor_position
+    ~source:
+      (trim_extra_indentation
+         {|
       class A:
         foo: bool
         def bar(self) -> int:
@@ -109,76 +149,49 @@ let test_get_completion_items context =
       def main() -> None:
         a = A()
         a.
-    |}
-    |> trim_extra_indentation
-  in
-  let cursor_position = { Location.line = 8; column = 4 } in
-  assert_completion_items
-    ~cursor_position
-    ~source
-    ~expected:
-      [ create_completion_item
-          ~cursor_position
-          ~label:"bar() -> int"
-          ~kind:Types.CompletionItems.Kind.Function
-          ~detail:"() -> int"
-          ~new_text:"bar()";
-        create_completion_item
-          ~cursor_position
-          ~label:"foo"
-          ~kind:Types.CompletionItems.Kind.Variable
-          ~detail:"bool"
-          ~new_text:"foo" ];
+    |})
+    [ create_completion_item
+        ~cursor_position
+        ~label:"bar() -> int"
+        ~kind:Types.CompletionItems.Kind.Function
+        ~detail:"() -> int"
+        ~new_text:"bar()";
+      create_completion_item
+        ~cursor_position
+        ~label:"foo"
+        ~kind:Types.CompletionItems.Kind.Variable
+        ~detail:"bool"
+        ~new_text:"foo" ];
 
   (* Module members completion *)
-  let source =
-    {|
-      import abc
-      def main() -> None:
-        abc.
-    |} |> trim_extra_indentation
-  in
-  let cursor_position = { Location.line = 4; column = 6 } in
+  let cursor_position = { Location.line = 4; column = 7 } in
   assert_completion_items
     ~cursor_position
-    ~source
-    ~expected:
-      [ create_completion_item
-          ~cursor_position
-          ~label:"Type"
-          ~kind:Types.CompletionItems.Kind.Variable
-          ~detail:"_SpecialForm"
-          ~new_text:"Type";
-        create_completion_item
-          ~cursor_position
-          ~label:"TypeVar"
-          ~kind:Types.CompletionItems.Kind.Variable
-          ~detail:"object"
-          ~new_text:"TypeVar";
-        create_completion_item
-          ~cursor_position
-          ~label:"ABCMeta"
-          ~kind:Types.CompletionItems.Kind.Variable
-          ~detail:"Type[ABCMeta]"
-          ~new_text:"ABCMeta";
-        create_completion_item
-          ~cursor_position
-          ~label:"abstractmethod(callable: unknown) -> unknown"
-          ~kind:Types.CompletionItems.Kind.Function
-          ~detail:"(callable: unknown) -> unknown"
-          ~new_text:"abstractmethod()";
-        create_completion_item
-          ~cursor_position
-          ~label:"abstractproperty"
-          ~kind:Types.CompletionItems.Kind.Variable
-          ~detail:"Type[abstractproperty]"
-          ~new_text:"abstractproperty";
-        create_completion_item
-          ~cursor_position
-          ~label:"ABC"
-          ~kind:Types.CompletionItems.Kind.Variable
-          ~detail:"Type[ABC]"
-          ~new_text:"ABC" ]
+    ~source:(trim_extra_indentation {|
+    import derp
+    def main() -> None:
+      derp.
+  |})
+    ~external_sources:
+      ["derp.py", {|
+      class Foo:
+        pass
+
+      def bar() -> None:
+        pass
+    |}]
+    [ create_completion_item
+        ~cursor_position
+        ~label:"Foo"
+        ~kind:Types.CompletionItems.Kind.Variable
+        ~detail:"Type[Foo]"
+        ~new_text:"Foo";
+      create_completion_item
+        ~cursor_position
+        ~label:"bar() -> None"
+        ~kind:Types.CompletionItems.Kind.Function
+        ~detail:"() -> None"
+        ~new_text:"bar()" ]
 
 
 let test_untracked_path context =
@@ -204,7 +217,13 @@ let test_untracked_path context =
       let { Configuration.Analysis.local_root; _ } = configuration in
       Path.create_relative ~root:local_root ~relative
     in
-    let state = { state with open_documents = PyrePath.Map.singleton path source } in
+    let state =
+      {
+        state with
+        open_documents =
+          Reference.Table.of_alist_exn [SourcePath.qualifier_of_relative tracked_handle, source];
+      }
+    in
     let completion_items =
       AutoComplete.get_completion_items ~state ~configuration ~path ~cursor_position
     in

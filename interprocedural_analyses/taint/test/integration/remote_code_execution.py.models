@@ -1,0 +1,57 @@
+@generated
+{
+  "kind": "issue",
+  "data": {
+    "callable": "remote_code_execution.rce_problem",
+    "callable_line": 4,
+    "code": 5001,
+    "line": 6,
+    "start": 9,
+    "end": 10,
+    "filename": "remote_code_execution.py",
+    "message":
+      "Possible shell injection. Data from [UserControlled] source(s) may reach [RemoteCodeExecution] sink(s)",
+    "traces": [
+      {
+        "name": "forward",
+        "roots": [
+          {
+            "root": {
+              "filename": "remote_code_execution.py",
+              "line": 5,
+              "start": 8,
+              "end": 27
+            },
+            "leaves": [
+              {
+                "kind": "UserControlled",
+                "name": "__user_controlled",
+                "on_all_flows": true
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "backward",
+        "roots": [
+          {
+            "root": {
+              "filename": "remote_code_execution.py",
+              "line": 6,
+              "start": 9,
+              "end": 10
+            },
+            "leaves": [
+              {
+                "kind": "RemoteCodeExecution",
+                "name": "eval",
+                "on_all_flows": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

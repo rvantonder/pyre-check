@@ -11,10 +11,8 @@ open Pyre
 open TypeCheck
 open Test
 
-let resolution = Test.resolution ()
-
 module DefaultContext = struct
-  let configuration = Test.mock_configuration
+  let configuration = Configuration.Analysis.create ()
 
   let define = +Test.mock_define
 
@@ -22,7 +20,7 @@ module DefaultContext = struct
 end
 
 module Create (Context : TypeCheck.Context) = struct
-  let create ?(bottom = false) ?(resolution = resolution) ?(immutables = []) annotations =
+  let create ?(bottom = false) ?(immutables = []) ~resolution annotations =
     let module State = State (Context) in
     let resolution =
       let annotations =
@@ -53,7 +51,15 @@ let list_orderless_equal left right =
     (List.dedup_and_sort ~compare:String.compare right)
 
 
-let test_initial _ =
+let description ~resolution error =
+  let ast_environment =
+    Resolution.global_resolution resolution |> GlobalResolution.ast_environment
+  in
+  Error.instantiate ~lookup:(AstEnvironment.ReadOnly.get_relative ast_environment) error
+  |> Error.Instantiated.description ~show_error_traces:false
+
+
+let test_initial context =
   let assert_initial
       ?parent
       ?(errors = [])
@@ -70,26 +76,24 @@ let test_initial _ =
       | _ -> failwith "Unable to parse define."
     in
     let module Context = struct
-      let configuration = Test.mock_configuration
+      let configuration = Configuration.Analysis.create ()
 
       let define = +define
 
       let calls = Location.Reference.Table.create ()
     end
     in
+    let resolution =
+      ScratchProject.setup ~context ["__init__.py", environment] |> ScratchProject.build_resolution
+    in
     let module Create = Create (Context) in
-    let state = Create.create ~immutables annotations in
+    let state = Create.create ~immutables ~resolution annotations in
     let module State = State (Context) in
     let assert_state_equal =
       assert_equal
         ~cmp:State.equal
         ~printer:(Format.asprintf "%a" State.pp)
         ~pp_diff:(diff ~print:State.pp)
-    in
-    let resolution =
-      parse environment
-      |> (fun source -> source :: Test.typeshed_stubs ())
-      |> fun sources -> Test.resolution ~sources ()
     in
     let initial =
       let variables =
@@ -115,15 +119,15 @@ let test_initial _ =
     assert_equal
       ~cmp:(List.equal String.equal)
       ~printer:(fun elements -> Format.asprintf "%a" Sexp.pp [%message (elements : string list)])
-      (List.map (State.errors initial) ~f:(Error.description ~show_error_traces:false))
       errors
+      (List.map (State.errors initial) ~f:(description ~resolution))
   in
   assert_initial
-    "def foo(x: int): ..."
+    "def foo(x: int) -> None: ..."
     ~immutables:["x", (false, Type.integer)]
     ~annotations:["x", Type.integer];
   assert_initial
-    "def foo(x: int = 1.0): ..."
+    "def foo(x: int = 1.0) -> None: ..."
     ~errors:
       [ "Incompatible variable type [9]: x is declared to have type `int` but is used as type "
         ^ "`float`." ]
@@ -133,53 +137,54 @@ let test_initial _ =
     ~errors:
       ["Missing parameter annotation [2]: Parameter `x` has type `float` but no type is specified."]
     ~annotations:["x", Type.float]
-    "def foo(x = 1.0): ...";
+    "def foo(x = 1.0) -> None: ...";
   assert_initial
     "def foo(x: int) -> int: ..."
     ~immutables:["x", (false, Type.integer)]
     ~annotations:["x", Type.integer];
   assert_initial
-    "def foo(x: float, y: str): ..."
+    "def foo(x: float, y: str) -> None: ..."
     ~immutables:["x", (false, Type.float); "y", (false, Type.string)]
     ~annotations:["x", Type.float; "y", Type.string];
   assert_initial
-    "def foo(x): ..."
+    "def foo(x) -> None: ..."
     ~errors:["Missing parameter annotation [2]: Parameter `x` has no type specified."]
     ~annotations:["x", Type.Any];
   assert_initial
-    "def foo(x: typing.Any): ..."
+    "def foo(x: typing.Any) -> None: ..."
     ~errors:["Missing parameter annotation [2]: Parameter `x` must have a type other than `Any`."]
     ~immutables:["x", (false, Type.Any)]
     ~annotations:["x", Type.Any];
   assert_initial
     ~parent:"Foo"
     ~environment:"class Foo: ..."
-    "def __eq__(self, other: object): ..."
+    "def __eq__(self, other: object) -> None: ..."
     ~errors:[]
     ~immutables:["other", (false, Type.object_primitive)]
     ~annotations:["self", Type.Primitive "Foo"; "other", Type.object_primitive];
   assert_initial
     ~parent:"Foo"
     ~environment:"class Foo: ..."
-    "def foo(self): ..."
+    "def foo(self) -> None: ..."
     ~annotations:["self", Type.Primitive "Foo"];
   assert_initial
     ~parent:"Foo"
     ~environment:"class Foo: ..."
-    "@staticmethod\ndef foo(a): ..."
+    "@staticmethod\ndef foo(a) -> None: ..."
     ~errors:["Missing parameter annotation [2]: Parameter `a` has no type specified."]
     ~annotations:["a", Type.Any];
   assert_initial
     ~environment:"T = typing.TypeVar('T')"
-    "def foo(x: T): ..."
+    "def foo(x: T) -> None: ..."
     ~immutables:["x", (false, Type.Variable.mark_all_variables_as_bound (Type.variable "T"))]
     ~annotations:["x", Type.Variable.mark_all_variables_as_bound (Type.variable "T")]
 
 
-let test_less_or_equal _ =
+let test_less_or_equal context =
+  let resolution = ScratchProject.setup ~context [] |> ScratchProject.build_resolution in
   let create =
     let module Create = Create (DefaultContext) in
-    Create.create
+    Create.create ~resolution
   in
   let module State = State (DefaultContext) in
   (* <= *)
@@ -202,10 +207,11 @@ let test_less_or_equal _ =
     (State.less_or_equal ~left:(create ["x", Type.integer]) ~right:(create ["y", Type.integer]))
 
 
-let test_join _ =
+let test_join context =
+  let resolution = ScratchProject.setup ~context [] |> ScratchProject.build_resolution in
   let create =
     let module Create = Create (DefaultContext) in
-    Create.create
+    Create.create ~resolution
   in
   let module State = State (DefaultContext) in
   let assert_state_equal =
@@ -235,10 +241,11 @@ let test_join _ =
     (create ["x", Type.Top; "y", Type.Top])
 
 
-let test_widen _ =
+let test_widen context =
+  let resolution = ScratchProject.setup ~context [] |> ScratchProject.build_resolution in
   let create =
     let module Create = Create (DefaultContext) in
-    Create.create
+    Create.create ~resolution
   in
   let module State = State (DefaultContext) in
   let assert_state_equal =
@@ -262,17 +269,19 @@ let test_widen _ =
     (create ["x", Type.Top])
 
 
-let test_check_annotation _ =
-  let create =
-    let module Create = Create (DefaultContext) in
-    Create.create
-  in
-  let module State = State (DefaultContext) in
+let test_check_annotation context =
   let assert_check_annotation source expression descriptions =
-    let resolution = Test.resolution ~sources:(parse source :: Test.typeshed_stubs ()) () in
-    let state = create ~resolution [] in
+    let resolution =
+      ScratchProject.setup ~context ["__init__.py", source] |> ScratchProject.build_resolution
+    in
+    let create =
+      let module Create = Create (DefaultContext) in
+      Create.create ~resolution
+    in
+    let module State = State (DefaultContext) in
+    let state = create [] in
     let errors = State.parse_and_check_annotation ~state !expression |> fst |> State.errors in
-    let errors = List.map ~f:(Error.description ~show_error_traces:false) errors in
+    let errors = List.map ~f:(description ~resolution) errors in
     assert_equal
       ~cmp:(List.equal String.equal)
       ~printer:(String.concat ~sep:"\n")
@@ -289,7 +298,12 @@ let test_check_annotation _ =
     "x"
     ["Invalid type [31]: Expression `x` is not a valid type."];
   assert_check_annotation "x = int" "x" [];
-  assert_check_annotation "x: typing.Any" "x" [];
+  assert_check_annotation
+    "x: typing.Any"
+    "x"
+    ["Invalid type [31]: Expression `x` is not a valid type."];
+  assert_check_annotation "x = typing.Any" "x" [];
+  assert_check_annotation "x: typing.TypeAlias = typing.Any" "x" [];
   assert_check_annotation {|
       class Foo: ...
       x = Foo
@@ -338,19 +352,9 @@ and step = {
 }
 [@@deriving compare, eq, show]
 
-let assert_resolved sources expression expected =
-  let module State = State (struct
-    let configuration = Test.mock_configuration
-
-    let define = +Test.mock_define
-
-    let calls = Location.Reference.Table.create ()
-  end)
-  in
-  let resolution =
-    AnnotatedTest.populate_with_sources (sources @ typeshed_stubs ())
-    |> fun environment -> TypeCheck.resolution (Environment.resolution environment ()) ()
-  in
+let assert_resolved ~context sources expression expected =
+  let module State = State (DefaultContext) in
+  let resolution = ScratchProject.setup ~context sources |> ScratchProject.build_resolution in
   let resolved =
     let state = State.create ~resolution () in
     let { State.resolved; _ } =
@@ -363,8 +367,7 @@ let assert_resolved sources expression expected =
 
 let test_module_exports context =
   let assert_exports_resolved expression expected =
-    ScratchProject.setup
-      ~context
+    let sources =
       [ ( "implementing.py",
           {|
         def implementing.function() -> int: ...
@@ -393,8 +396,8 @@ let test_module_exports context =
         "wildcard_default.py", {|
         from exporting_wildcard_default import *
       |} ]
-    |> ScratchProject.parse_sources
-    |> fun (sources, _) -> assert_resolved sources expression expected
+    in
+    assert_resolved ~context sources expression expected
   in
   assert_exports_resolved "implementing.constant" Type.integer;
   assert_exports_resolved "implementing.function()" Type.integer;
@@ -412,22 +415,23 @@ let test_module_exports context =
   assert_exports_resolved "wildcard_default.aliased()" Type.Top;
   let assert_fixpoint_stop =
     assert_resolved
-      [ parse ~handle:"loop/b.py" {|
+      ~context
+      [ "loop/b.py", {|
             b: int = 1
           |};
-        parse ~handle:"loop/a.py" {|
+        "loop/a.py", {|
             from loop.b import b
           |};
-        parse ~handle:"loop/a.py" {|
+        "loop/a.py", {|
             from loop.a import b
           |};
-        parse ~handle:"no_loop/b.py" {|
+        "no_loop/b.py", {|
             b: int = 1
           |};
-        parse ~handle:"no_loop/a.py" {|
+        "no_loop/a.py", {|
             from no_loop.b import b as c
           |};
-        parse ~handle:"no_loop/__init__.py" {|
+        "no_loop/__init__.py", {|
             from no_loop.a import c
           |} ]
   in
@@ -435,11 +439,11 @@ let test_module_exports context =
   assert_fixpoint_stop "no_loop.c" Type.integer
 
 
-let test_object_callables _ =
+let test_object_callables context =
   let assert_resolved expression annotation =
     assert_resolved
-      [ parse
-          ~handle:"module.py"
+      ~context
+      [ ( "module.py",
           {|
             _K = typing.TypeVar('_K')
             _V = typing.TypeVar('_V')
@@ -461,7 +465,7 @@ let test_object_callables _ =
             callable: typing.Callable[..., unknown][[..., int][..., str]] = ...
             submodule: Submodule[int] = ...
           |}
-        |> Preprocessing.qualify ]
+        ) ]
       expression
       (Type.create ~aliases:(fun _ -> None) (parse_single_expression annotation))
   in
@@ -475,15 +479,16 @@ let test_object_callables _ =
   assert_resolved "module.submodule.generic_callable" "typing.Callable[[int], int]"
 
 
-let test_callable_selection _ =
+let test_callable_selection context =
   let assert_resolved source expression annotation =
     assert_resolved
-      [parse source]
+      ~context
+      ["test.py", source]
       expression
       (Type.create ~aliases:(fun _ -> None) (parse_single_expression annotation))
   in
-  assert_resolved "call: typing.Callable[[], int]" "call()" "int";
-  assert_resolved "call: typing.Callable[[int], int]" "call()" "int"
+  assert_resolved "call: typing.Callable[[], int]" "test.call()" "int";
+  assert_resolved "call: typing.Callable[[int], int]" "test.call()" "int"
 
 
 type parameter_kind =
@@ -491,17 +496,11 @@ type parameter_kind =
   | VariableParameter
   | KeywordParameter
 
-let test_forward_expression _ =
+let test_forward_expression context =
+  let module State = State (DefaultContext) in
   let create =
     let module Create = Create (DefaultContext) in
     Create.create
-  in
-  let module State = State (DefaultContext) in
-  let assert_state_equal =
-    assert_equal
-      ~cmp:State.equal
-      ~printer:(Format.asprintf "%a" State.pp)
-      ~pp_diff:(diff ~print:State.pp)
   in
   let assert_forward
       ?(precondition = [])
@@ -521,12 +520,16 @@ let test_forward_expression _ =
       | _ -> failwith "Unable to extract expression"
     in
     let resolution =
-      parse environment
-      |> (fun source -> source :: Test.typeshed_stubs ())
-      |> fun sources -> Test.resolution ~sources ()
+      ScratchProject.setup ~context ["__init__.py", environment] |> ScratchProject.build_resolution
     in
     let { State.state = forwarded; resolved; _ } =
       State.forward_expression ~state:(create ~resolution precondition) ~expression
+    in
+    let assert_state_equal =
+      assert_equal
+        ~cmp:State.equal
+        ~printer:(Format.asprintf "%a" State.pp)
+        ~pp_diff:(diff ~print:State.pp)
     in
     let errors =
       match errors with
@@ -548,7 +551,7 @@ let test_forward_expression _ =
       ~cmp:list_orderless_equal
       ~printer:(String.concat ~sep:"\n")
       errors
-      (State.errors forwarded |> List.map ~f:(Error.description ~show_error_traces:false));
+      (State.errors forwarded |> List.map ~f:(description ~resolution));
     assert_equal ~cmp:Type.equal ~printer:Type.show annotation resolved
   in
   (* Await. *)
@@ -919,9 +922,7 @@ let test_forward_expression _ =
       | _ -> failwith "Unable to extract expression"
     in
     let resolution =
-      parse environment
-      |> (fun source -> source :: Test.typeshed_stubs ())
-      |> fun sources -> Test.resolution ~sources ()
+      ScratchProject.setup ~context ["__init__.py", environment] |> ScratchProject.build_resolution
     in
     let { State.resolved_annotation; _ } =
       State.forward_expression ~state:(create ~resolution precondition) ~expression
@@ -956,7 +957,8 @@ let test_forward_expression _ =
     (Some (Annotation.create_immutable ~global:true Type.integer))
 
 
-let test_forward_statement _ =
+let test_forward_statement context =
+  let resolution = ScratchProject.setup ~context [] |> ScratchProject.build_resolution in
   let assert_forward
       ?(precondition_immutables = [])
       ?(postcondition_immutables = [])
@@ -978,7 +980,7 @@ let test_forward_statement _ =
       | _ -> failwith "Unable to parse define."
     in
     let module Context = struct
-      let configuration = Test.mock_configuration
+      let configuration = Configuration.Analysis.create ()
 
       let define = +define
 
@@ -1002,7 +1004,7 @@ let test_forward_statement _ =
       in
       List.fold
         ~f:(fun state statement -> State.forward_statement ~state ~statement)
-        ~init:(Create.create ~immutables:precondition_immutables precondition)
+        ~init:(Create.create ~immutables:precondition_immutables ~resolution precondition)
         parsed
     in
     let errors =
@@ -1021,13 +1023,13 @@ let test_forward_statement _ =
           errors [] count
     in
     assert_state_equal
-      (Create.create ~bottom ~immutables:postcondition_immutables postcondition)
+      (Create.create ~bottom ~immutables:postcondition_immutables ~resolution postcondition)
       forwarded;
     assert_equal
       ~cmp:list_orderless_equal
       ~printer:(String.concat ~sep:"\n")
       errors
-      (State.errors forwarded |> List.map ~f:(Error.description ~show_error_traces:false))
+      (State.errors forwarded |> List.map ~f:(description ~resolution))
   in
   (* Assignments. *)
   assert_forward ["y", Type.integer] "x = y" ["x", Type.integer; "y", Type.integer];
@@ -1309,6 +1311,22 @@ let test_forward_statement _ =
     ["x", Type.float]
     "assert x in [1]"
     ["x", Type.float];
+  assert_forward
+    ~errors:
+      (`Specific
+        ["Impossible assertion [25]: `x` has type `None`, assertion `x` will always fail."])
+    ~bottom:true
+    ["x", Type.none]
+    "assert x"
+    ["x", Type.none];
+  assert_forward
+    ~errors:
+      (`Specific
+        ["Impossible assertion [25]: `x` has type `None`, assertion `x` will always fail."])
+    ~bottom:true
+    ["x", Type.none]
+    "assert x is not None"
+    ["x", Type.none];
 
   (* Isinstance. *)
   assert_forward ["x", Type.Any] "assert isinstance(x, int)" ["x", Type.integer];
@@ -1337,8 +1355,8 @@ let test_forward_statement _ =
   assert_forward
     ~errors:
       (`Specific
-        [ "Impossible isinstance check [25]: `x` has type `int`, checking if `x` not "
-          ^ "isinstance `int` will always fail." ])
+        [ "Impossible assertion [25]: `x` has type `int`, assertion `not isinstance(x,int)` will \
+           always fail." ])
     ~bottom:true
     ["x", Type.integer]
     "assert not isinstance(x, int)"
@@ -1346,8 +1364,8 @@ let test_forward_statement _ =
   assert_forward
     ~errors:
       (`Specific
-        [ "Impossible isinstance check [25]: `x` has type `int`, checking if `x` not "
-          ^ "isinstance `float` will always fail." ])
+        [ "Impossible assertion [25]: `x` has type `int`, assertion `not isinstance(x,float)` \
+           will always fail." ])
     ~bottom:true
     ["x", Type.integer]
     "assert not isinstance(x, float)"
@@ -1375,8 +1393,8 @@ let test_forward_statement _ =
   assert_forward
     ~errors:
       (`Specific
-        [ "Impossible isinstance check [25]: `x.__add__(1)` has type `int`, checking if "
-          ^ "`x.__add__(1)` not isinstance `int` will always fail." ])
+        [ "Impossible assertion [25]: `x.__add__(1)` has type `int`, assertion `not \
+           isinstance(x.__add__(1),int)` will always fail." ])
     ~bottom:true
     ["x", Type.integer]
     "assert not isinstance(x + 1, int)"
@@ -1428,10 +1446,11 @@ let test_forward_statement _ =
   assert_forward ["y", Type.integer] "pass" ["y", Type.integer]
 
 
-let test_forward _ =
+let test_forward context =
+  let resolution = ScratchProject.setup ~context [] |> ScratchProject.build_resolution in
   let create =
     let module Create = Create (DefaultContext) in
-    Create.create
+    Create.create ~resolution
   in
   let module State = State (DefaultContext) in
   let assert_state_equal =
@@ -1466,19 +1485,16 @@ let test_forward _ =
   assert_forward ~postcondition_bottom:true [] "sys.exit(1)" []
 
 
-let test_coverage _ =
+let test_coverage context =
   let assert_coverage source expected =
     let coverage =
-      let environment = Test.environment () in
+      let project = ScratchProject.setup ~context ["coverage_test.py", source] in
+      let sources, _, environment = ScratchProject.build_environment project in
+      let source = List.hd_exn sources in
+      let configuration = ScratchProject.configuration_of project in
       let global_resolution = Environment.resolution environment () in
-      let handle = "coverage_test.py" in
-      let qualifier = Reference.create "coverage_test" in
-      TypeCheck.run
-        ~configuration:Test.mock_configuration
-        ~global_resolution
-        ~source:(parse ~handle source)
-      |> ignore;
-      Coverage.get ~qualifier |> fun coverage -> Option.value_exn coverage
+      TypeCheck.run ~configuration ~global_resolution ~source |> ignore;
+      Coverage.get ~qualifier:!&"coverage_test" |> fun coverage -> Option.value_exn coverage
     in
     assert_equal ~printer:Coverage.show expected coverage
   in
@@ -1511,9 +1527,12 @@ type method_call = {
   dispatch: Dependencies.Callgraph.dispatch;
 }
 
-let test_calls _ =
+let test_calls context =
   let assert_calls source calls =
-    let source = parse ~handle:"qualifier.py" source |> Preprocessing.preprocess in
+    let project = ScratchProject.setup ~context ["qualifier.py", source] in
+    let sources, _, environment = ScratchProject.build_environment project in
+    let source = List.hd_exn sources in
+    let configuration = ScratchProject.configuration_of project in
     (* Clear dependencies for all defines. *)
     let clear_calls
         { Node.value = { Statement.Define.signature = { Statement.Define.name; _ }; _ }; _ }
@@ -1522,9 +1541,8 @@ let test_calls _ =
     in
     Preprocessing.defines ~include_stubs:true ~include_nested:true ~include_toplevels:true source
     |> List.iter ~f:clear_calls;
-    let environment = Test.environment ~sources:(source :: Test.typeshed_stubs ()) () in
     let global_resolution = Environment.resolution environment () in
-    TypeCheck.run ~configuration:Test.mock_configuration ~global_resolution ~source |> ignore;
+    TypeCheck.run ~configuration ~global_resolution ~source |> ignore;
 
     (* Check calls. *)
     let assert_calls (caller, callees) =

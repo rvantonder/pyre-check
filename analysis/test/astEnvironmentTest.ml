@@ -28,7 +28,7 @@ let test_basic context =
       def baz() -> int:
         return 42
       |} in
-  let { ScratchProject.configuration; module_tracker } =
+  let { ScratchProject.configuration; module_tracker; _ } =
     ScratchProject.setup ~context [handle_a, source_a; handle_b, source_b; handle_c, source_c]
   in
   let { Configuration.Analysis.local_root; _ } = configuration in
@@ -87,7 +87,7 @@ let test_basic context =
     assert_no_source ~get_source !&"c"
   in
   let () =
-    let read_only_environment = AstEnvironment.ReadOnly.create ast_environment in
+    let read_only_environment = AstEnvironment.read_only ast_environment in
     let get_source = AstEnvironment.ReadOnly.get_source read_only_environment in
     assert_source ~get_source ~expected:source_a !&"a";
     assert_source ~get_source ~expected:source_b !&"b";

@@ -6,7 +6,7 @@ open Test
 open ClassHierarchy
 
 let connect ?(parameters = Type.OrderedTypes.Concrete []) handler ~predecessor ~successor =
-  connect ~parameters handler ~predecessor ~successor
+  MockClassHierarchyHandler.connect ~parameters handler ~predecessor ~successor
 
 
 let ( ! ) concretes = Type.OrderedTypes.Concrete concretes
@@ -15,8 +15,9 @@ let ( ! ) concretes = Type.OrderedTypes.Concrete concretes
  *  0 - 2
  *    X
  *  1 - 3 *)
-let butterfly =
-  let order = Builder.create () |> handler in
+let butterfly, butterfly_indices =
+  let order = MockClassHierarchyHandler.create () in
+  let open MockClassHierarchyHandler in
   insert order "0";
   insert order "1";
   insert order "2";
@@ -25,7 +26,7 @@ let butterfly =
   connect order ~predecessor:"0" ~successor:"3";
   connect order ~predecessor:"1" ~successor:"2";
   connect order ~predecessor:"1" ~successor:"3";
-  order
+  handler order, Hashtbl.keys order.annotations
 
 
 (*          0 - 3
@@ -33,9 +34,10 @@ let butterfly =
  *          BOTTOM  - b - 1      TOP
  *          |  \       /
  *          4 -- 2 --- *)
-let order =
+let order, order_indices =
   let bottom = "bottom" in
-  let order = Builder.create () |> handler in
+  let order = MockClassHierarchyHandler.create () in
+  let open MockClassHierarchyHandler in
   insert order bottom;
   insert order "0";
   insert order "1";
@@ -50,11 +52,12 @@ let order =
   connect order ~predecessor:bottom ~successor:"1";
   connect order ~predecessor:bottom ~successor:"2";
   connect order ~predecessor:bottom ~successor:"4";
-  order
+  handler order, Hashtbl.keys order.annotations
 
 
 let diamond_order =
-  let order = Builder.create () |> handler in
+  let order = MockClassHierarchyHandler.create () in
+  let open MockClassHierarchyHandler in
   insert order "A";
   insert order "B";
   insert order "C";
@@ -63,7 +66,7 @@ let diamond_order =
   connect order ~predecessor:"D" ~successor:"C";
   connect order ~predecessor:"B" ~successor:"A";
   connect order ~predecessor:"C" ~successor:"A";
-  order
+  handler order
 
 
 (*
@@ -78,14 +81,15 @@ let diamond_order =
  * BOTTOM
  *)
 let triangle_order =
-  let order = Builder.create () |> handler in
+  let order = MockClassHierarchyHandler.create () in
+  let open MockClassHierarchyHandler in
   insert order "A";
   insert order "B";
   insert order "C";
   connect order ~predecessor:"B" ~successor:"A";
   connect order ~predecessor:"C" ~successor:"B";
   connect order ~predecessor:"C" ~successor:"A";
-  order
+  handler order
 
 
 let test_method_resolution_order_linearize _ =
@@ -93,10 +97,7 @@ let test_method_resolution_order_linearize _ =
     assert_equal
       ~printer:(List.fold ~init:"" ~f:(fun sofar next -> sofar ^ Type.Primitive.show next ^ " "))
       expected
-      (method_resolution_order_linearize
-         order
-         annotation
-         ~get_successors:(Handler.find (Handler.edges ())))
+      (method_resolution_order_linearize order annotation ~get_successors:Handler.edges)
   in
   assert_method_resolution_order butterfly "3" ["3"];
   assert_method_resolution_order butterfly "0" ["0"; "3"; "2"];
@@ -138,6 +139,7 @@ let test_greatest_lower_bound _ =
     let actual = greatest_lower_bound order type1 type2 |> List.sort ~compare:String.compare in
     assert_equal ~printer:(List.to_string ~f:Fn.id) actual expected
   in
+  let (module H : ClassHierarchy.Handler) = diamond_order in
   assert_greatest_lower_bound ~order:diamond_order "A" "C" ["C"];
   assert_greatest_lower_bound ~order:diamond_order "A" "B" ["B"];
   assert_greatest_lower_bound ~order:diamond_order "A" "D" ["D"];
@@ -146,111 +148,29 @@ let test_greatest_lower_bound _ =
   assert_greatest_lower_bound ~order:butterfly "2" "3" ["0"; "1"]
 
 
-let test_deduplicate _ =
-  let (module Handler : Handler) =
-    let order = Builder.create () |> handler in
-    insert order "0";
-    insert order "1";
-    connect order ~parameters:![Type.Top; Type.Top] ~predecessor:"0" ~successor:"1";
-    connect order ~parameters:![Type.Top] ~predecessor:"0" ~successor:"1";
-    deduplicate order ~annotations:["0"; "1"];
-    order
-  in
-  let index_of annotation = Handler.find_unsafe (Handler.indices ()) annotation in
-  let module TargetAsserter (ListOrSet : Target.ListOrSet) = struct
-    let assert_targets edges from target parameters create =
-      assert_equal
-        ~cmp:ListOrSet.equal
-        ~printer:(ListOrSet.to_string ~f:Target.show)
-        (Handler.find_unsafe edges (index_of from))
-        (create { Target.target = index_of target; parameters })
-  end
-  in
-  let module ForwardAsserter = TargetAsserter (Target.List) in
-  let module BackwardsAsserter = TargetAsserter (Target.Set) in
-  ForwardAsserter.assert_targets (Handler.edges ()) "0" "1" ![Type.Top] (fun target -> [target]);
-  BackwardsAsserter.assert_targets
-    (Handler.backedges ())
-    "1"
-    "0"
-    ![Type.Top]
-    (fun target -> Target.Set.of_list [target])
-
-
-let test_remove_extra_edges_to_object _ =
-  (* 0 -> 1 -> 2 -> object
-   *  |----^         ^
-   *  |--------------^
-   *)
-  let (module Handler : Handler) =
-    let order = Builder.create () |> handler in
-    insert order "0";
-    insert order "1";
-    insert order "2";
-    insert order "object";
-    connect order ~predecessor:"0" ~successor:"1";
-    connect order ~predecessor:"0" ~successor:"object";
-    connect order ~predecessor:"1" ~successor:"2";
-    connect order ~predecessor:"2" ~successor:"object";
-    remove_extra_edges_to_object order ["0"; "1"; "2"; "object"];
-    order
-  in
-  let zero_index = Handler.find_unsafe (Handler.indices ()) "0" in
-  let one_index = Handler.find_unsafe (Handler.indices ()) "1" in
-  let two_index = Handler.find_unsafe (Handler.indices ()) "2" in
-  let object_index = Handler.find_unsafe (Handler.indices ()) "object" in
-  assert_equal
-    (Handler.find_unsafe (Handler.edges ()) zero_index)
-    [{ Target.target = one_index; parameters = ![] }];
-  assert_equal
-    ~cmp:Target.Set.equal
-    (Handler.find_unsafe (Handler.backedges ()) object_index)
-    (Target.Set.of_list [{ Target.target = two_index; parameters = ![] }])
-
-
-let test_connect_annotations_to_top _ =
-  (* Partial partial order:
-   *  0 - 2
-   *  |
-   *  1   object *)
-  let order =
-    let order = Builder.create () |> handler in
-    insert order "0";
-    insert order "1";
-    insert order "2";
-    insert order "object";
-    connect order ~predecessor:"0" ~successor:"2";
-    connect order ~predecessor:"0" ~successor:"1";
-    connect_annotations_to_object order ["0"; "1"; "2"; "object"];
-    order
-  in
-  assert_equal (least_upper_bound order "1" "2") ["object"];
-
-  (* Ensure that the backedge gets added as well *)
-  assert_equal (greatest_lower_bound order "1" "object") ["1"]
-
-
 let test_check_integrity _ =
-  check_integrity order;
-  check_integrity butterfly;
+  check_integrity order ~indices:order_indices;
+  check_integrity butterfly ~indices:butterfly_indices;
 
-  (* 0 <-> 1 *)
-  let order =
-    let order = Builder.create () |> handler in
+  (*(* 0 <-> 1 *)*)
+  let order, indices =
+    let order = MockClassHierarchyHandler.create () in
+    let open MockClassHierarchyHandler in
     insert order "0";
     insert order "1";
     connect order ~predecessor:"0" ~successor:"1";
     connect order ~predecessor:"1" ~successor:"0";
-    order
+    handler order, Hashtbl.keys order.annotations
   in
-  assert_raises Cyclic (fun _ -> check_integrity order);
+  assert_raises Cyclic (fun _ -> check_integrity order ~indices);
 
   (* 0 -> 1
    * ^    |
    *  \   v
    * .  - 2 -> 3 *)
-  let order =
-    let order = Builder.create () |> handler in
+  let order, indices =
+    let order = MockClassHierarchyHandler.create () in
+    let open MockClassHierarchyHandler in
     insert order "0";
     insert order "1";
     insert order "2";
@@ -259,22 +179,24 @@ let test_check_integrity _ =
     connect order ~predecessor:"1" ~successor:"2";
     connect order ~predecessor:"2" ~successor:"0";
     connect order ~predecessor:"2" ~successor:"3";
-    order
+    handler order, Hashtbl.keys order.annotations
   in
-  assert_raises Cyclic (fun _ -> check_integrity order)
+  assert_raises Cyclic (fun _ -> check_integrity order ~indices)
 
 
 let test_to_dot _ =
-  let order =
-    let order = Builder.create () |> handler in
+  let order, keys =
+    let order = MockClassHierarchyHandler.create () in
+    let open MockClassHierarchyHandler in
     insert order "0";
     insert order "1";
     insert order "2";
     insert order "object";
     connect order ~predecessor:"0" ~successor:"2";
     connect order ~predecessor:"0" ~successor:"1" ~parameters:![Type.string];
-    connect_annotations_to_object order ["0"; "1"; "2"; "object"];
-    order
+
+    (*connect_annotations_to_object order ["0"; "1"; "2"; "object"];*)
+    handler order, Hashtbl.keys order.annotations
   in
   let (module Handler) = order in
   assert_equal
@@ -285,24 +207,23 @@ let test_to_dot _ =
         453441034[label="1"]
         564400327[label="2"]
         680650890[label="0"]
-        453441034 -> 343776663
-        564400327 -> 343776663
         680650890 -> 453441034[label="(str)"]
         680650890 -> 564400327
       }
     |}
     |> Test.trim_extra_indentation )
-    ("\n" ^ to_dot order)
+    ("\n" ^ to_dot order ~indices:keys)
 
 
 let test_variables _ =
   let order =
-    let order = Builder.create () |> handler in
+    let order = MockClassHierarchyHandler.create () in
+    let open MockClassHierarchyHandler in
     insert order "typing.Generic";
     insert order "A";
     insert order "B";
     connect order ~parameters:![Type.variable "T"] ~predecessor:"A" ~successor:"typing.Generic";
-    order
+    handler order
   in
   let assert_variables ~expected source = assert_equal expected (variables order source) in
   assert_variables ~expected:None "B";
@@ -313,11 +234,12 @@ let test_variables _ =
 
 let test_is_instantiated _ =
   let order =
-    let order = Builder.create () |> handler in
+    let order = MockClassHierarchyHandler.create () in
+    let open MockClassHierarchyHandler in
     insert order "typing.Generic";
     insert order "A";
     insert order "B";
-    order
+    handler order
   in
   assert_true (is_instantiated order (Type.Primitive "A"));
   assert_true (is_instantiated order (Type.Primitive "B"));
@@ -332,65 +254,16 @@ let test_is_instantiated _ =
     (is_instantiated order (Type.parametric "C" ![Type.Primitive "A"; Type.Primitive "B"]))
 
 
-let test_disconnect_successors _ =
-  let order () =
-    let order = Builder.create () |> handler in
-    insert order "a";
-    insert order "b";
-    insert order "1";
-    insert order "2";
-    connect order ~predecessor:"a" ~successor:"1";
-    connect order ~predecessor:"b" ~successor:"1";
-    connect order ~predecessor:"1" ~successor:"2";
-    order
-  in
-  let assert_backedges_equal wrapped_left unwrapped_right =
-    assert_equal ~cmp:Target.Set.equal wrapped_left (Target.Set.of_list unwrapped_right)
-  in
-  let () =
-    let (module Handler) = order () in
-    let index key = Handler.find_unsafe (Handler.indices ()) key in
-    disconnect_successors (module Handler) ["1"];
-    assert_equal (Handler.find_unsafe (Handler.edges ()) (index "1")) [];
-    assert_backedges_equal (Handler.find_unsafe (Handler.backedges ()) (index "2")) [];
-    assert_equal
-      (Handler.find_unsafe (Handler.edges ()) (index "a"))
-      [{ Target.target = index "1"; parameters = ![] }]
-  in
-  let () =
-    let (module Handler) = order () in
-    let index key = Handler.find_unsafe (Handler.indices ()) key in
-    disconnect_successors (module Handler) ["a"];
-    assert_equal (Handler.find_unsafe (Handler.edges ()) (index "a")) [];
-    assert_backedges_equal
-      (Handler.find_unsafe (Handler.backedges ()) (index "1"))
-      [{ Target.target = index "b"; parameters = ![] }]
-  in
-  let () =
-    let (module Handler) = order () in
-    let index key = Handler.find_unsafe (Handler.indices ()) key in
-    disconnect_successors (module Handler) ["b"];
-    assert_equal (Handler.find_unsafe (Handler.edges ()) (index "b")) [];
-    assert_backedges_equal
-      (Handler.find_unsafe (Handler.backedges ()) (index "1"))
-      [{ Target.target = index "a"; parameters = ![] }]
-  in
-  let () =
-    let (module Handler) = order () in
-    let index key = Handler.find_unsafe (Handler.indices ()) key in
-    disconnect_successors (module Handler) ["a"; "b"];
-    assert_equal (Handler.find_unsafe (Handler.edges ()) (index "a")) [];
-    assert_equal (Handler.find_unsafe (Handler.edges ()) (index "b")) [];
-    assert_backedges_equal (Handler.find_unsafe (Handler.backedges ()) (index "1")) []
-  in
-  ()
-
-
-let parametric_order =
-  let order = Builder.default () |> handler in
+let parametric_order_base =
+  let order = MockClassHierarchyHandler.create () in
+  let open MockClassHierarchyHandler in
   let variable = Type.variable "_T" in
   let other_variable = Type.variable "_T2" in
   let variable_covariant = Type.variable "_T_co" ~variance:Covariant in
+  insert order "typing.Generic";
+  insert order "int";
+  insert order "str";
+  insert order "bool";
   insert order "list";
   connect order ~predecessor:"list" ~successor:"typing.Generic" ~parameters:![variable];
 
@@ -455,45 +328,78 @@ let parametric_order =
   order
 
 
+let parametric_order = MockClassHierarchyHandler.handler parametric_order_base
+
 let variadic_order =
   let variadic = Type.Variable.Variadic.List.create "Ts" in
-  let order = parametric_order in
+  let simple_variadic =
+    Type.OrderedTypes.Concatenation
+      (Type.OrderedTypes.Concatenation.create
+         (Type.OrderedTypes.Concatenation.Middle.create_bare variadic))
+  in
+  let order = parametric_order_base in
+  let open MockClassHierarchyHandler in
   insert order "UserTuple";
-  connect
-    order
-    ~predecessor:"UserTuple"
-    ~successor:"typing.Generic"
-    ~parameters:(Variable variadic);
+  connect order ~predecessor:"UserTuple" ~successor:"typing.Generic" ~parameters:simple_variadic;
 
   (* Contrived example *)
   connect
     order
     ~predecessor:"UserTuple"
     ~successor:"list"
-    ~parameters:(Concrete [Type.Tuple (Bounded (Variable variadic))]);
+    ~parameters:
+      (Concrete
+         [ Type.Tuple
+             (Bounded
+                (Concatenation
+                   (Type.OrderedTypes.Concatenation.create
+                      (Type.OrderedTypes.Concatenation.Middle.create_bare variadic)))) ]);
   insert order "SimpleTupleChild";
   connect
     order
     ~predecessor:"SimpleTupleChild"
     ~successor:"typing.Generic"
-    ~parameters:(Variable variadic);
-  connect
-    order
-    ~predecessor:"SimpleTupleChild"
-    ~successor:"UserTuple"
-    ~parameters:(Variable variadic);
+    ~parameters:simple_variadic;
+  connect order ~predecessor:"SimpleTupleChild" ~successor:"UserTuple" ~parameters:simple_variadic;
   insert order "TupleOfLists";
-  connect
-    order
-    ~predecessor:"TupleOfLists"
-    ~successor:"typing.Generic"
-    ~parameters:(Variable variadic);
+  connect order ~predecessor:"TupleOfLists" ~successor:"typing.Generic" ~parameters:simple_variadic;
   connect
     order
     ~predecessor:"TupleOfLists"
     ~successor:"UserTuple"
-    ~parameters:(Map (Type.OrderedTypes.Map.create ~mappers:["list"] ~variable:variadic));
-  order
+    ~parameters:
+      (Concatenation
+         (Type.OrderedTypes.Concatenation.create
+            (Type.OrderedTypes.Concatenation.Middle.create ~mappers:["list"] ~variable:variadic)));
+  insert order "DTypedTensor";
+  connect
+    order
+    ~predecessor:"DTypedTensor"
+    ~successor:"typing.Generic"
+    ~parameters:
+      (Concatenation
+         (Type.OrderedTypes.Concatenation.create
+            ~head:[Type.Variable (Type.Variable.Unary.create "DType")]
+            (Type.OrderedTypes.Concatenation.Middle.create_bare variadic)));
+  insert order "IntTensor";
+  connect
+    order
+    ~predecessor:"IntTensor"
+    ~successor:"typing.Generic"
+    ~parameters:
+      (Concatenation
+         (Type.OrderedTypes.Concatenation.create
+            (Type.OrderedTypes.Concatenation.Middle.create_bare variadic)));
+  connect
+    order
+    ~predecessor:"IntTensor"
+    ~successor:"DTypedTensor"
+    ~parameters:
+      (Concatenation
+         (Type.OrderedTypes.Concatenation.create
+            ~head:[Type.integer]
+            (Type.OrderedTypes.Concatenation.Middle.create_bare variadic)));
+  handler order
 
 
 let test_instantiate_successors_parameters _ =
@@ -588,6 +494,31 @@ let test_instantiate_successors_parameters _ =
        ~source:(Type.parametric "TupleOfLists" ![Type.integer; Type.string; Type.bool])
        ~target:"UserTuple")
     (Some ![Type.list Type.integer; Type.list Type.string; Type.list Type.bool]);
+
+  (* Concatenation *)
+  assert_equal
+    ~printer
+    (instantiate_successors_parameters
+       variadic_order
+       ~source:(Type.parametric "IntTensor" ![Type.literal_integer 4; Type.literal_integer 2])
+       ~target:"DTypedTensor")
+    (Some ![Type.integer; Type.literal_integer 4; Type.literal_integer 2]);
+  let list_variadic = Type.Variable.Variadic.List.create "Ts" in
+  (* Should be Concatenate[int, Ts, Literal[2]], but concatenation v concatenation work is not done
+     yet *)
+  assert_equal
+    ~printer
+    (instantiate_successors_parameters
+       variadic_order
+       ~source:
+         (Type.parametric
+            "IntTensor"
+            (Type.OrderedTypes.Concatenation
+               (Type.OrderedTypes.Concatenation.create
+                  ~tail:[Type.literal_integer 2]
+                  (Type.OrderedTypes.Concatenation.Middle.create_bare list_variadic))))
+       ~target:"DTypedTensor")
+    (Some Any);
   ()
 
 
@@ -655,13 +586,9 @@ let test_instantiate_predecessors_parameters _ =
 let () =
   "order"
   >::: [ "check_integrity" >:: test_check_integrity;
-         "connect_annotations_to_top" >:: test_connect_annotations_to_top;
-         "deduplicate" >:: test_deduplicate;
-         "disconnect_successors" >:: test_disconnect_successors;
          "greatest_lower_bound" >:: test_greatest_lower_bound;
          "is_instantiated" >:: test_is_instantiated;
          "least_upper_bound" >:: test_least_upper_bound;
-         "remove_extra_edges" >:: test_remove_extra_edges_to_object;
          "successors" >:: test_successors;
          "to_dot" >:: test_to_dot;
          "variables" >:: test_variables;

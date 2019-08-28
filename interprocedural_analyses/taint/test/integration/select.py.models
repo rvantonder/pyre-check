@@ -1,0 +1,495 @@
+@generated
+{
+  "kind": "model",
+  "data": {
+    "callable": "select.first_index",
+    "sources": [
+      {
+        "port": "result",
+        "taint": [
+          {
+            "root": {
+              "filename": "select.py",
+              "line": 13,
+              "start": 8,
+              "end": 23
+            },
+            "leaves": [
+              {
+                "kind": "Test",
+                "name": "__test_source",
+                "on_all_flows": true
+              }
+            ],
+            "features": [
+              { "always-via": "special_source" },
+              { "always-has": "first-index" },
+              { "always-first-index": "access_token" }
+            ]
+          }
+        ]
+      }
+    ],
+    "sinks": [],
+    "tito": []
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "select.first_index_numeric",
+    "sources": [
+      {
+        "port": "result",
+        "taint": [
+          {
+            "root": {
+              "filename": "select.py",
+              "line": 18,
+              "start": 8,
+              "end": 23
+            },
+            "leaves": [
+              {
+                "kind": "Test",
+                "name": "__test_source",
+                "on_all_flows": true
+              }
+            ],
+            "features": [
+              { "always-via": "special_source" },
+              { "always-has": "first-index" },
+              { "always-first-index": "<numeric>" }
+            ]
+          }
+        ]
+      }
+    ],
+    "sinks": [],
+    "tito": []
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "select.first_index_unknown",
+    "sources": [
+      {
+        "port": "result",
+        "taint": [
+          {
+            "root": {
+              "filename": "select.py",
+              "line": 23,
+              "start": 8,
+              "end": 23
+            },
+            "leaves": [
+              {
+                "kind": "Test",
+                "name": "__test_source",
+                "on_all_flows": true
+              }
+            ],
+            "features": [
+              { "always-via": "special_source" },
+              { "always-has": "first-index" },
+              { "always-first-index": "<unknown>" }
+            ]
+          }
+        ]
+      }
+    ],
+    "sinks": [],
+    "tito": []
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "select.return_is_RCE",
+    "sources": [
+      {
+        "port": "result",
+        "taint": [
+          {
+            "root": {
+              "filename": "select.py",
+              "line": 33,
+              "start": 11,
+              "end": 22
+            },
+            "tito": [ { "line": 33, "start": 11, "end": 22 } ],
+            "leaves": [
+              {
+                "kind": "UserControlled",
+                "name": "Obj{django.http.Request.GET}",
+                "on_all_flows": true
+              }
+            ],
+            "features": [
+              { "always-via": "tito" },
+              { "always-has": "first-index" },
+              { "always-first-index": "payload" }
+            ]
+          }
+        ]
+      }
+    ],
+    "sinks": [
+      {
+        "port": "result",
+        "taint": [
+          { "decl": null, "leaves": [ { "kind": "RemoteCodeExecution" } ] }
+        ]
+      }
+    ],
+    "tito": [
+      {
+        "port": "formal(request)[GET]",
+        "taint": [
+          {
+            "decl": null,
+            "tito": [ { "line": 33, "start": 11, "end": 22 } ],
+            "leaves": [ { "kind": "LocalReturn", "name": "" } ],
+            "features": [ { "always-via": "tito" } ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "issue",
+  "data": {
+    "callable": "select.return_is_RCE",
+    "callable_line": 32,
+    "code": 5001,
+    "line": 33,
+    "start": 4,
+    "end": 48,
+    "filename": "select.py",
+    "message":
+      "Possible shell injection. Data from [UserControlled] source(s) may reach [RemoteCodeExecution] sink(s)",
+    "traces": [
+      {
+        "name": "forward",
+        "roots": [
+          {
+            "root": {
+              "filename": "select.py",
+              "line": 33,
+              "start": 11,
+              "end": 22
+            },
+            "tito": [ { "line": 33, "start": 11, "end": 22 } ],
+            "leaves": [
+              {
+                "kind": "UserControlled",
+                "name": "Obj{django.http.Request.GET}",
+                "on_all_flows": true
+              }
+            ],
+            "features": [
+              { "always-via": "tito" },
+              { "always-has": "first-index" },
+              { "always-first-index": "payload" }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "backward",
+        "roots": [
+          {
+            "root": {
+              "filename": "select.py",
+              "line": 32,
+              "start": 51,
+              "end": 55
+            },
+            "leaves": [ { "kind": "RemoteCodeExecution" } ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "select.view_entry_field",
+    "sources": [
+      {
+        "port": "formal(request)",
+        "taint": [
+          { "decl": null, "leaves": [ { "kind": "UserControlled" } ] }
+        ]
+      }
+    ],
+    "sinks": [
+      {
+        "port": "formal(request)[payload]",
+        "taint": [
+          {
+            "root": {
+              "filename": "select.py",
+              "line": 5,
+              "start": 9,
+              "end": 24
+            },
+            "leaves": [
+              {
+                "kind": "RemoteCodeExecution",
+                "name": "eval",
+                "on_all_flows": true
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "tito": []
+  }
+}
+{
+  "kind": "issue",
+  "data": {
+    "callable": "select.view_entry_field",
+    "callable_line": 4,
+    "code": 5001,
+    "line": 5,
+    "start": 9,
+    "end": 24,
+    "filename": "select.py",
+    "message":
+      "Possible shell injection. Data from [UserControlled] source(s) may reach [RemoteCodeExecution] sink(s)",
+    "traces": [
+      {
+        "name": "forward",
+        "roots": [
+          {
+            "root": {
+              "filename": "select.py",
+              "line": 4,
+              "start": 21,
+              "end": 28
+            },
+            "leaves": [ { "kind": "UserControlled" } ],
+            "features": [
+              { "always-has": "first-field" },
+              { "always-first-field": "payload" }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "backward",
+        "roots": [
+          {
+            "root": {
+              "filename": "select.py",
+              "line": 5,
+              "start": 9,
+              "end": 24
+            },
+            "leaves": [
+              {
+                "kind": "RemoteCodeExecution",
+                "name": "eval",
+                "on_all_flows": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "select.view_entry_get",
+    "sources": [],
+    "sinks": [
+      {
+        "port": "formal(request)[GET]",
+        "taint": [
+          {
+            "root": {
+              "filename": "select.py",
+              "line": 29,
+              "start": 9,
+              "end": 46
+            },
+            "tito": [ { "line": 29, "start": 9, "end": 20 } ],
+            "leaves": [
+              {
+                "kind": "RemoteCodeExecution",
+                "name": "eval",
+                "on_all_flows": true
+              }
+            ],
+            "features": [ { "always-via": "tito" } ]
+          }
+        ]
+      }
+    ],
+    "tito": []
+  }
+}
+{
+  "kind": "issue",
+  "data": {
+    "callable": "select.view_entry_get",
+    "callable_line": 28,
+    "code": 5001,
+    "line": 29,
+    "start": 9,
+    "end": 46,
+    "filename": "select.py",
+    "message":
+      "Possible shell injection. Data from [UserControlled] source(s) may reach [RemoteCodeExecution] sink(s)",
+    "traces": [
+      {
+        "name": "forward",
+        "roots": [
+          {
+            "root": {
+              "filename": "select.py",
+              "line": 29,
+              "start": 9,
+              "end": 20
+            },
+            "tito": [ { "line": 29, "start": 9, "end": 20 } ],
+            "leaves": [
+              {
+                "kind": "UserControlled",
+                "name": "Obj{django.http.Request.GET}",
+                "on_all_flows": true
+              }
+            ],
+            "features": [
+              { "always-via": "tito" },
+              { "always-has": "first-index" },
+              { "always-first-index": "payload" }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "backward",
+        "roots": [
+          {
+            "root": {
+              "filename": "select.py",
+              "line": 29,
+              "start": 9,
+              "end": 46
+            },
+            "leaves": [
+              {
+                "kind": "RemoteCodeExecution",
+                "name": "eval",
+                "on_all_flows": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
+{
+  "kind": "model",
+  "data": {
+    "callable": "select.view_entry_index",
+    "sources": [
+      {
+        "port": "formal(request)",
+        "taint": [
+          { "decl": null, "leaves": [ { "kind": "UserControlled" } ] }
+        ]
+      }
+    ],
+    "sinks": [
+      {
+        "port": "formal(request)[GET][payload]",
+        "taint": [
+          {
+            "root": {
+              "filename": "select.py",
+              "line": 9,
+              "start": 9,
+              "end": 31
+            },
+            "leaves": [
+              {
+                "kind": "RemoteCodeExecution",
+                "name": "eval",
+                "on_all_flows": true
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "tito": []
+  }
+}
+{
+  "kind": "issue",
+  "data": {
+    "callable": "select.view_entry_index",
+    "callable_line": 8,
+    "code": 5001,
+    "line": 9,
+    "start": 9,
+    "end": 31,
+    "filename": "select.py",
+    "message":
+      "Possible shell injection. Data from [UserControlled] source(s) may reach [RemoteCodeExecution] sink(s)",
+    "traces": [
+      {
+        "name": "forward",
+        "roots": [
+          {
+            "root": {
+              "filename": "select.py",
+              "line": 8,
+              "start": 21,
+              "end": 28
+            },
+            "leaves": [ { "kind": "UserControlled" } ],
+            "features": [
+              { "always-has": "first-index" },
+              { "always-has": "first-field" },
+              { "always-first-index": "payload" },
+              { "always-first-field": "GET" }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "backward",
+        "roots": [
+          {
+            "root": {
+              "filename": "select.py",
+              "line": 9,
+              "start": 9,
+              "end": 31
+            },
+            "leaves": [
+              {
+                "kind": "RemoteCodeExecution",
+                "name": "eval",
+                "on_all_flows": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

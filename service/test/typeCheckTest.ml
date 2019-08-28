@@ -21,21 +21,31 @@ let assert_errors ?filter_directories ?ignore_all_errors ?search_path ~root ~fil
   let scheduler = Scheduler.mock () in
   List.iter ~f:File.write files;
   let module_tracker = Analysis.ModuleTracker.create configuration in
-  let source_paths, _ = Service.Parser.parse_all ~configuration ~scheduler module_tracker in
-  let environment = Service.Environment.shared_handler in
-  let qualifiers = List.map source_paths ~f:(fun { Ast.SourcePath.qualifier; _ } -> qualifier) in
-  Test.populate_shared_memory ~configuration qualifiers;
-  Test.populate ~configuration environment (typeshed_stubs ~include_helper_builtins:false ());
-  let actual_errors =
-    Service.Check.analyze_sources
-      ~scheduler
-      ~configuration
-      ~environment
-      (Analysis.ModuleTracker.source_paths module_tracker)
-    |> List.map ~f:(Analysis.Error.description ~show_error_traces:false)
+  let sources, ast_environment =
+    Service.Parser.parse_all ~configuration ~scheduler module_tracker
   in
-  List.map source_paths ~f:(fun { Ast.SourcePath.qualifier; _ } -> qualifier)
-  |> Analysis.Environment.purge environment;
+  let qualifiers = List.map sources ~f:(fun { Ast.Source.qualifier; _ } -> qualifier) in
+  let all_sources = List.append (typeshed_stubs ~include_helper_builtins:false ()) sources in
+  let all_qualifiers = List.map all_sources ~f:(fun { Ast.Source.qualifier; _ } -> qualifier) in
+  let environment =
+    let ast_environment = Analysis.AstEnvironment.read_only ast_environment in
+    Service.Environment.populate_shared_memory
+      ~configuration
+      ~scheduler
+      ~ast_environment
+      all_sources
+  in
+  let actual_errors =
+    let ast_environment = Analysis.Environment.ast_environment environment in
+    Service.Check.analyze_sources ~scheduler ~configuration ~environment sources
+    |> List.map ~f:(fun error ->
+           Analysis.Error.instantiate
+             ~lookup:(Analysis.AstEnvironment.ReadOnly.get_relative ast_environment)
+             error
+           |> Analysis.Error.Instantiated.description ~show_error_traces:false)
+  in
+  Analysis.Environment.purge environment all_qualifiers;
+  Analysis.AstEnvironment.remove_sources ast_environment qualifiers;
   assert_equal
     ~printer:(List.to_string ~f:ident)
     ~cmp:(List.equal String.equal)
@@ -79,9 +89,6 @@ let type_check_sources_list_test context =
 
 
 let test_filter_directories context =
-  let root = Path.create_absolute (bracket_tmpdir context) in
-  let check_path = Path.create_relative ~root ~relative:"check/a.py" in
-  let ignore_path = Path.create_relative ~root ~relative:"ignore/b.py" in
   let content =
     {|
       class C:
@@ -94,6 +101,9 @@ let test_filter_directories context =
     |}
     |> Test.trim_extra_indentation
   in
+  let root = Path.create_absolute (bracket_tmpdir context) in
+  let check_path = Path.create_relative ~root ~relative:"check/a.py" in
+  let ignore_path = Path.create_relative ~root ~relative:"ignore/b.py" in
   let files = [File.create ~content check_path; File.create ~content ignore_path] in
   assert_errors
     ~filter_directories:
@@ -103,6 +113,10 @@ let test_filter_directories context =
     [ "Incompatible return type [7]: Expected `C` but got `D`.";
       "Incompatible return type [7]: Expected `C` but got `D`." ];
 
+  let root = Path.create_absolute (bracket_tmpdir context) in
+  let check_path = Path.create_relative ~root ~relative:"check/a.py" in
+  let ignore_path = Path.create_relative ~root ~relative:"ignore/b.py" in
+  let files = [File.create ~content check_path; File.create ~content ignore_path] in
   assert_errors
     ~root
     ~filter_directories:[Path.create_relative ~root ~relative:"check"]

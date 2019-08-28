@@ -44,7 +44,13 @@ module CoverageValue : sig
   val unmarshall : string -> t
 end
 
-module SharedMemory : module type of Memory.WithCache (Reference.Key) (CoverageValue)
+module SharedMemory :
+  Memory.WithCache.S
+    with type t = CoverageValue.t
+     and type key = SharedMemoryKeys.ReferenceKey.t
+     and type key_out = SharedMemoryKeys.ReferenceKey.out
+     and module KeySet = Caml.Set.Make(SharedMemoryKeys.ReferenceKey)
+     and module KeyMap = MyMap.Make(SharedMemoryKeys.ReferenceKey)
 
 val add : t -> qualifier:Reference.t -> unit
 
@@ -57,4 +63,4 @@ type aggregate = {
   source_files: int;
 }
 
-val coverage : number_of_files:int -> sources:Reference.t list -> aggregate
+val coverage : sources:Source.t list -> aggregate

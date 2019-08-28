@@ -1,6 +1,10 @@
-#!/usr/bin/env python3
+# Copyright (c) 2016-present, Facebook, Inc.
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
 
 import logging
+from collections import deque
 from typing import Tuple
 
 from .models import DBID, SharedText, SharedTextKind
@@ -39,10 +43,10 @@ class AddIssueInstanceLeaves(PipelineStep[TraceGraph, TraceGraph]):
             trace_frames.extend(graph.get_issue_instance_trace_frames(instance))
 
         # Explore forward (caller -> callee; issue -> leaf)
-        queue = [(frame, 0) for frame in trace_frames]
+        queue = deque([(frame, 0) for frame in trace_frames])
         depth_by_frame_id = {}
         while len(queue) > 0:
-            trace_frame, depth = queue.pop()
+            trace_frame, depth = queue.popleft()
             trace_frame_id = trace_frame.id.local_id
 
             # Skip repeat frames unless we arrived at them by a shorter path.

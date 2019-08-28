@@ -103,11 +103,17 @@ class AnalysisDirectory:
     def get_root(self) -> str:
         return self._path
 
+    def get_pyre_server_directory(self) -> str:
+        return os.path.join(self.get_root(), ".pyre/server")
+
     def get_filter_root(self) -> List[str]:
         return self._filter_paths or [self.get_root()]
 
     def prepare(self) -> None:
         pass
+
+    def compute_symbolic_links(self) -> Dict[str, str]:
+        return {}
 
     def process_updated_files(self, paths: List[str]) -> UpdatedPaths:
         """
@@ -225,9 +231,10 @@ class SharedAnalysisDirectory(AnalysisDirectory):
             LOG.log(
                 log.PERFORMANCE, "Merged analysis directories in %fs", time() - start
             )
-        self._symbolic_links.update(
-            _compute_symbolic_link_mapping(self.get_root(), self._extensions)
-        )
+        self._symbolic_links.update(self.compute_symbolic_links())
+
+    def compute_symbolic_links(self) -> Dict[str, str]:
+        return _compute_symbolic_link_mapping(self.get_root(), self._extensions)
 
     def process_updated_files(self, paths: List[str]) -> UpdatedPaths:
         """

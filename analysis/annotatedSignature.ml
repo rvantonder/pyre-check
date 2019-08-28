@@ -346,25 +346,7 @@ let select
             | [] -> Some (Type.OrderedTypes.Concrete [])
             | head :: tail ->
                 let concatenate sofar next =
-                  let concatenate sofar =
-                    match sofar, next with
-                    | Type.OrderedTypes.Concrete sofar, Type.OrderedTypes.Concrete next ->
-                        Some (Type.OrderedTypes.Concrete (sofar @ next))
-                    (* Any can masquerade as the empty list *)
-                    | other, Any
-                    | Any, other
-                    | other, Concrete []
-                    | Concrete [], other ->
-                        Some other
-                    | _, Map _
-                    | Map _, _
-                    | Variable _, Variable _
-                    | Concrete _, Variable _
-                    | Variable _, Concrete _ ->
-                        (* TODO(T45636537): support these when we have support for concatenation *)
-                        None
-                  in
-                  sofar >>= concatenate
+                  sofar >>= fun left -> Type.OrderedTypes.concatenate ~left ~right:next
                 in
                 List.fold tail ~f:concatenate ~init:(Some head)
           in
@@ -396,10 +378,10 @@ let select
         extract arguments >>= concatenate >>= solve |> make_signature_match
       in
       match key, data with
-      | Parameter.Variable (Variadic variable), arguments ->
-          bind_arguments_to_variadic ~expected:(Type.OrderedTypes.Variable variable) ~arguments
-      | Parameter.Variable (Map map), arguments ->
-          bind_arguments_to_variadic ~expected:(Type.OrderedTypes.Map map) ~arguments
+      | Parameter.Variable (Concatenation concatenation), arguments ->
+          bind_arguments_to_variadic
+            ~expected:(Type.OrderedTypes.Concatenation concatenation)
+            ~arguments
       | Parameter.Variable _, []
       | Parameter.Keywords _, [] ->
           (* Parameter was not matched, but empty is acceptable for variable arguments and keyword

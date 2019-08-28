@@ -301,6 +301,18 @@ let analyze_define
     results
 
 
+let strip_for_callsite model =
+  let open Result in
+  (* list them to make the type system do its work *)
+  let strip akind (Pkg { kind = ModelPart kind; value = model }) models =
+    let module Analysis = (val get_analysis kind) in
+    let model = Analysis.strip_for_callsite model in
+    Kind.Map.add akind (Pkg { kind = ModelPart kind; value = model }) models
+  in
+  let models = Kind.Map.fold strip model.InterproceduralResult.models Kind.Map.empty in
+  { model with models }
+
+
 let analyze_overrides ({ Fixpoint.iteration; _ } as step) callable =
   let overrides =
     DependencyGraphSharedMemory.get_overriding_types
@@ -325,6 +337,7 @@ let analyze_overrides ({ Fixpoint.iteration; _ } as step) callable =
             override;
           result
       | Some model ->
+          let model = strip_for_callsite model in
           {
             is_obscure = is_obscure || model.is_obscure;
             models = join_models ~iteration models model.models;
@@ -333,6 +346,7 @@ let analyze_overrides ({ Fixpoint.iteration; _ } as step) callable =
     let direct_model =
       Fixpoint.get_model (Callable.get_corresponding_method callable)
       |> Option.value ~default:Result.empty_model
+      |> strip_for_callsite
     in
     List.fold overrides ~f:lookup_and_join ~init:direct_model
   in
@@ -409,7 +423,7 @@ let get_errors results =
   |> List.concat_no_order
 
 
-let externalize_analysis kind callable models results =
+let externalize_analysis ~environment kind callable models results =
   let open Result in
   let merge kind_candidate model_opt result_opt =
     if kind_candidate = kind then
@@ -428,26 +442,28 @@ let externalize_analysis kind callable models results =
     match result_option with
     | None ->
         let module Analysis = (val Result.get_analysis kind1) in
-        Analysis.externalize callable None model
+        Analysis.externalize ~environment callable None model
     | Some (Pkg { kind = ResultPart kind2; value = result }) -> (
       match Result.Kind.are_equal kind1 kind2 with
       | Kind.Equal ->
           let module Analysis = (val Result.get_analysis kind1) in
-          Analysis.externalize callable (Some result) model
+          Analysis.externalize ~environment callable (Some result) model
       | Kind.Distinct -> failwith "kind mismatch" )
   in
   Kind.Map.bindings merged |> List.concat_map ~f:get_summaries
 
 
-let externalize kind callable =
+let externalize ~environment kind callable =
   match Fixpoint.get_model callable with
   | Some model ->
       let results = Fixpoint.get_result callable in
-      externalize_analysis kind callable model.models results
+      externalize_analysis ~environment kind callable model.models results
   | None -> []
 
 
-let emit_externalization kind emitter callable = externalize kind callable |> List.iter ~f:emitter
+let emit_externalization ~environment kind emitter callable =
+  externalize ~environment kind callable |> List.iter ~f:emitter
+
 
 type result = {
   callables_processed: int;
@@ -684,7 +700,7 @@ let extract_errors scheduler ~configuration all_callables =
   |> List.concat_no_order
 
 
-let save_results ~configuration ~analyses all_callables =
+let save_results ~configuration ~environment ~analyses all_callables =
   let emit_json_array_elements out_buffer =
     let seen_element = ref false in
     fun json ->
@@ -717,7 +733,7 @@ let save_results ~configuration ~analyses all_callables =
         Json.to_outbuf out_buffer config;
         Bi_outbuf.add_string out_buffer ",\n";
         Bi_outbuf.add_string out_buffer "\"results\": [\n";
-        List.iter ~f:(emit_externalization kind array_emitter) all_callables;
+        List.iter ~f:(emit_externalization ~environment kind array_emitter) all_callables;
         Bi_outbuf.add_string out_buffer "\n]\n";
         Bi_outbuf.add_string out_buffer "}\n";
         Bi_outbuf.flush_output_writer out_buffer;
@@ -735,6 +751,7 @@ let save_results ~configuration ~analyses all_callables =
           `Assoc
             [ "filename_spec", `String filename_spec;
               "root", `String root;
+              "tool", `String "pysa";
               "version", `String (Version.version ()) ]
         in
         let analysis_metadata = Analysis.metadata () in

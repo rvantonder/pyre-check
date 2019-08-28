@@ -75,6 +75,7 @@ and type_variable_origin =
 and type_variance_origin =
   | Parameter
   | Return
+  | Inheritance of Type.t
 
 and illegal_action_on_incomplete_type =
   | Naming
@@ -138,9 +139,10 @@ type kind =
     }
   | AnalysisFailure of Type.t
   | IllegalAnnotationTarget of Expression.t
-  | ImpossibleIsinstance of {
+  | ImpossibleAssertion of {
       expression: Expression.t;
-      mismatch: mismatch;
+      annotation: Type.t;
+      statement: Statement.t;
     }
   | IncompatibleAttributeType of {
       parent: Type.t;
@@ -214,7 +216,11 @@ type kind =
   | MissingReturnAnnotation of missing_annotation
   | MutuallyRecursiveTypeVariables of Reference.t option
   | NotCallable of Type.t
-  | ProhibitedAny of missing_annotation
+  | ProhibitedAny of {
+      is_type_alias: bool;
+      missing_annotation: missing_annotation;
+    }
+  | RedefinedClass of Reference.t
   | RedundantCast of Type.t
   | RevealedType of {
       expression: Expression.t;
@@ -258,6 +264,7 @@ type kind =
     }
   | UnusedIgnore of int list
   (* Additional errors. *)
+  | DeadStore of Identifier.t
   | Deobfuscation of Source.t
   | UnawaitedAwaitable of unawaited_awaitable
 [@@deriving compare, eq, sexp, show, hash]
@@ -304,4 +311,4 @@ val create_mismatch
   covariant:bool ->
   mismatch
 
-val language_server_hint : t -> bool
+val language_server_hint : kind -> bool

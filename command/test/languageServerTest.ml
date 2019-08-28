@@ -130,8 +130,7 @@ let test_initialize_request_parses _ =
             "didSave": true
           },
           "completion": {
-            "dynamicRegistration": false,
-            "completionItem": { "snippetSupport": true }
+            "dynamicRegistration": false
           },
           "hover": { "dynamicRegistration": false },
           "signatureHelp": { "dynamicRegistration": false },
@@ -417,10 +416,6 @@ let test_initialize_response _ =
         "result": {
           "capabilities": {
             "codeActionProvider": { "codeActionKind": [ "refactor.rewrite" ] },
-            "completionProvider": {
-              "resolveProvider": false,
-              "triggerCharacters": ["."]
-            },
             "definitionProvider": true,
             "executeCommandProvider": { "commands": [ "add_pyre_annotation" ] },
             "hoverProvider": true,
@@ -446,10 +441,6 @@ let test_initialize_response _ =
         "result": {
           "capabilities": {
             "codeActionProvider": { "codeActionKind": [ "refactor.rewrite" ] },
-            "completionProvider": {
-              "resolveProvider": false,
-              "triggerCharacters": ["."]
-            },
             "definitionProvider": true,
             "executeCommandProvider": { "commands": [ "add_pyre_annotation" ] },
             "hoverProvider": true,
@@ -634,10 +625,14 @@ let test_language_server_definition_response context =
   let local_root = bracket_tmpdir context |> Path.create_absolute in
   let assert_response ~id ~location ~expected =
     let message =
-      let configuration = Configuration.Analysis.create ~local_root () in
-      TextDocumentDefinitionResponse.create ~configuration ~id ~location
-      |> TextDocumentDefinitionResponse.to_yojson
-      |> Yojson.Safe.sort
+      let response =
+        match location with
+        | Some { start; stop; path } ->
+            let path = Path.create_relative ~root:local_root ~relative:path in
+            TextDocumentDefinitionResponse.create ~id ~start ~stop ~path
+        | None -> TextDocumentDefinitionResponse.create_empty ~id
+      in
+      TextDocumentDefinitionResponse.to_yojson response |> Yojson.Safe.sort
     in
     let expected = Yojson.Safe.sort expected in
     assert_equal ~printer:Yojson.Safe.pretty_to_string expected message
@@ -650,21 +645,12 @@ let test_language_server_definition_response context =
     ~id:(string_request_id "abcd")
     ~location:None
     ~expected:(`Assoc ["id", `String "abcd"; "jsonrpc", `String "2.0"; "result", `List []]);
-  let add_paths relatives =
-    List.map relatives ~f:Ast.SourcePath.qualifier_of_relative |> Ast.SharedMemory.Sources.remove;
-    let add_source relative =
-      let source = Ast.Source.create ~relative [] in
-      Ast.SharedMemory.Sources.add source
-    in
-    List.iter relatives ~f:add_source
-  in
+
   let touch path = File.create ~content:"" path |> File.write in
   let file = Path.create_relative ~root:local_root ~relative:"a.py" in
   touch file;
   let stub = Path.create_relative ~root:local_root ~relative:"b.pyi" in
   touch stub;
-  let relatives = ["a.py"; "b.pyi"] in
-  add_paths relatives;
   assert_response
     ~id:(int_request_id 1)
     ~location:

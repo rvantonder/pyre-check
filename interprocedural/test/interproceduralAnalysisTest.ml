@@ -7,19 +7,13 @@ open Core
 open OUnit2
 open Ast
 open Interprocedural
+open Test
 
-let configuration = Configuration.Analysis.create ()
-
-let environment ?(sources = []) ?(configuration = configuration) () =
-  let _ = Test.parse "" in
-  (* Make sure Test module is loaded. *)
-  Test.environment ~configuration ~sources ()
-
-
-let setup_environment ?(sources = []) () =
-  let () = Scheduler.Daemon.check_entry_point () in
-  let environment = environment ~sources ~configuration () in
-  Test.populate ~configuration environment sources
+let setup_environment ~context ?(sources = []) () =
+  let _, _, environment =
+    ScratchProject.setup ~context sources |> ScratchProject.build_environment
+  in
+  environment
 
 
 module ResultA = Interprocedural.Result.Make (struct
@@ -41,7 +35,7 @@ module ResultA = Interprocedural.Result.Make (struct
 
   let reached_fixpoint ~iteration:_ ~previous ~next = next <= previous
 
-  let externalize callable result_option model =
+  let externalize ~environment:_ callable result_option model =
     let result_json =
       match result_option with
       | None -> `Null
@@ -55,6 +49,8 @@ module ResultA = Interprocedural.Result.Make (struct
 
 
   let metadata () = `Assoc ["codes", `List [`String "A"]]
+
+  let strip_for_callsite model = model
 end)
 
 module AnalysisA = ResultA.Register (struct
@@ -82,7 +78,7 @@ module ResultB = Interprocedural.Result.Make (struct
 
   let reached_fixpoint ~iteration:_ ~previous ~next = next <= previous
 
-  let externalize callable result_option model =
+  let externalize ~environment:_ callable result_option model =
     let result_json =
       match result_option with
       | None -> `Null
@@ -96,6 +92,8 @@ module ResultB = Interprocedural.Result.Make (struct
 
 
   let metadata () = `Assoc ["codes", `List [`String "B"]]
+
+  let strip_for_callsite model = model
 end)
 
 module AnalysisB = ResultB.Register (struct
@@ -112,13 +110,13 @@ let assert_summaries ~expected summaries =
   assert_equal ~printer:json_printer ~msg:"json summaries" expected summaries
 
 
-let test_unknown_function_analysis _ =
+let test_unknown_function_analysis context =
   let targets =
     List.map ~f:Reference.create ["fun_a"; "fun_b"; "fun_c"]
     |> List.map ~f:(fun name -> Callable.create_function name)
   in
   let step = Fixpoint.{ epoch = 1; iteration = 0 } in
-  let environment = environment () in
+  let environment = setup_environment ~context () in
   let _ = Analysis.one_analysis_pass ~step ~analyses ~environment ~callables:targets in
   let check_obscure_model target =
     match Fixpoint.get_model target with
@@ -128,8 +126,12 @@ let test_unknown_function_analysis _ =
         assert_equal (Result.get_model ResultA.kind models) (Some ResultA.obscure_model);
         assert_equal (Result.get_model ResultB.kind models) (Some ResultB.obscure_model)
   in
-  let externalized_A = List.concat_map ~f:(Analysis.externalize AnalysisA.abstract_kind) targets in
-  let externalized_B = List.concat_map ~f:(Analysis.externalize AnalysisB.abstract_kind) targets in
+  let externalized_A =
+    List.concat_map ~f:(Analysis.externalize ~environment AnalysisA.abstract_kind) targets
+  in
+  let externalized_B =
+    List.concat_map ~f:(Analysis.externalize ~environment AnalysisB.abstract_kind) targets
+  in
   List.iter ~f:check_obscure_model targets;
   assert_summaries
     externalized_A
@@ -163,13 +165,13 @@ let check_meta_data ~step ~is_partial target =
         ~printer:Fixpoint.show_step
 
 
-let test_meta_data _ =
+let test_meta_data context =
   let targets =
     List.map ~f:Reference.create ["fun_a"; "fun_b"; "fun_c"]
     |> List.map ~f:Callable.create_function
   in
   let step1 = Fixpoint.{ epoch = 1; iteration = 0 } in
-  let environment = environment () in
+  let environment = setup_environment ~context () in
   let _ = Analysis.one_analysis_pass ~step:step1 ~analyses ~environment ~callables:targets in
   (* All obscure functions should reach fixpoint in 1st step *)
   let () = List.iter ~f:(check_meta_data ~step:step1 ~is_partial:false) targets in
@@ -177,7 +179,6 @@ let test_meta_data _ =
 
 
 let () =
-  setup_environment ();
   "interproceduralAnalysisTest"
   >::: ["test_obscure" >:: test_unknown_function_analysis; "test_meta_data" >:: test_meta_data]
   |> Test.run

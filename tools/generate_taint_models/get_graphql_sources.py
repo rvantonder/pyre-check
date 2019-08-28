@@ -1,3 +1,10 @@
+# Copyright (c) 2016-present, Facebook, Inc.
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+# pyre-strict
+
 import inspect
 import os
 import types
@@ -52,4 +59,6 @@ class GraphQLSourceGenerator(ModelGenerator):
         return sorted(graphql_models)
 
 
-Registry.register("get_graphql_sources", GraphQLSourceGenerator)
+Registry.register(
+    "get_graphql_sources", GraphQLSourceGenerator, include_by_default=True
+)

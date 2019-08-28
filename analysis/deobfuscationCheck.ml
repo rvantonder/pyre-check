@@ -8,31 +8,17 @@ open Ast
 open Expression
 open Pyre
 open Statement
+open CustomAnalysis
 module Error = AnalysisError
 
 let name = "Deobfuscation"
-
-module NestedDefines = struct
-  type 'state nested = {
-    nested_define: Define.t;
-    state: 'state;
-  }
-
-  and 'state t = 'state nested Location.Reference.Map.t
-
-  let initial = Location.Reference.Map.empty
-
-  let update_nested_defines nested_defines ~statement ~state =
-    match statement with
-    | { Node.location; value = Define nested_define } ->
-        Map.set nested_defines ~key:location ~data:{ nested_define; state }
-    | _ -> nested_defines
-end
 
 module type Context = sig
   val global_resolution : GlobalResolution.t
 
   val transformations : Statement.t list Location.Reference.Table.t
+
+  val errors : LivenessCheck.ErrorMap.t
 end
 
 module ConstantPropagationState (Context : Context) = struct
@@ -59,13 +45,13 @@ module ConstantPropagationState (Context : Context) = struct
 
   let pp format state = Format.fprintf format "%s" (show state)
 
-  let initial ~state ~define =
+  let initial ~state ~lookup:_ ~define =
     let constants =
       match state with
       | Some { constants; _ } -> constants
       | _ -> Reference.Map.empty
     in
-    { constants; define; nested_defines = NestedDefines.initial }
+    { constants; define = define.Node.value; nested_defines = NestedDefines.initial }
 
 
   let nested_defines { nested_defines; _ } = nested_defines
@@ -90,6 +76,8 @@ module ConstantPropagationState (Context : Context) = struct
 
 
   let widen ~previous ~next ~iteration:_ = join previous next
+
+  let update_transformations _ = ()
 
   let forward
       ?key
@@ -222,81 +210,33 @@ module ConstantPropagationState (Context : Context) = struct
     { state with nested_defines }
 
 
-  let backward ?key:_ _ ~statement:_ = failwith "Not implemented"
+  let backward ?key:_ state ~statement:_ = state
 end
 
 module UnusedStoreState (Context : Context) = struct
-  type t = {
-    unused: Location.Reference.Set.t Identifier.Map.t;
-    define: Define.t;
-    nested_defines: t NestedDefines.t;
-  }
+  include LivenessCheck.State (Context)
 
-  let show { unused; _ } = Map.keys unused |> String.concat ~sep:", "
-
-  let pp format state = Format.fprintf format "%s" (show state)
-
-  let initial ~state:_ ~define =
-    { unused = Identifier.Map.empty; define; nested_defines = NestedDefines.initial }
-
-
-  let nested_defines { nested_defines; _ } = nested_defines
-
-  let less_or_equal ~left:{ unused = left; _ } ~right:{ unused = right; _ } =
-    let less_or_equal (reference, location) =
-      match location, Map.find right reference with
-      | left, Some right -> Set.is_subset left ~of_:right
-      | _ -> false
+  let nested_defines { define; _ } =
+    let add_nested nested_defines { Node.location; value = define_value } =
+      Map.set
+        nested_defines
+        ~key:location
+        ~data:
+          {
+            NestedDefines.nested_define = define_value;
+            state = initial ~lookup:(LivenessCheck.NestedDefineLookup.Table.create ()) ~define;
+          }
     in
-    Map.to_alist left |> List.for_all ~f:less_or_equal
+    List.fold ~init:NestedDefines.initial ~f:add_nested (nested_defines_deep_to_shallow define)
 
 
-  let join left right =
-    let merge ~key:_ = function
-      | `Both (left, right) -> Some (Set.union left right)
-      | `Left left -> Some left
-      | `Right right -> Some right
+  let initial ~state:_ = initial
+
+  let update_transformations state =
+    let add_transformation { Error.location; _ } =
+      Hashtbl.set Context.transformations ~key:location ~data:[]
     in
-    { left with unused = Map.merge left.unused right.unused ~f:merge }
-
-
-  let widen ~previous ~next ~iteration:_ = join previous next
-
-  let forward
-      ?key:_
-      ({ unused; nested_defines; _ } as state)
-      ~statement:({ Node.location; value } as statement)
-    =
-    (* Remove used accesses from transformation map. *)
-    let unused =
-      let used_names = Visit.collect_base_identifiers statement |> List.map ~f:Node.value in
-      let used_locations =
-        used_names
-        |> List.filter_map ~f:(Map.find unused)
-        |> List.fold ~f:Set.union ~init:Location.Reference.Set.empty
-        |> Set.to_list
-      in
-      List.iter used_locations ~f:(Hashtbl.remove Context.transformations);
-      List.fold used_names ~f:Map.remove ~init:unused
-    in
-    (* Add assignments to transformation map. *)
-    let unused =
-      match value with
-      | Assign { target = { Node.value = Name (Name.Identifier identifier); _ }; _ } ->
-          let update = function
-            | Some existing -> Set.add existing location
-            | None -> Location.Reference.Set.of_list [location]
-          in
-          Hashtbl.set Context.transformations ~key:location ~data:[];
-          Map.update unused identifier ~f:update
-      | _ -> unused
-    in
-    let state = { state with unused } in
-    let nested_defines = NestedDefines.update_nested_defines nested_defines ~statement ~state in
-    { state with nested_defines }
-
-
-  let backward ?key:_ _ ~statement:_ = failwith "Not implemented"
+    List.iter ~f:add_transformation (errors state)
 end
 
 module type State = sig
@@ -304,9 +244,15 @@ module type State = sig
 
   include Fixpoint.State with type t := t
 
-  val initial : state:t option -> define:Define.t -> t
+  val initial
+    :  state:t option ->
+    lookup:t LivenessCheck.NestedDefineLookup.t ->
+    define:Define.t Node.t ->
+    t
 
   val nested_defines : t -> t NestedDefines.t
+
+  val update_transformations : t -> unit
 end
 
 (* Lol functors... *)
@@ -314,17 +260,21 @@ module Scheduler (State : State) (Context : Context) = struct
   let run source =
     Hashtbl.clear Context.transformations;
     let module Fixpoint = Fixpoint.Make (State) in
+    let lookup = LivenessCheck.NestedDefineLookup.Table.create () in
     let rec run ~state ~define =
-      Fixpoint.forward ~cfg:(Cfg.create define) ~initial:(State.initial ~state ~define)
+      let cfg = Cfg.create define.Node.value in
+      Fixpoint.forward ~cfg ~initial:(State.initial ~state ~lookup ~define)
       |> Fixpoint.exit
+      >>| (fun state -> Fixpoint.backward ~cfg ~initial:state)
+      >>= Fixpoint.entry
       >>| (fun state ->
+            State.update_transformations state;
             State.nested_defines state
-            |> Map.data
-            |> List.iter ~f:(fun { NestedDefines.nested_define; state } ->
-                   run ~state:(Some state) ~define:nested_define))
+            |> Map.iteri ~f:(fun ~key ~data:{ NestedDefines.nested_define; state } ->
+                   run ~state:(Some state) ~define:{ Node.location = key; value = nested_define }))
       |> ignore
     in
-    let define = Source.top_level_define source in
+    let define = Source.top_level_define_node source in
     run ~state:None ~define;
     let module Transform = Transform.MakeStatementTransformer (struct
       type t = unit
@@ -352,6 +302,8 @@ let run ~configuration:_ ~global_resolution ~source:({ Source.qualifier; _ } as 
     let global_resolution = global_resolution
 
     let transformations = Location.Reference.Table.create ()
+
+    let errors = LivenessCheck.ErrorMap.Table.create ()
   end
   in
   (* Constant propagation. *)

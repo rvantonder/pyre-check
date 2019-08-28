@@ -98,13 +98,21 @@ end
 
 (* If we're analyzing generated code, Watchman will be blind to any changes to said code. In order
    to be safe, compute hashes for all files that a fresh Pyre run would analyze. *)
-let compute_locally_changed_paths ~scheduler ~configuration ~module_tracker:old_module_tracker =
+let compute_locally_changed_paths
+    ~scheduler
+    ~configuration
+    ~module_tracker:old_module_tracker
+    ~ast_environment
+  =
   Log.info "Computing files that changed since the saved state was created.";
   let timer = Timer.start () in
   let new_module_tracker = ModuleTracker.create configuration in
   let changed_paths changed new_source_paths =
     let changed_path ({ SourcePath.qualifier; _ } as source_path) =
-      let old_hash = Ast.SharedMemory.Sources.get qualifier >>| Ast.Source.hash in
+      let old_hash =
+        AstEnvironment.ReadOnly.get_source ast_environment qualifier
+        >>| fun { Source.metadata = { Source.Metadata.raw_hash; _ }; _ } -> raw_hash
+      in
       let path = SourcePath.full_path ~configuration source_path in
       let current_hash = File.hash (File.create path) in
       if Option.equal Int.equal old_hash current_hash then
@@ -196,20 +204,27 @@ let load
     | _ -> raise (IncompatibleState "unexpected saved state parameters")
   in
   let scheduler = Scheduler.create ~configuration () in
-  let environment = Environment.shared_handler in
   Memory.load_shared_memory ~path:(Path.absolute shared_memory_path);
+  let module_tracker = ModuleTracker.SharedMemory.load () in
+  let ast_environment = AstEnvironment.load module_tracker in
+  let environment =
+    Analysis.Environment.shared_memory_handler (AstEnvironment.read_only ast_environment)
+  in
   let old_configuration = StoredConfiguration.load () in
   if not (Configuration.Analysis.equal old_configuration configuration) then
     raise (IncompatibleState "configuration mismatch");
-  let module_tracker = ModuleTracker.SharedMemory.load () in
-  let ast_environment = AstEnvironment.load module_tracker in
   let symlink_targets_to_sources = SymlinkTargetsToSources.load () in
   let changed_paths =
     match changed_paths with
     | Some changed_paths ->
         restore_symbolic_links ~changed_paths ~local_root ~get_old_link_path:(fun path ->
             Hashtbl.find symlink_targets_to_sources (Path.absolute path))
-    | None -> compute_locally_changed_paths ~scheduler ~configuration ~module_tracker
+    | None ->
+        compute_locally_changed_paths
+          ~scheduler
+          ~configuration
+          ~module_tracker
+          ~ast_environment:(AstEnvironment.read_only ast_environment)
   in
   let errors = ServerErrors.load () in
   let state =
@@ -224,7 +239,7 @@ let load
       last_integrity_check = Unix.time ();
       connections;
       lookups = String.Table.create ();
-      open_documents = Path.Map.empty;
+      open_documents = Reference.Table.create ();
     }
   in
   Log.info "Reanalyzing %d files and their dependencies." (List.length changed_paths);

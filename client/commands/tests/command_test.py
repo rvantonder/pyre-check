@@ -31,6 +31,7 @@ def mock_arguments(
     store_type_check_resolution=False,
 ) -> MagicMock:
     arguments = MagicMock()
+    arguments.analysis = "taint"
     arguments.build = build
     arguments.command = command
     arguments.current_directory = "."
@@ -62,7 +63,7 @@ def mock_arguments(
     arguments.terminal = terminal
     arguments.verbose = False
     arguments.nonblocking = False
-    arguments.transitive = False
+    arguments.incremental_style = commands.IncrementalStyle.SHALLOW
     arguments.store_type_check_resolution = store_type_check_resolution
     return arguments
 

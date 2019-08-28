@@ -33,14 +33,13 @@ let populate
 
     (* Build type order. *)
     List.iter ~f:(Environment.connect_type_order environment resolution) sources;
-    let order = Environment.class_hierarchy environment in
-    ClassHierarchy.deduplicate order ~annotations:all_annotations;
+    Environment.deduplicate_class_hierarchy ~annotations:all_annotations;
     if debug then
       (* Validate integrity of the type order built so far before moving forward. Further
          transformations might be incorrect or not terminate otherwise. *)
-      ClassHierarchy.check_integrity order;
-    ClassHierarchy.connect_annotations_to_object order all_annotations;
-    ClassHierarchy.remove_extra_edges_to_object order all_annotations;
+      Environment.check_class_hierarchy_integrity ();
+    Environment.connect_annotations_to_object all_annotations;
+    Environment.remove_extra_edges_to_object all_annotations;
     List.iter all_annotations ~f:(Environment.register_class_metadata environment);
     List.iter ~f:(Environment.propagate_nested_classes environment) sources
   in
@@ -71,13 +70,12 @@ let populate
   Annotated.Class.AttributeCache.clear ()
 
 
-let build environment ~configuration ~scheduler qualifiers =
+let build environment ~configuration ~scheduler sources =
   Log.info "Building type environment...";
 
   (* This grabs all sources from shared memory. It is unavoidable: Environment must be built
      sequentially until we find a way to build the environment in parallel. *)
   let timer = Timer.start () in
-  let sources = List.filter_map qualifiers ~f:Ast.SharedMemory.Sources.get in
   populate ~configuration ~scheduler environment sources;
   Statistics.performance ~name:"full environment built" ~timer ();
   if Log.is_enabled `Dotty then (
@@ -87,31 +85,30 @@ let build environment ~configuration ~scheduler qualifiers =
         ~relative:"type_order.dot"
     in
     Log.info "Emitting type order dotty file to %s" (Path.absolute type_order_file);
-    let hierarchy = Environment.class_hierarchy environment in
-    File.create ~content:(ClassHierarchy.to_dot hierarchy) type_order_file |> File.write )
+    File.create ~content:(Environment.class_hierarchy_dot ()) type_order_file |> File.write )
 
-
-let shared_handler = Environment.shared_memory_handler ()
 
 (** First dumps environment to shared memory, then exposes through Environment_handler *)
 let populate_shared_memory
     ~configuration:({ Configuration.Analysis.debug; _ } as configuration)
     ~scheduler
-    qualifiers
+    ~ast_environment
+    sources
   =
   Log.info "Adding built-in environment information to shared memory...";
   let timer = Timer.start () in
+  let shared_handler = Environment.shared_memory_handler ast_environment in
   Environment.fill_shared_memory_with_default_typeorder ();
   Environment.add_special_classes shared_handler;
   Environment.add_dummy_modules shared_handler;
   Environment.add_special_globals shared_handler;
   Statistics.performance ~name:"added environment to shared memory" ~timer ();
-  build shared_handler ~configuration ~scheduler qualifiers;
+  build shared_handler ~configuration ~scheduler sources;
   if debug then (
-    let order = Environment.class_hierarchy shared_handler in
-    ClassHierarchy.check_integrity order;
+    Environment.check_class_hierarchy_integrity ();
     Statistics.event
       ~section:`Memory
       ~name:"shared memory size"
-      ~integers:["size", Ast.SharedMemory.heap_size ()]
-      () )
+      ~integers:["size", Memory.heap_size ()]
+      () );
+  shared_handler

@@ -15,11 +15,7 @@ module TextDocumentDefinitionRequest : module type of Types.TextDocumentDefiniti
 module PublishDiagnostics : sig
   type t [@@deriving yojson]
 
-  val of_errors
-    :  configuration:Configuration.Analysis.t ->
-    string ->
-    TypeCheck.Error.t list ->
-    t Or_error.t
+  val of_errors : Path.t -> TypeCheck.Error.Instantiated.t list -> t
   (** Turn a type check error into a PublishDiagnostics notification *)
 
   val clear_diagnostics_for_uri : uri:string -> t
@@ -83,10 +79,13 @@ module TextDocumentDefinitionResponse : sig
   type t [@@deriving to_yojson]
 
   val create
-    :  configuration:Configuration.Analysis.t ->
-    id:Types.RequestId.t ->
-    location:Ast.Location.Instantiated.t option ->
+    :  id:Types.RequestId.t ->
+    start:Ast.Location.position ->
+    stop:Ast.Location.position ->
+    path:Path.t ->
     t
+
+  val create_empty : id:Types.RequestId.t -> t
 end
 
 module HoverResponse : sig

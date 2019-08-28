@@ -147,7 +147,8 @@ let test_check_undefined_type context =
       def foo() -> Foo["Herp"]:
         return 1
     |}
-    [ "Missing parameter annotation [2]: Parameter `other` has no type specified.";
+    [ "Missing return annotation [3]: Return type must be specified as type other than `Any`.";
+      "Missing parameter annotation [2]: Parameter `other` has no type specified.";
       "Undefined type [11]: Type `Herp` is not defined." ];
 
   (* Attributes *)
@@ -228,16 +229,15 @@ let test_check_undefined_type context =
     ["Undefined type [11]: Type `Derp` is not defined."];
   assert_type_errors
     {|
-      Derp: typing.Any
+      Derp = typing.Any
       Herp = typing.List[typing.Any]
       def foo() -> None:
         x: int = 1
         typing.cast(Derp, x)
         typing.cast(Herp, x)
     |}
-    [ "Missing global annotation [5]: Globally accessible variable `Derp` "
-      ^ "must be specified as type other than `Any`.";
-      "Prohibited any [33]: Explicit annotation for `Herp` cannot contain `Any`." ];
+    [ "Prohibited any [33]: `Derp` cannot alias to `Any`.";
+      "Prohibited any [33]: `Herp` cannot alias to a type containing `Any`." ];
   assert_type_errors
     {|
       def foo() -> None:
@@ -257,6 +257,10 @@ let test_check_invalid_type context =
   let assert_strict_type_errors = assert_strict_type_errors ~context in
   assert_type_errors {|
       MyType = int
+      x: MyType = 1
+    |} [];
+  assert_type_errors {|
+      MyType: typing.TypeAlias = int
       x: MyType = 1
     |} [];
   assert_type_errors
@@ -291,14 +295,20 @@ let test_check_invalid_type context =
       x: MyType = 1
     |}
     [ "Missing global annotation [5]: Globally accessible variable `MyType` "
-      ^ "must be specified as type other than `Any`." ];
+      ^ "must be specified as type other than `Any`.";
+      "Invalid type [31]: Expression `MyType` is not a valid type." ];
   assert_type_errors
     {|
-      MyType: typing.Any
+      MyType = typing.Any
+      x: MyType = 1
+    |}
+    ["Prohibited any [33]: `MyType` cannot alias to `Any`."];
+  assert_type_errors
+    {|
+      MyType = typing.Any
       x: typing.List[MyType] = [1]
     |}
-    [ "Missing global annotation [5]: Globally accessible variable `MyType` "
-      ^ "must be specified as type other than `Any`." ];
+    ["Prohibited any [33]: `MyType` cannot alias to `Any`."];
 
   (* Un-parseable expressions *)
   assert_type_errors
@@ -557,7 +567,7 @@ let test_check_immutable_annotations context =
       def foo(x: str = bar()) -> str:
         return x
     |}
-    [];
+    ["Missing return annotation [3]: Return type must be specified as type other than `Any`."];
   assert_type_errors
     {|
       constant: int
@@ -893,6 +903,12 @@ let test_check_incomplete_annotations context =
         x: typing.Dict[str, typing.Any] = {}
     |}
     [];
+  assert_type_errors
+    {|
+      def foo() -> None:
+        x: typing.List[typing.Dict[str, typing.Any]] = []
+    |}
+    [];
   assert_default_type_errors
     {|
       def foo() -> None:
@@ -1141,7 +1157,63 @@ let test_check_aliases context =
       foo(FOO())
     |}
     [ "Incompatible return type [7]: Expected `int` but got `unknown`.";
-      "Undefined attribute [16]: `BAR` has no attribute `x`." ]
+      "Undefined attribute [16]: `BAR` has no attribute `x`." ];
+
+  (* Locals are not aliases *)
+  assert_type_errors
+    ~context
+    {|
+      def foo() -> None:
+        x = int
+        y: x = 1
+    |}
+    ["Invalid type [31]: Expression `foo.x` is not a valid type."];
+
+  assert_type_errors ~context {|
+      def foo(type: int) -> None:
+        x = type
+    |} [];
+
+  (* Aliases to undefined types *)
+  assert_type_errors
+    ~context
+    {|
+      import typing
+      MyAlias = typing.Union[int, UndefinedName]
+    |}
+    [ "Missing global annotation [5]: Globally accessible variable `MyAlias` has no type specified.";
+      "Undefined attribute [16]: Module `typing` has no attribute `Union`." ];
+  assert_type_errors
+    ~context
+    {|
+      import typing
+      MyAlias: typing.TypeAlias = typing.Union[int, UndefinedName]
+    |}
+    ["Undefined type [11]: Type `UndefinedName` is not defined."];
+  assert_type_errors
+    ~context
+    {|
+      import typing
+      MyAlias: typing.TypeAlias = typing.Union[int, "UndefinedName"]
+    |}
+    ["Undefined type [11]: Type `UndefinedName` is not defined."];
+
+  (* Aliases to invalid types *)
+  assert_type_errors
+    ~context
+    {|
+      import typing
+      MyAlias = typing.Union[int, 3]
+    |}
+    [ "Missing global annotation [5]: Globally accessible variable `MyAlias` has no type specified.";
+      "Undefined attribute [16]: Module `typing` has no attribute `Union`." ];
+  assert_type_errors
+    ~context
+    {|
+      import typing
+      MyAlias: typing.TypeAlias = typing.Union[int, 3]
+    |}
+    []
 
 
 let test_final_type context =
@@ -1178,6 +1250,24 @@ let test_check_invalid_inheritance context =
   ()
 
 
+let test_check_safe_cast context =
+  assert_type_errors
+    ~context
+    {|
+      def foo(input: float) -> int:
+        return pyre_extensions.safe_cast(int, input)
+    |}
+    [ "Unsafe cast [49]: `safe_cast` is only permitted to loosen the type of `input`. `float` is \
+       not a super type of `input`." ];
+  assert_type_errors
+    ~context
+    {|
+        def foo(input: int) -> float:
+          return pyre_extensions.safe_cast(float, input)
+    |}
+    []
+
+
 let () =
   "annotation"
   >::: [ "check_undefined_type" >:: test_check_undefined_type;
@@ -1191,5 +1281,6 @@ let () =
          "check_refinement" >:: test_check_refinement;
          "check_aliases" >:: test_check_aliases;
          "check_final_type" >:: test_final_type;
-         "check_invalid_inheritance" >:: test_check_invalid_inheritance ]
+         "check_invalid_inheritance" >:: test_check_invalid_inheritance;
+         "check_safe_cast" >:: test_check_safe_cast ]
   |> Test.run

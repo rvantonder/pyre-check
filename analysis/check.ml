@@ -23,10 +23,13 @@ let checks : (module Signature) String.Map.t =
       "deobfuscation", (module DeobfuscationCheck);
       "immutable_collection", (module ImmutableCollectionCheck);
       "inference", (module Inference);
+      "liveness", (module LivenessCheck);
       "typeCheck", (module TypeCheck) ]
   in
   String.Map.of_alist_exn checks
 
+
+let get_check_to_run ~check_name = Map.find checks check_name
 
 let checks ~configuration:{ Configuration.Analysis.infer; additional_checks; _ }
     : (module Signature) list
